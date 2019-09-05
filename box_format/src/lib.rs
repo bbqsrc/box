@@ -89,27 +89,33 @@ pub struct BoxMetadata {
     attrs: HashMap<String, Vec<u8>>,
 }
 
+impl BoxMetadata {
+    pub fn records(&self) -> &[RecordHeader] {
+        &*self.records
+    }
+}
+
 #[derive(Debug)]
 pub struct RecordHeader {
     /// a bytestring representing the type of compression being used, always 8 bytes.
-    compression: Compression,
+    pub compression: Compression,
 
     /// The exact length of the data as written, ignoring any padding.
-    length: u64,
+    pub length: u64,
 
     /// A hint for the size of the content when decompressed. Do not trust in absolute terms.
-    decompressed_length: u64,
+    pub decompressed_length: u64,
 
     /// The position of the data in the file
-    data: NonZeroU64,
+    pub data: NonZeroU64,
 
     /// The path of the file. A path is always relative (no leading slash),
     /// always delimited by forward slashes ("`/`"), and may not contain
     /// any `.` or `..` path chunks.
-    path: String,
+    pub path: String,
 
     /// Optional attributes for the given paths, such as Windows or Unix ACLs, last accessed time, etc.
-    attrs: HashMap<String, Vec<u8>>,
+    pub attrs: HashMap<String, Vec<u8>>,
 }
 
 trait Serialize {
@@ -398,10 +404,18 @@ mod tests {
         let v = "This, this, this, this, this is a compressable string string string string string.".to_string();
         
         {
+            use std::time::SystemTime;
+            let now = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs().to_le_bytes();
+
             let mut bf = BoxFile::create(&filename).expect("Mah box");
-            bf.insert(Compression::Zstd, "test/string.txt", v.clone())
+            let mut attrs = HashMap::new();
+
+            attrs.insert("created".to_string(), now.to_vec());
+            attrs.insert("unix.acl".to_string(), 0o644u16.to_le_bytes().to_vec());
+
+            bf.insert(Compression::Zstd, "test/string.txt", v.clone(), attrs.clone())
                 .unwrap();
-            bf.insert(Compression::Deflate, "test/string2.txt", v.clone())
+            bf.insert(Compression::Deflate, "test/string2.txt", v.clone(), attrs.clone())
                 .unwrap();
             println!("{:?}", &bf);
         }
@@ -465,10 +479,9 @@ impl BoxFile {
         Ok(boxfile)
     }
 
-    /// Will return the metadata for the `.box` if it has been provided. It may not exist if this file
-    /// is in the process of being created, or has been loaded with invalid data.
-    pub fn metadata(&mut self) -> std::io::Result<BoxMetadata> {
-        self.read_trailer()
+    /// Will return the metadata for the `.box` if it has been provided.
+    pub fn metadata(&self) -> &BoxMetadata {
+        &self.meta
     }
 
     #[inline(always)]
@@ -492,15 +505,32 @@ impl BoxFile {
         compression.decompress(std::io::Cursor::new(mmap))
     }
 
+    pub fn set_attr<P: AsRef<str>, S: AsRef<str>>(&mut self, path: P, key: S, value: Vec<u8>) -> Result<()> {
+        let path = path.as_ref();
+        let key = key.as_ref().to_string();
+
+        if let Some(record) = self.meta.records.iter_mut().find(|r| r.path == path) {
+            record.attrs.insert(key, value);
+        }
+
+        Ok(())
+    }
+
     pub fn insert<P: AsRef<str>, V: Compress>(
         &mut self,
         compression: Compression,
         path: P,
         value: V,
+        attrs: HashMap<String, Vec<u8>>
     ) -> std::io::Result<()> {
         let path = path.as_ref().to_string();
         let data = self.next_write_addr();
         let bytes = self.write_data::<V>(compression, data.get(), value)?;
+
+        // Check there isn't already a record for this path
+        if self.meta.records.iter().any(|x| x.path == path) {
+            return Err(std::io::Error::new(std::io::ErrorKind::AlreadyExists, "path already found"));
+        }
 
         let header = RecordHeader {
             compression,
@@ -508,7 +538,7 @@ impl BoxFile {
             decompressed_length: bytes.read,
             path,
             data,
-            attrs: HashMap::new(),
+            attrs,
         };
 
         self.meta.records.push(header);
