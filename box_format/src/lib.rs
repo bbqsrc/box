@@ -1,71 +1,59 @@
 use std::collections::HashMap;
 use std::default::Default;
 use std::fs::OpenOptions;
-use std::io::{prelude::*, SeekFrom};
+use std::io::{prelude::*, SeekFrom, Result};
 use std::num::NonZeroU64;
 use std::path::Path;
 
+use memmap::MmapOptions;
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use comde::{
+    stored::{StoredCompressor, StoredDecompressor},
     zstd::{ZstdCompressor, ZstdDecompressor},
-    Compress, Compressor, Decompress, Decompressor,
+    deflate::{DeflateCompressor, DeflateDecompressor},
+    Compress, Compressor, Decompress, Decompressor, ByteCount,
 };
 
-pub trait CompressionMethod<V>
-where
-    V: Compress + Decompress,
-{
-    type Compressor: Compressor<V>;
-    type Decompressor: Decompressor<V>;
-
-    fn id() -> u32;
-    fn compressor() -> Self::Compressor;
-    fn decompressor() -> Self::Decompressor;
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum Compression {
+    Stored,
+    Deflate,
+    Zstd,
+    Unknown(u32)
 }
 
-impl<V: Compress + Decompress> CompressionMethod<V> for ZstdCompressor {
-    type Compressor = ZstdCompressor;
-    type Decompressor = ZstdDecompressor;
+impl Compression {
+    pub fn id(self) -> u32 {
+        use Compression::*;
 
-    fn id() -> u32 {
-        COMPRESSION_ZSTD
+        match self {
+            Stored => 0x0000_0000,
+            Deflate => 0x0001_0000,
+            Zstd => 0x0002_0000,
+            Unknown(id) => id,
+        }
     }
 
-    fn compressor() -> Self::Compressor {
-        ZstdCompressor
+    fn compress<W: Write + Seek, V: Compress>(&self, writer: W, data: V) -> Result<ByteCount> {
+        use Compression::*;
+
+        match self {
+            Stored => StoredCompressor.compress(writer, data),
+            Deflate => DeflateCompressor.compress(writer, data),
+            Zstd => ZstdCompressor.compress(writer, data),
+            Unknown(id) => return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, format!("Cannot handle compression with id {}", id)))
+        }
     }
 
-    fn decompressor() -> Self::Decompressor {
-        ZstdDecompressor
-    }
-}
+    fn decompress<R: Read, V: Decompress>(&self, reader: R) -> Result<V> {
+        use Compression::*;
 
-#[derive(Debug, Copy, Clone)]
-pub struct NoDecompressor;
-
-impl<V: Decompress> Decompressor<V> for NoDecompressor {
-    fn new() -> Self {
-        NoDecompressor
-    }
-
-    fn decompress(&self, data: &[u8]) -> Result<V, Box<dyn std::error::Error>> {
-        V::from_bytes(data.to_vec())
-    }
-}
-
-#[derive(Debug, Copy, Clone)]
-pub struct NoCompressor;
-
-impl<V: Compress> Compressor<V> for NoCompressor {
-    fn new() -> Self {
-        NoCompressor
-    }
-
-    fn compress<D: std::borrow::Borrow<V>>(
-        &self,
-        data: D,
-    ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
-        Ok(data.borrow().as_bytes().to_vec())
+        match self {
+            Stored => StoredDecompressor.from_reader(reader),
+            Deflate => DeflateDecompressor.from_reader(reader),
+            Zstd => ZstdDecompressor.from_reader(reader),
+            Unknown(id) => return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, format!("Cannot handle decompression with id {}", id)))
+        }
     }
 }
 
@@ -73,6 +61,7 @@ impl<V: Compress> Compressor<V> for NoCompressor {
 struct FileHeader {
     magic_bytes: [u8; 4],
     version: u32,
+    alignment: Option<NonZeroU64>,
     trailer: Option<NonZeroU64>,
 }
 
@@ -81,6 +70,7 @@ impl FileHeader {
         FileHeader {
             magic_bytes: *b"BOX\0",
             version: 0x0,
+            alignment: None,
             trailer,
         }
     }
@@ -94,7 +84,6 @@ impl Default for FileHeader {
 
 #[derive(Debug, Default)]
 pub struct BoxMetadata {
-    alignment: Option<NonZeroU64>,
     records: Vec<RecordHeader>,
     // a sneaky u64 here for key-value pair length, with each of the keys and value pairs prefixed with their own u64 lengths
     attrs: HashMap<String, Vec<u8>>,
@@ -103,7 +92,7 @@ pub struct BoxMetadata {
 #[derive(Debug)]
 pub struct RecordHeader {
     /// a bytestring representing the type of compression being used, always 8 bytes.
-    compression: u32,
+    compression: Compression,
 
     /// The exact length of the data as written, ignoring any padding.
     length: u64,
@@ -131,6 +120,30 @@ trait DeserializeOwned {
     fn deserialize_owned<R: Read>(reader: &mut R) -> std::io::Result<Self>
     where
         Self: Sized;
+}
+
+impl Serialize for Compression {
+    fn write<W: Write>(&self, writer: &mut W) -> std::io::Result<()> {
+        writer.write_u32::<LittleEndian>(self.id())
+    }
+}
+
+impl DeserializeOwned for Compression {
+    fn deserialize_owned<R: Read>(reader: &mut R) -> std::io::Result<Self>
+    where
+        Self: Sized,
+    {
+        let id = reader.read_u32::<LittleEndian>()?;
+
+        use Compression::*;
+
+        Ok(match id {
+            0x0000_0000 => Stored,
+            0x0001_0000 => Deflate,
+            0x0002_0000 => Zstd,
+            id => Unknown(id)
+        })
+    }
 }
 
 impl Serialize for String {
@@ -234,7 +247,7 @@ where
 
 impl Serialize for RecordHeader {
     fn write<W: Write>(&self, writer: &mut W) -> std::io::Result<()> {
-        writer.write_u32::<LittleEndian>(self.compression)?;
+        writer.write_u32::<LittleEndian>(self.compression.id())?;
         writer.write_u64::<LittleEndian>(self.length)?;
         writer.write_u64::<LittleEndian>(self.decompressed_length)?;
 
@@ -247,7 +260,7 @@ impl Serialize for RecordHeader {
 
 impl DeserializeOwned for RecordHeader {
     fn deserialize_owned<R: Read>(reader: &mut R) -> std::io::Result<Self> {
-        let compression = reader.read_u32::<LittleEndian>()?;
+        let compression = Compression::deserialize_owned(reader)?;
         let length = reader.read_u64::<LittleEndian>()?;
         let decompressed_length = reader.read_u64::<LittleEndian>()?;
         let path = String::deserialize_owned(reader)?;
@@ -269,6 +282,7 @@ impl Serialize for FileHeader {
     fn write<W: Write>(&self, writer: &mut W) -> std::io::Result<()> {
         writer.write_all(&self.magic_bytes)?;
         writer.write_u32::<LittleEndian>(self.version)?;
+        writer.write_u64::<LittleEndian>(self.alignment.map(|x| x.get()).unwrap_or(0))?;
         writer.write_u64::<LittleEndian>(self.trailer.map(|x| x.get()).unwrap_or(0))
     }
 }
@@ -285,11 +299,13 @@ impl DeserializeOwned for FileHeader {
         }
 
         let version = reader.read_u32::<LittleEndian>()?;
+        let alignment = NonZeroU64::new(reader.read_u64::<LittleEndian>()?);
         let trailer = reader.read_u64::<LittleEndian>()?;
 
         Ok(FileHeader {
             magic_bytes,
             version,
+            alignment,
             trailer: NonZeroU64::new(trailer),
         })
     }
@@ -297,7 +313,6 @@ impl DeserializeOwned for FileHeader {
 
 impl Serialize for BoxMetadata {
     fn write<W: Write>(&self, writer: &mut W) -> std::io::Result<()> {
-        writer.write_u64::<LittleEndian>(self.alignment.map(|x| x.get()).unwrap_or(0))?;
         self.records.write(writer)?;
         self.attrs.write(writer)
     }
@@ -305,12 +320,10 @@ impl Serialize for BoxMetadata {
 
 impl DeserializeOwned for BoxMetadata {
     fn deserialize_owned<R: Read>(reader: &mut R) -> std::io::Result<Self> {
-        let alignment = NonZeroU64::new(reader.read_u64::<LittleEndian>()?);
         let records = Vec::deserialize_owned(reader)?;
         let attrs = HashMap::deserialize_owned(reader)?;
 
         Ok(BoxMetadata {
-            alignment,
             records,
             attrs,
         })
@@ -329,12 +342,12 @@ mod tests {
         let data = b"hello\0\0\0";
 
         let mut header = FileHeader::default();
+        // header.alignment = NonZeroU64::new(8);
         let mut trailer = BoxMetadata::default();
-        trailer.alignment = NonZeroU64::new(8);
         trailer.records.push(RecordHeader {
-            compression: 0,
-            length: 8,
-            decompressed_length: 8,
+            compression: Compression::Stored,
+            length: data.len() as u64,
+            decompressed_length: data.len() as u64,
             data: NonZeroU64::new(std::mem::size_of::<FileHeader>() as u64).unwrap(),
             path: "hello.txt".into(),
             attrs: HashMap::new(),
@@ -383,21 +396,23 @@ mod tests {
         let filename = "./insert_garbage.box";
         let _ = std::fs::remove_file(&filename);
         let v = "This, this, this, this, this is a compressable string string string string string.".to_string();
+        
         {
             let mut bf = BoxFile::create(&filename).expect("Mah box");
-            bf.insert::<ZstdCompressor, String, &str>("test/string.txt", v.clone())
+            bf.insert(Compression::Zstd, "test/string.txt", v.clone())
+                .unwrap();
+            bf.insert(Compression::Deflate, "test/string2.txt", v.clone())
                 .unwrap();
             println!("{:?}", &bf);
         }
 
         let bf = BoxFile::open(&filename).expect("Mah box");
-        println!("{:?}", &bf);
+        println!("{:#?}", &bf);
 
-        assert_eq!(v, bf.data::<ZstdCompressor, String>(&bf.meta.records[0]).unwrap())
+        assert_eq!(v, bf.data::<String>(Compression::Zstd, &bf.meta.records[0]).unwrap());
+        assert_eq!(v, bf.data::<String>(Compression::Deflate, &bf.meta.records[1]).unwrap());
     }
 }
-
-use memmap::MmapOptions;
 
 #[derive(Debug)]
 pub struct BoxFile {
@@ -468,31 +483,29 @@ impl BoxFile {
         .unwrap()
     }
 
-    pub fn data<C: CompressionMethod<V>, V: Compress + Decompress>(
+    pub fn data<V: Decompress>(
         &self,
+        compression: Compression,
         record: &RecordHeader,
-    ) -> Result<V, Box<dyn std::error::Error>> {
+    ) -> std::io::Result<V> {
         let mmap = self.read_data(record)?;
-        C::decompressor().decompress(&*mmap)
+        compression.decompress(std::io::Cursor::new(mmap))
     }
 
-    pub fn insert<C: CompressionMethod<V>, V: Compress + Decompress, P: AsRef<str>>(
+    pub fn insert<P: AsRef<str>, V: Compress>(
         &mut self,
+        compression: Compression,
         path: P,
         value: V,
     ) -> std::io::Result<()> {
         let path = path.as_ref().to_string();
-        let bytes = value.as_bytes().len();
         let data = self.next_write_addr();
-
-        // TODO: compressor should write directly
-        let compressed = C::compressor().compress(value).unwrap();
-        self.write_data(data.get(), &compressed)?;
+        let bytes = self.write_data::<V>(compression, data.get(), value)?;
 
         let header = RecordHeader {
-            compression: C::id(),
-            length: compressed.len() as u64,
-            decompressed_length: bytes as u64,
+            compression,
+            length: bytes.write,
+            decompressed_length: bytes.read,
             path,
             data,
             attrs: HashMap::new(),
@@ -528,9 +541,9 @@ impl BoxFile {
     }
 
     #[inline(always)]
-    fn write_data(&mut self, pos: u64, data: &[u8]) -> std::io::Result<()> {
+    fn write_data<V: Compress>(&mut self, compression: Compression, pos: u64, reader: V) -> std::io::Result<comde::com::ByteCount> {
         self.file.seek(SeekFrom::Start(pos))?;
-        self.file.write_all(&data)
+        compression.compress(&mut self.file, reader)
     }
 
     #[inline(always)]
@@ -553,7 +566,3 @@ impl BoxFile {
         }
     }
 }
-
-const COMPRESSION_NONE: u32 = 0x0000_0000;
-const COMPRESSION_DEFLATE: u32 = 0x0001_0000;
-const COMPRESSION_ZSTD: u32 = 0x0002_0000;
