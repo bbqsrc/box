@@ -84,19 +84,19 @@ impl Default for FileHeader {
 
 #[derive(Debug, Default)]
 pub struct BoxMetadata {
-    records: Vec<RecordHeader>,
+    records: Vec<FileRecord>,
     // a sneaky u64 here for key-value pair length, with each of the keys and value pairs prefixed with their own u64 lengths
     attrs: HashMap<String, Vec<u8>>,
 }
 
 impl BoxMetadata {
-    pub fn records(&self) -> &[RecordHeader] {
+    pub fn records(&self) -> &[FileRecord] {
         &*self.records
     }
 }
 
 #[derive(Debug)]
-pub struct RecordHeader {
+pub struct FileRecord {
     /// a bytestring representing the type of compression being used, always 8 bytes.
     pub compression: Compression,
 
@@ -251,7 +251,7 @@ where
     }
 }
 
-impl Serialize for RecordHeader {
+impl Serialize for FileRecord {
     fn write<W: Write>(&self, writer: &mut W) -> std::io::Result<()> {
         writer.write_u32::<LittleEndian>(self.compression.id())?;
         writer.write_u64::<LittleEndian>(self.length)?;
@@ -264,7 +264,7 @@ impl Serialize for RecordHeader {
     }
 }
 
-impl DeserializeOwned for RecordHeader {
+impl DeserializeOwned for FileRecord {
     fn deserialize_owned<R: Read>(reader: &mut R) -> std::io::Result<Self> {
         let compression = Compression::deserialize_owned(reader)?;
         let length = reader.read_u64::<LittleEndian>()?;
@@ -273,7 +273,7 @@ impl DeserializeOwned for RecordHeader {
         let attrs = HashMap::deserialize_owned(reader)?;
         let data = reader.read_u64::<LittleEndian>()?;
 
-        Ok(RecordHeader {
+        Ok(FileRecord {
             compression,
             length,
             decompressed_length,
@@ -350,7 +350,7 @@ mod tests {
         let mut header = FileHeader::default();
         // header.alignment = NonZeroU64::new(8);
         let mut trailer = BoxMetadata::default();
-        trailer.records.push(RecordHeader {
+        trailer.records.push(FileRecord {
             compression: Compression::Stored,
             length: data.len() as u64,
             decompressed_length: data.len() as u64,
@@ -413,9 +413,9 @@ mod tests {
             attrs.insert("created".to_string(), now.to_vec());
             attrs.insert("unix.acl".to_string(), 0o644u16.to_le_bytes().to_vec());
 
-            bf.insert(Compression::Zstd, "test/string.txt", v.clone(), attrs.clone())
+            bf.insert(Compression::Zstd, "test\x1fstring.txt", v.clone(), attrs.clone())
                 .unwrap();
-            bf.insert(Compression::Deflate, "test/string2.txt", v.clone(), attrs.clone())
+            bf.insert(Compression::Deflate, "test\x1fstring2.txt", v.clone(), attrs.clone())
                 .unwrap();
             println!("{:?}", &bf);
         }
@@ -499,7 +499,7 @@ impl BoxFile {
     pub fn data<V: Decompress>(
         &self,
         compression: Compression,
-        record: &RecordHeader,
+        record: &FileRecord,
     ) -> std::io::Result<V> {
         let mmap = self.read_data(record)?;
         compression.decompress(std::io::Cursor::new(mmap))
@@ -532,7 +532,7 @@ impl BoxFile {
             return Err(std::io::Error::new(std::io::ErrorKind::AlreadyExists, "path already found"));
         }
 
-        let header = RecordHeader {
+        let header = FileRecord {
             compression,
             length: bytes.write,
             decompressed_length: bytes.read,
@@ -587,7 +587,7 @@ impl BoxFile {
     }
 
     #[inline(always)]
-    fn read_data(&self, header: &RecordHeader) -> std::io::Result<memmap::Mmap> {
+    fn read_data(&self, header: &FileRecord) -> std::io::Result<memmap::Mmap> {
         unsafe {
             MmapOptions::new()
                 .offset(header.data.get())
