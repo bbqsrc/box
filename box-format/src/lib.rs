@@ -1,25 +1,25 @@
 use std::collections::HashMap;
 use std::default::Default;
 use std::fs::OpenOptions;
-use std::io::{prelude::*, SeekFrom, Result};
+use std::io::{prelude::*, Result, SeekFrom};
 use std::num::NonZeroU64;
 use std::path::Path;
 
-use memmap::MmapOptions;
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use comde::{
+    deflate::{DeflateCompressor, DeflateDecompressor},
     stored::{StoredCompressor, StoredDecompressor},
     zstd::{ZstdCompressor, ZstdDecompressor},
-    deflate::{DeflateCompressor, DeflateDecompressor},
-    Compress, Compressor, Decompress, Decompressor, ByteCount,
+    ByteCount, Compress, Compressor, Decompress, Decompressor,
 };
+use memmap::MmapOptions;
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum Compression {
     Stored,
     Deflate,
     Zstd,
-    Unknown(u32)
+    Unknown(u32),
 }
 
 impl Compression {
@@ -27,9 +27,9 @@ impl Compression {
         use Compression::*;
 
         match self {
-            Stored => 0x0000_0000,
-            Deflate => 0x0001_0000,
-            Zstd => 0x0002_0000,
+            Stored => 0x00_0000,
+            Deflate => 0x01_0000,
+            Zstd => 0x02_0000,
             Unknown(id) => id,
         }
     }
@@ -41,7 +41,12 @@ impl Compression {
             Stored => StoredCompressor.compress(writer, data),
             Deflate => DeflateCompressor.compress(writer, data),
             Zstd => ZstdCompressor.compress(writer, data),
-            Unknown(id) => return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, format!("Cannot handle compression with id {}", id)))
+            Unknown(id) => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!("Cannot handle compression with id {}", id),
+                ))
+            }
         }
     }
 
@@ -52,8 +57,31 @@ impl Compression {
             Stored => StoredDecompressor.from_reader(reader),
             Deflate => DeflateDecompressor.from_reader(reader),
             Zstd => ZstdDecompressor.from_reader(reader),
-            Unknown(id) => return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, format!("Cannot handle decompression with id {}", id)))
+            Unknown(id) => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!("Cannot handle decompression with id {}", id),
+                ))
+            }
         }
+    }
+
+    fn decompress_write<R: Read, W: Write>(&self, reader: R, writer: W) -> Result<()> {
+        use Compression::*;
+
+        match self {
+            Stored => StoredDecompressor.copy(reader, writer),
+            Deflate => DeflateDecompressor.copy(reader, writer),
+            Zstd => ZstdDecompressor.copy(reader, writer),
+            Unknown(id) => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!("Cannot handle decompression with id {}", id),
+                ))
+            }
+        }?;
+
+        Ok(())
     }
 }
 
@@ -84,15 +112,74 @@ impl Default for FileHeader {
 
 #[derive(Debug, Default)]
 pub struct BoxMetadata {
-    records: Vec<FileRecord>,
+    records: Vec<Record>,
     // a sneaky u64 here for key-value pair length, with each of the keys and value pairs prefixed with their own u64 lengths
     attrs: HashMap<String, Vec<u8>>,
 }
 
 impl BoxMetadata {
-    pub fn records(&self) -> &[FileRecord] {
+    pub fn records(&self) -> &[Record] {
         &*self.records
     }
+}
+
+#[derive(Debug)]
+pub enum Record {
+    File(FileRecord),
+    Directory(DirectoryRecord),
+}
+
+impl Record {
+    #[inline(always)]
+    pub fn as_file(&self) -> Option<&FileRecord> {
+        match self {
+            Record::File(file) => Some(file),
+            _ => None,
+        }
+    }
+
+    #[inline(always)]
+    pub fn as_directory(&self) -> Option<&DirectoryRecord> {
+        match self {
+            Record::Directory(dir) => Some(dir),
+            _ => None,
+        }
+    }
+
+    #[inline(always)]
+    pub fn path(&self) -> &str {
+        match self {
+            Record::File(file) => &file.path,
+            Record::Directory(dir) => &dir.path,
+        }
+    }
+
+    #[inline(always)]
+    pub fn attrs(&self) -> &HashMap<String, Vec<u8>> {
+        match self {
+            Record::Directory(dir) => &dir.attrs,
+            Record::File(file) => &file.attrs,
+        }
+    }
+
+    #[inline(always)]
+    pub fn attrs_mut(&mut self) -> &mut HashMap<String, Vec<u8>> {
+        match self {
+            Record::Directory(dir) => &mut dir.attrs,
+            Record::File(file) => &mut file.attrs,
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct DirectoryRecord {
+    /// The path of the directory. A path is always relative (no leading separator),
+    /// always delimited by a `UNIT SEPARATOR U+001F` (`"\x1f"`), and may not contain
+    /// any `.` or `..` path chunks.
+    pub path: String,
+
+    /// Optional attributes for the given paths, such as Windows or Unix ACLs, last accessed time, etc.
+    pub attrs: HashMap<String, Vec<u8>>,
 }
 
 #[derive(Debug)]
@@ -109,8 +196,8 @@ pub struct FileRecord {
     /// The position of the data in the file
     pub data: NonZeroU64,
 
-    /// The path of the file. A path is always relative (no leading slash),
-    /// always delimited by forward slashes ("`/`"), and may not contain
+    /// The path of the file. A path is always relative (no leading separator),
+    /// always delimited by a `UNIT SEPARATOR U+001F` (`"\x1f"`), and may not contain
     /// any `.` or `..` path chunks.
     pub path: String,
 
@@ -130,7 +217,7 @@ trait DeserializeOwned {
 
 impl Serialize for Compression {
     fn write<W: Write>(&self, writer: &mut W) -> std::io::Result<()> {
-        writer.write_u32::<LittleEndian>(self.id())
+        writer.write_u24::<LittleEndian>(self.id())
     }
 }
 
@@ -139,15 +226,15 @@ impl DeserializeOwned for Compression {
     where
         Self: Sized,
     {
-        let id = reader.read_u32::<LittleEndian>()?;
+        let id = reader.read_u24::<LittleEndian>()?;
 
         use Compression::*;
 
         Ok(match id {
-            0x0000_0000 => Stored,
-            0x0001_0000 => Deflate,
-            0x0002_0000 => Zstd,
-            id => Unknown(id)
+            0x00_0000 => Stored,
+            0x01_0000 => Deflate,
+            0x02_0000 => Zstd,
+            id => Unknown(id),
         })
     }
 }
@@ -253,7 +340,8 @@ where
 
 impl Serialize for FileRecord {
     fn write<W: Write>(&self, writer: &mut W) -> std::io::Result<()> {
-        writer.write_u32::<LittleEndian>(self.compression.id())?;
+        writer.write_u8(0x0)?;
+        writer.write_u24::<LittleEndian>(self.compression.id())?;
         writer.write_u64::<LittleEndian>(self.length)?;
         writer.write_u64::<LittleEndian>(self.decompressed_length)?;
 
@@ -261,6 +349,23 @@ impl Serialize for FileRecord {
         self.attrs.write(writer)?;
 
         writer.write_u64::<LittleEndian>(self.data.get())
+    }
+}
+
+impl Serialize for DirectoryRecord {
+    fn write<W: Write>(&self, writer: &mut W) -> std::io::Result<()> {
+        writer.write_u8(0x1)?;
+        self.path.write(writer)?;
+        self.attrs.write(writer)
+    }
+}
+
+impl Serialize for Record {
+    fn write<W: Write>(&self, writer: &mut W) -> std::io::Result<()> {
+        match self {
+            Record::File(file) => file.write(writer),
+            Record::Directory(directory) => directory.write(writer),
+        }
     }
 }
 
@@ -281,6 +386,26 @@ impl DeserializeOwned for FileRecord {
             attrs,
             data: NonZeroU64::new(data).expect("non zero"),
         })
+    }
+}
+
+impl DeserializeOwned for DirectoryRecord {
+    fn deserialize_owned<R: Read>(reader: &mut R) -> std::io::Result<Self> {
+        let path = String::deserialize_owned(reader)?;
+        let attrs = HashMap::deserialize_owned(reader)?;
+
+        Ok(DirectoryRecord { path, attrs })
+    }
+}
+
+impl DeserializeOwned for Record {
+    fn deserialize_owned<R: Read>(reader: &mut R) -> std::io::Result<Self> {
+        let ty = reader.read_u8()?;
+        match ty {
+            0 => Ok(Record::File(FileRecord::deserialize_owned(reader)?)),
+            1 => Ok(Record::Directory(DirectoryRecord::deserialize_owned(reader)?)),
+            _ => Err(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("invalid or unsupported field type: {}", ty)))
+        }
     }
 }
 
@@ -329,10 +454,7 @@ impl DeserializeOwned for BoxMetadata {
         let records = Vec::deserialize_owned(reader)?;
         let attrs = HashMap::deserialize_owned(reader)?;
 
-        Ok(BoxMetadata {
-            records,
-            attrs,
-        })
+        Ok(BoxMetadata { records, attrs })
     }
 }
 
@@ -340,6 +462,15 @@ impl DeserializeOwned for BoxMetadata {
 mod tests {
     use super::*;
     use std::io::Cursor;
+
+    #[test]
+    fn read_u24() {
+        let mut lolvec = Cursor::new(0x1234_5678u32.to_le_bytes().to_vec());
+        let a = lolvec.read_u8().unwrap();
+        let b = lolvec.read_u24::<LittleEndian>().unwrap();
+        assert_eq!(a, 0x78u8);
+        assert_eq!(b, 0x123456u32);
+    }
 
     fn create_test_box<F: AsRef<Path>>(filename: F) {
         let _ = std::fs::remove_file(filename.as_ref());
@@ -350,14 +481,14 @@ mod tests {
         let mut header = FileHeader::default();
         // header.alignment = NonZeroU64::new(8);
         let mut trailer = BoxMetadata::default();
-        trailer.records.push(FileRecord {
+        trailer.records.push(Record::File(FileRecord {
             compression: Compression::Stored,
             length: data.len() as u64,
             decompressed_length: data.len() as u64,
             data: NonZeroU64::new(std::mem::size_of::<FileHeader>() as u64).unwrap(),
             path: "hello.txt".into(),
             attrs: HashMap::new(),
-        });
+        }));
 
         header.trailer = NonZeroU64::new(std::mem::size_of::<FileHeader>() as u64 + 8);
 
@@ -383,7 +514,9 @@ mod tests {
         let trailer = bf.read_trailer().unwrap();
         println!("{:?}", bf.read_header());
         println!("{:?}", &trailer);
-        let file_data = bf.read_data(&trailer.records[0]).unwrap();
+        let file_data = bf
+            .read_data(&trailer.records[0].as_file().unwrap())
+            .unwrap();
         println!("{:?}", &*file_data);
         assert_eq!(&*file_data, b"hello\0\0\0")
     }
@@ -401,30 +534,62 @@ mod tests {
     fn insert() {
         let filename = "./insert_garbage.box";
         let _ = std::fs::remove_file(&filename);
-        let v = "This, this, this, this, this is a compressable string string string string string.".to_string();
-        
+        let v =
+            "This, this, this, this, this is a compressable string string string string string.\n"
+                .to_string();
+
         {
             use std::time::SystemTime;
-            let now = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs().to_le_bytes();
+            let now = SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_secs()
+                .to_le_bytes();
 
             let mut bf = BoxFile::create(&filename).expect("Mah box");
-            let mut attrs = HashMap::new();
 
+            let mut dir_attrs = HashMap::new();
+            dir_attrs.insert("created".to_string(), now.to_vec());
+            dir_attrs.insert("unix.acl".to_string(), 0o755u16.to_le_bytes().to_vec());
+
+            let mut attrs = HashMap::new();
             attrs.insert("created".to_string(), now.to_vec());
             attrs.insert("unix.acl".to_string(), 0o644u16.to_le_bytes().to_vec());
 
-            bf.insert(Compression::Zstd, "test\x1fstring.txt", v.clone(), attrs.clone())
-                .unwrap();
-            bf.insert(Compression::Deflate, "test\x1fstring2.txt", v.clone(), attrs.clone())
-                .unwrap();
+            bf.mkdir(
+                "test",
+                dir_attrs
+            ).unwrap();
+
+            bf.insert(
+                Compression::Zstd,
+                "test\x1fstring.txt",
+                v.clone(),
+                attrs.clone(),
+            )
+            .unwrap();
+            bf.insert(
+                Compression::Deflate,
+                "test\x1fstring2.txt",
+                v.clone(),
+                attrs.clone(),
+            )
+            .unwrap();
             println!("{:?}", &bf);
         }
 
         let bf = BoxFile::open(&filename).expect("Mah box");
         println!("{:#?}", &bf);
 
-        assert_eq!(v, bf.data::<String>(Compression::Zstd, &bf.meta.records[0]).unwrap());
-        assert_eq!(v, bf.data::<String>(Compression::Deflate, &bf.meta.records[1]).unwrap());
+        assert_eq!(
+            v,
+            bf.data::<String>(&bf.meta.records[1].as_file().unwrap())
+                .unwrap()
+        );
+        assert_eq!(
+            v,
+            bf.data::<String>(&bf.meta.records[2].as_file().unwrap()).unwrap()
+        );
     }
 }
 
@@ -489,7 +654,9 @@ impl BoxFile {
         NonZeroU64::new(
             self.meta
                 .records
-                .last()
+                .iter()
+                .rev()
+                .find_map(|r| r.as_file())
                 .map(|r| r.data.get() + r.length)
                 .unwrap_or(std::mem::size_of::<FileHeader>() as u64),
         )
@@ -498,21 +665,49 @@ impl BoxFile {
 
     pub fn data<V: Decompress>(
         &self,
-        compression: Compression,
         record: &FileRecord,
     ) -> std::io::Result<V> {
         let mmap = self.read_data(record)?;
-        compression.decompress(std::io::Cursor::new(mmap))
+        record.compression.decompress(std::io::Cursor::new(mmap))
     }
 
-    pub fn set_attr<P: AsRef<str>, S: AsRef<str>>(&mut self, path: P, key: S, value: Vec<u8>) -> Result<()> {
+    pub fn decompress<W: Write>(
+        &self,
+        record: &FileRecord,
+        dest: W
+    ) -> std::io::Result<()> {
+        let mmap = self.read_data(record)?;
+        record.compression.decompress_write(std::io::Cursor::new(mmap), dest)
+    }
+
+    pub fn set_attr<P: AsRef<str>, S: AsRef<str>>(
+        &mut self,
+        path: P,
+        key: S,
+        value: Vec<u8>,
+    ) -> Result<()> {
         let path = path.as_ref();
         let key = key.as_ref().to_string();
 
-        if let Some(record) = self.meta.records.iter_mut().find(|r| r.path == path) {
-            record.attrs.insert(key, value);
+        if let Some(record) = self.meta.records.iter_mut().find(|r| r.path() == path) {
+            record.attrs_mut().insert(key, value);
         }
 
+        Ok(())
+    }
+
+    pub fn mkdir<P: AsRef<str>>(
+        &mut self,
+        path: P,
+        attrs: HashMap<String, Vec<u8>>,
+    ) -> std::io::Result<()> {
+        let path = path.as_ref().to_string();
+
+        self.meta.records.push(Record::Directory(DirectoryRecord {
+            path,
+            attrs
+        }));
+        self.write_trailer()?;
         Ok(())
     }
 
@@ -521,18 +716,21 @@ impl BoxFile {
         compression: Compression,
         path: P,
         value: V,
-        attrs: HashMap<String, Vec<u8>>
+        attrs: HashMap<String, Vec<u8>>,
     ) -> std::io::Result<()> {
         let path = path.as_ref().to_string();
         let data = self.next_write_addr();
         let bytes = self.write_data::<V>(compression, data.get(), value)?;
 
         // Check there isn't already a record for this path
-        if self.meta.records.iter().any(|x| x.path == path) {
-            return Err(std::io::Error::new(std::io::ErrorKind::AlreadyExists, "path already found"));
+        if self.meta.records.iter().any(|x| x.path() == path) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::AlreadyExists,
+                "path already found",
+            ));
         }
 
-        let header = FileRecord {
+        let record = FileRecord {
             compression,
             length: bytes.write,
             decompressed_length: bytes.read,
@@ -541,7 +739,7 @@ impl BoxFile {
             attrs,
         };
 
-        self.meta.records.push(header);
+        self.meta.records.push(Record::File(record));
         let pos = self.write_trailer()?;
         self.header.trailer = Some(NonZeroU64::new(pos).unwrap());
         self.write_header()?;
@@ -571,7 +769,12 @@ impl BoxFile {
     }
 
     #[inline(always)]
-    fn write_data<V: Compress>(&mut self, compression: Compression, pos: u64, reader: V) -> std::io::Result<comde::com::ByteCount> {
+    fn write_data<V: Compress>(
+        &mut self,
+        compression: Compression,
+        pos: u64,
+        reader: V,
+    ) -> std::io::Result<comde::com::ByteCount> {
         self.file.seek(SeekFrom::Start(pos))?;
         compression.compress(&mut self.file, reader)
     }
