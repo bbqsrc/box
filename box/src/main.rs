@@ -265,9 +265,8 @@ fn from_acl_u16(acl: u16) -> String {
 }
 
 #[inline(always)]
-fn time(attrs: &HashMap<String, Vec<u8>>) -> String {
-    attrs
-        .get("created")
+fn time(attr: Option<&Vec<u8>>) -> String {
+    attr
         .and_then(|x| x.as_slice().read_u64::<LittleEndian>().ok())
         .map(|x| std::time::UNIX_EPOCH + std::time::Duration::new(x, 0))
         .map(|x| {
@@ -278,9 +277,8 @@ fn time(attrs: &HashMap<String, Vec<u8>>) -> String {
 }
 
 #[inline(always)]
-fn unix_acl(attrs: &HashMap<String, Vec<u8>>) -> String {
-    attrs
-        .get("unix.acl")
+fn unix_acl(attr: Option<&Vec<u8>>) -> String {
+    attr
         .map(|x| from_acl_u16(u16::from_le_bytes([x[0], x[1]])))
         .unwrap_or_else(|| "-".into())
 }
@@ -304,8 +302,8 @@ fn list(path: PathBuf, selected_files: Vec<PathBuf>, verbose: bool) -> Result<()
         "-------------  -------------  -------------  ---------------------  ----------  --------"
     );
     for record in metadata.records().iter() {
-        let acl = unix_acl(record.attrs());
-        let time = time(record.attrs());
+        let acl = unix_acl(record.attr(&bf, "unix.acl"));
+        let time = time(record.attr(&bf, "created"));
         let path = format_path(record);
 
         match record {

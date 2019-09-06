@@ -160,11 +160,13 @@ impl Default for BoxHeader {
     }
 }
 
+pub type AttrMap = HashMap<u32, Vec<u8>>;
+
 #[derive(Debug, Default)]
 pub struct BoxMetadata {
     records: Vec<Record>,
-    // a sneaky u64 here for key-value pair length, with each of the keys and value pairs prefixed with their own u64 lengths
-    attrs: HashMap<String, Vec<u8>>,
+    attr_keys: Vec<String>,
+    attrs: AttrMap,
 }
 
 impl BoxMetadata {
@@ -205,7 +207,17 @@ impl Record {
     }
 
     #[inline(always)]
-    pub fn attrs(&self) -> &HashMap<String, Vec<u8>> {
+    pub fn attr<S: AsRef<str>>(
+        &self,
+        boxfile: &BoxFile,
+        key: S
+    ) -> Option<&Vec<u8>> {
+        let key = boxfile.attr_key_for(key.as_ref())?;
+        self.attrs().get(&key)
+    }
+
+    #[inline(always)]
+    fn attrs(&self) -> &AttrMap {
         match self {
             Record::Directory(dir) => &dir.attrs,
             Record::File(file) => &file.attrs,
@@ -213,7 +225,7 @@ impl Record {
     }
 
     #[inline(always)]
-    pub fn attrs_mut(&mut self) -> &mut HashMap<String, Vec<u8>> {
+    fn attrs_mut(&mut self) -> &mut AttrMap {
         match self {
             Record::Directory(dir) => &mut dir.attrs,
             Record::File(file) => &mut file.attrs,
@@ -229,7 +241,7 @@ pub struct DirectoryRecord {
     pub path: String,
 
     /// Optional attributes for the given paths, such as Windows or Unix ACLs, last accessed time, etc.
-    pub attrs: HashMap<String, Vec<u8>>,
+    pub attrs: AttrMap,
 }
 
 #[derive(Debug)]
@@ -252,7 +264,7 @@ pub struct FileRecord {
     pub path: String,
 
     /// Optional attributes for the given paths, such as Windows or Unix ACLs, last accessed time, etc.
-    pub attrs: HashMap<String, Vec<u8>>,
+    pub attrs: AttrMap,
 }
 
 trait Serialize {
@@ -353,27 +365,27 @@ impl<T: DeserializeOwned> DeserializeOwned for Vec<T> {
     }
 }
 
-impl<K, V> Serialize for HashMap<K, V>
-where
-    K: Serialize,
-    V: Serialize,
-{
+impl Serialize for AttrMap {
     fn write<W: Write>(&self, writer: &mut W) -> std::io::Result<()> {
         writer.write_u64::<LittleEndian>(self.len() as u64)?;
         for (key, value) in self.iter() {
-            key.write(writer)?;
+            writer.write_u32::<LittleEndian>(*key)?;
             value.write(writer)?;
         }
         Ok(())
     }
 }
 
-use std::hash::Hash;
+impl DeserializeOwned for u32 {
+    fn deserialize_owned<R: Read>(reader: &mut R) -> std::io::Result<Self>
+    where
+        Self: Sized
+    {
+        reader.read_u32::<LittleEndian>()
+    }
+}
 
-impl<K, V> DeserializeOwned for HashMap<K, V>
-where
-    K: Hash + Eq + DeserializeOwned,
-    V: DeserializeOwned,
+impl DeserializeOwned for AttrMap
 {
     fn deserialize_owned<R: Read>(reader: &mut R) -> std::io::Result<Self>
     where
@@ -382,8 +394,8 @@ where
         let len = reader.read_u64::<LittleEndian>()?;
         let mut buf = HashMap::with_capacity(len as usize);
         for _ in 0..len {
-            let key = K::deserialize_owned(reader)?;
-            let value = V::deserialize_owned(reader)?;
+            let key = u32::deserialize_owned(reader)?;
+            let value = Vec::deserialize_owned(reader)?;
             buf.insert(key, value);
         }
         Ok(buf)
@@ -502,6 +514,7 @@ impl DeserializeOwned for BoxHeader {
 impl Serialize for BoxMetadata {
     fn write<W: Write>(&self, writer: &mut W) -> std::io::Result<()> {
         self.records.write(writer)?;
+        self.attr_keys.write(writer)?;
         self.attrs.write(writer)
     }
 }
@@ -509,9 +522,10 @@ impl Serialize for BoxMetadata {
 impl DeserializeOwned for BoxMetadata {
     fn deserialize_owned<R: Read>(reader: &mut R) -> std::io::Result<Self> {
         let records = Vec::deserialize_owned(reader)?;
+        let attr_keys = Vec::deserialize_owned(reader)?;
         let attrs = HashMap::deserialize_owned(reader)?;
 
-        Ok(BoxMetadata { records, attrs })
+        Ok(BoxMetadata { records, attr_keys, attrs })
     }
 }
 
@@ -527,7 +541,6 @@ mod tests {
         let data = b"hello\0\0\0";
 
         let mut header = BoxHeader::default();
-        // header.alignment = NonZeroU64::new(8);
         let mut trailer = BoxMetadata::default();
         trailer.records.push(Record::File(FileRecord {
             compression: Compression::Stored,
@@ -598,12 +611,12 @@ mod tests {
             let mut bf = f(filename); //BoxFile::create(&filename).expect("Mah box");
 
             let mut dir_attrs = HashMap::new();
-            dir_attrs.insert("created".to_string(), now.to_vec());
-            dir_attrs.insert("unix.acl".to_string(), 0o755u16.to_le_bytes().to_vec());
+            dir_attrs.insert("created".into(), now.to_vec());
+            dir_attrs.insert("unix.acl".into(), 0o755u16.to_le_bytes().to_vec());
 
             let mut attrs = HashMap::new();
-            attrs.insert("created".to_string(), now.to_vec());
-            attrs.insert("unix.acl".to_string(), 0o644u16.to_le_bytes().to_vec());
+            attrs.insert("created".into(), now.to_vec());
+            attrs.insert("unix.acl".into(), 0o644u16.to_le_bytes().to_vec());
 
             bf.mkdir("test", dir_attrs).unwrap();
 
@@ -739,7 +752,7 @@ impl BoxFile {
     }
 
     #[inline(always)]
-    pub fn next_write_addr(&self) -> NonZeroU64 {
+    fn next_write_addr(&self) -> NonZeroU64 {
         let offset = self
             .meta
             .records
@@ -781,6 +794,22 @@ impl BoxFile {
             .decompress_write(std::io::Cursor::new(mmap), dest)
     }
 
+    #[inline(always)]
+    fn attr_key_for_mut(&mut self, key: &str) -> u32 {
+        match self.meta.attr_keys.iter().position(|r| r == key) {
+            Some(v) => v as u32,
+            None => {
+                self.meta.attr_keys.push(key.to_string());
+                self.meta.attr_keys.len() as u32
+            }
+        }
+    }
+
+    #[inline(always)]
+    fn attr_key_for(&self, key: &str) -> Option<u32> {
+        self.meta.attr_keys.iter().position(|r| r == key).map(|v| v as u32)
+    }
+
     pub fn set_attr<P: AsRef<str>, S: AsRef<str>>(
         &mut self,
         path: P,
@@ -788,7 +817,7 @@ impl BoxFile {
         value: Vec<u8>,
     ) -> Result<()> {
         let path = path.as_ref();
-        let key = key.as_ref().to_string();
+        let key = self.attr_key_for_mut(key.as_ref());
 
         if let Some(record) = self.meta.records.iter_mut().find(|r| r.path() == path) {
             record.attrs_mut().insert(key, value);
@@ -797,12 +826,31 @@ impl BoxFile {
         Ok(())
     }
 
+    pub fn attr<P: AsRef<str>, S: AsRef<str>>(
+        &self,
+        path: P,
+        key: S
+    ) -> Option<&Vec<u8>> {
+        let path = path.as_ref();
+        let key = self.attr_key_for(key.as_ref())?;
+        
+        if let Some(record) = self.meta.records.iter().find(|r| r.path() == path) {
+            record.attrs().get(&key)
+        } else {
+            None
+        }
+    }
+
     pub fn mkdir<P: AsRef<str>>(
         &mut self,
         path: P,
         attrs: HashMap<String, Vec<u8>>,
     ) -> std::io::Result<()> {
         let path = path.as_ref().to_string();
+        let attrs = attrs.into_iter().map(|(k, v)| {
+            let k = self.attr_key_for_mut(&k);
+            (k, v)
+        }).collect::<HashMap<_, _>>();
 
         self.meta
             .records
@@ -821,6 +869,10 @@ impl BoxFile {
         let path = path.as_ref().to_string();
         let data = self.next_write_addr();
         let bytes = self.write_data::<V>(compression, data.get(), value)?;
+        let attrs = attrs.into_iter().map(|(k, v)| {
+            let k = self.attr_key_for_mut(&k);
+            (k, v)
+        }).collect::<HashMap<_, _>>();
 
         // Check there isn't already a record for this path
         if self.meta.records.iter().any(|x| x.path() == path) {
