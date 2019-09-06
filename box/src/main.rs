@@ -68,10 +68,11 @@ struct CliOpts {
     #[structopt(short, long, help = "Show verbose output")]
     verbose: bool,
 
-    #[structopt(parse(from_os_str), help = "Path to the .box archive")]
+    #[structopt(name = "boxfile", parse(from_os_str), help = "Path to the .box archive")]
     path: PathBuf,
 
     #[structopt(
+        name = "files",
         parse(from_os_str),
         help = "Selected files/directories to extract, list or add to an archive"
     )]
