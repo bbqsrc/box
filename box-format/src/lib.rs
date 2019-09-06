@@ -877,7 +877,7 @@ impl BoxFile {
         path: P,
         value: V,
         attrs: HashMap<String, Vec<u8>>,
-    ) -> std::io::Result<()> {
+    ) -> std::io::Result<&FileRecord> {
         let path = path.as_ref().to_string();
         let data = self.next_write_addr();
         let bytes = self.write_data::<V>(compression, data.get(), value)?;
@@ -908,7 +908,7 @@ impl BoxFile {
         self.header.trailer = Some(NonZeroU64::new(pos).unwrap());
         self.write_header()?;
 
-        Ok(())
+        Ok(&self.meta.records.last().unwrap().as_file().unwrap())
     }
 
     #[inline(always)]

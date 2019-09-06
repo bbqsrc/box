@@ -440,7 +440,7 @@ fn add_crc32(bf: &mut BoxFile, box_path: &String) -> std::io::Result<()> {
 }
 
 #[inline(always)]
-fn process_files<I: Iterator<Item = PathBuf>>(iter: I, recursive: bool, compression: Compression, bf: &mut BoxFile, known_dirs: &mut HashSet<String>) -> std::io::Result<()> {
+fn process_files<I: Iterator<Item = PathBuf>>(iter: I, recursive: bool, verbose: bool, compression: Compression, bf: &mut BoxFile, known_dirs: &mut HashSet<String>) -> std::io::Result<()> {
     for file_path in iter {
         let parents = collect_parent_directories(&file_path);
         let box_path = convert_to_box_path(&file_path).unwrap();
@@ -454,12 +454,18 @@ fn process_files<I: Iterator<Item = PathBuf>>(iter: I, recursive: bool, compress
 
         if file_path.is_dir() {
             if !known_dirs.contains(&box_path) {
+                if verbose {
+                    println!("{} (directory)", &file_path.display());
+                }
                 bf.mkdir(&box_path, metadata(&file_path))?;
                 known_dirs.insert(box_path);
             }
         } else {
             let file = std::fs::File::open(&file_path)?;
-            bf.insert(compression, &box_path, file, metadata(&file_path))?;
+            let record = bf.insert(compression, &box_path, file, metadata(&file_path))?;
+            if verbose {
+                println!("{} (compressed {:.*}%)", &file_path.display(), 2, 100.0 - (record.length as f64 / record.decompressed_length as f64 * 100.0));
+            }
             add_crc32(bf, &box_path)?;
         }
     }
@@ -488,7 +494,7 @@ fn create(
 
     let mut known_dirs = std::collections::HashSet::new();
 
-    process_files(selected_files.into_iter(), recursive, compression, &mut bf, &mut known_dirs)?;
+    process_files(selected_files.into_iter(), recursive, verbose, compression, &mut bf, &mut known_dirs)?;
 
     Ok(())
 }
