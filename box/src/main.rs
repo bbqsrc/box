@@ -2,10 +2,12 @@ use std::collections::HashMap;
 use std::io::Result;
 use std::path::{Path, PathBuf};
 use std::num::NonZeroU64;
+use std::collections::HashSet;
 
 use box_format::{BoxFile, Compression, Record};
 use byteorder::{LittleEndian, ReadBytesExt};
 use structopt::StructOpt;
+use walkdir::{DirEntry, WalkDir};
 
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
@@ -415,6 +417,41 @@ fn metadata(path: &Path) -> HashMap<String, Vec<u8>> {
     attrs
 }
 
+#[inline(always)]
+fn is_hidden(entry: &DirEntry) -> bool {
+    entry.file_name()
+         .to_str()
+         .map(|s| s.starts_with("."))
+         .unwrap_or(false)
+}
+
+#[inline(always)]
+fn process_files<I: Iterator<Item = PathBuf>>(iter: I, recursive: bool, compression: Compression, bf: &mut BoxFile, known_dirs: &mut HashSet<String>) -> std::io::Result<()> {
+    for file_path in iter {
+        let parents = collect_parent_directories(&file_path);
+        let box_path = convert_to_box_path(&file_path).unwrap();
+
+        for (parent, meta) in parents.into_iter() {
+            if known_dirs.contains(&parent) {
+                bf.mkdir(&parent, meta)?;
+                known_dirs.insert(parent);
+            }
+        }
+
+        if file_path.is_dir() {
+            if !known_dirs.contains(&box_path) {
+                bf.mkdir(&box_path, metadata(&file_path))?;
+                known_dirs.insert(box_path);
+            }
+        } else {
+            let file = std::fs::File::open(&file_path)?;
+            bf.insert(compression, box_path, file, metadata(&file_path))?;
+        }
+    }
+
+    Ok(())
+}
+
 fn create(
     path: PathBuf,
     selected_files: Vec<PathBuf>,
@@ -438,25 +475,7 @@ fn create(
 
     let mut known_dirs = std::collections::HashSet::new();
 
-    for file_path in selected_files.into_iter() {
-        let parents = collect_parent_directories(&file_path);
-        let box_path = convert_to_box_path(&file_path).unwrap();
-
-        for (parent, meta) in parents.into_iter() {
-            if known_dirs.get(&parent).is_none() {
-                bf.mkdir(&parent, meta)?;
-                known_dirs.insert(parent);
-            }
-        }
-
-        if file_path.is_dir() {
-            bf.mkdir(&box_path, metadata(&file_path))?;
-            known_dirs.insert(box_path);
-        } else {
-            let file = std::fs::File::open(&file_path)?;
-            bf.insert(compression, box_path, file, metadata(&file_path))?;
-        }
-    }
+    process_files(selected_files.into_iter(), recursive, compression, &mut bf, &mut known_dirs)?;
 
     Ok(())
 }
