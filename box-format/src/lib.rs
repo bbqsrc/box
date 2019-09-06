@@ -64,7 +64,7 @@ impl Compression {
         }
     }
 
-    fn compress<W: Write + Seek, V: Compress>(&self, writer: W, data: V) -> Result<ByteCount> {
+    fn compress<W: Write + Seek, V: Compress>(self, writer: W, data: V) -> Result<ByteCount> {
         use Compression::*;
 
         match self {
@@ -74,7 +74,7 @@ impl Compression {
             Xz => XzCompressor.compress(writer, data),
             Snappy => SnappyCompressor.compress(writer, data),
             Unknown(id) => {
-                return Err(std::io::Error::new(
+                Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidInput,
                     format!("Cannot handle compression with id {}", id),
                 ))
@@ -82,7 +82,7 @@ impl Compression {
         }
     }
 
-    fn decompress<R: Read, V: Decompress>(&self, reader: R) -> Result<V> {
+    fn decompress<R: Read, V: Decompress>(self, reader: R) -> Result<V> {
         use Compression::*;
 
         match self {
@@ -92,7 +92,7 @@ impl Compression {
             Xz => XzDecompressor.from_reader(reader),
             Snappy => SnappyDecompressor.from_reader(reader),
             Unknown(id) => {
-                return Err(std::io::Error::new(
+                Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidInput,
                     format!("Cannot handle decompression with id {}", id),
                 ))
@@ -100,7 +100,7 @@ impl Compression {
         }
     }
 
-    fn decompress_write<R: Read, W: Write>(&self, reader: R, writer: W) -> Result<()> {
+    fn decompress_write<R: Read, W: Write>(self, reader: R, writer: W) -> Result<()> {
         use Compression::*;
 
         match self {
@@ -110,7 +110,7 @@ impl Compression {
             Xz => XzDecompressor.copy(reader, writer),
             Snappy => SnappyDecompressor.copy(reader, writer),
             Unknown(id) => {
-                return Err(std::io::Error::new(
+                Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidInput,
                     format!("Cannot handle decompression with id {}", id),
                 ))

@@ -37,7 +37,7 @@ enum Commands {
     #[structopt(
         name = "a",
         visible_alias = "append",
-        about = "Append files to an existing archive",
+        about = "Append files to an existing archive"
     )]
     Append {
         #[structopt(
@@ -53,25 +53,25 @@ enum Commands {
         #[structopt(short, long, help = "Recursively handle provided paths")]
         recursive: bool,
 
-        #[structopt(name = "boxfile", parse(from_os_str), help = "Path to the .box archive")]
+        #[structopt(
+            name = "boxfile",
+            parse(from_os_str),
+            help = "Path to the .box archive"
+        )]
         path: PathBuf,
     },
 
-    #[structopt(
-        name = "l",
-        visible_alias = "list",
-        about = "List files of an archive",
-    )]
+    #[structopt(name = "l", visible_alias = "list", about = "List files of an archive")]
     List {
-        #[structopt(name = "boxfile", parse(from_os_str), help = "Path to the .box archive")]
+        #[structopt(
+            name = "boxfile",
+            parse(from_os_str),
+            help = "Path to the .box archive"
+        )]
         path: PathBuf,
     },
 
-    #[structopt(
-        name = "c",
-        visible_alias = "create",
-        about = "Create a new archive",
-    )]
+    #[structopt(name = "c", visible_alias = "create", about = "Create a new archive")]
     Create {
         #[structopt(
             short = "A",
@@ -93,19 +93,27 @@ enum Commands {
         #[structopt(short, long, help = "Recursively handle provided paths")]
         recursive: bool,
 
-        #[structopt(name = "boxfile", parse(from_os_str), help = "Path to the .box archive")]
+        #[structopt(
+            name = "boxfile",
+            parse(from_os_str),
+            help = "Path to the .box archive"
+        )]
         path: PathBuf,
     },
 
     #[structopt(
         name = "x",
         visible_alias = "extract",
-        about = "Extract files from an archive",
+        about = "Extract files from an archive"
     )]
     Extract {
-        #[structopt(name = "boxfile", parse(from_os_str), help = "Path to the .box archive")]
+        #[structopt(
+            name = "boxfile",
+            parse(from_os_str),
+            help = "Path to the .box archive"
+        )]
         path: PathBuf,
-    }
+    },
 }
 
 #[derive(Debug, StructOpt)]
@@ -169,7 +177,7 @@ fn append(
     if let Some(duplicate) = duplicate {
         eprintln!(
             "Archive already contains file for path: {}; aborting.",
-            duplicate.split("\x1f").collect::<Vec<_>>().join(SEP)
+            duplicate.split(STD_SEP).collect::<Vec<_>>().join(SEP)
         );
         std::process::exit(1);
     }
@@ -180,12 +188,9 @@ fn append(
         let box_path = convert_to_box_path(&file_path).unwrap();
 
         for (parent, meta) in parents.into_iter() {
-            match known_dirs.get(&parent) {
-                None => {
-                    bf.mkdir(&parent, meta)?;
-                    known_dirs.insert(parent);
-                }
-                _ => {}
+            if known_dirs.get(&parent).is_none() {
+                bf.mkdir(&parent, meta)?;
+                known_dirs.insert(parent);
             }
         }
 
@@ -211,15 +216,15 @@ macro_rules! add {
 }
 
 #[cfg(not(windows))]
-static SEP: &'static str = "/";
+const SEP: &str = "/";
 #[cfg(windows)]
-static SEP: &'static str = "\\";
+const SEP: &str = "\\";
 
-const STD_SEP: &'static str = "\x1f";
+const STD_SEP: &str = "\x1f";
 
 #[inline(always)]
 fn format_path(record: &Record) -> String {
-    let mut path = record.path().split("\x1f").collect::<Vec<_>>();
+    let mut path = record.path().split(STD_SEP).collect::<Vec<_>>();
     if record.as_directory().is_some() {
         path.push("");
     }
@@ -255,7 +260,7 @@ fn from_acl_u16(acl: u16) -> String {
 #[inline(always)]
 fn time(attrs: &HashMap<String, Vec<u8>>) -> String {
     attrs
-        .get("created".into())
+        .get("created")
         .and_then(|x| x.as_slice().read_u64::<LittleEndian>().ok())
         .map(|x| std::time::UNIX_EPOCH + std::time::Duration::new(x, 0))
         .map(|x| {
@@ -268,7 +273,7 @@ fn time(attrs: &HashMap<String, Vec<u8>>) -> String {
 #[inline(always)]
 fn unix_acl(attrs: &HashMap<String, Vec<u8>>) -> String {
     attrs
-        .get("unix.acl".into())
+        .get("unix.acl")
         .map(|x| from_acl_u16(u16::from_le_bytes([x[0], x[1]])))
         .unwrap_or_else(|| "-".into())
 }
@@ -280,14 +285,16 @@ fn list(path: PathBuf, selected_files: Vec<PathBuf>, verbose: bool) -> Result<()
     let metadata = bf.metadata();
 
     println!("Method        Compressed     Length         Created                Unix ACL    Path");
-    println!("------------  -------------  -------------  ---------------------  ----------  --------");
+    println!(
+        "------------  -------------  -------------  ---------------------  ----------  --------"
+    );
     for record in metadata.records().iter() {
         let acl = unix_acl(record.attrs());
         let time = time(record.attrs());
         let path = format_path(record);
 
         match record {
-            Record::Directory(record) => {
+            Record::Directory(_) => {
                 println!(
                     "{:12}  {:>12}   {:>12}   {:<20}   {:<9}   {}",
                     "<directory>", "-", "-", time, acl, path,
@@ -413,12 +420,9 @@ fn create(
         let box_path = convert_to_box_path(&file_path).unwrap();
 
         for (parent, meta) in parents.into_iter() {
-            match known_dirs.get(&parent) {
-                None => {
-                    bf.mkdir(&parent, meta)?;
-                    known_dirs.insert(parent);
-                }
-                _ => {}
+            if known_dirs.get(&parent).is_none() {
+                bf.mkdir(&parent, meta)?;
+                known_dirs.insert(parent);
             }
         }
 
@@ -451,32 +455,30 @@ fn main() {
     // let compression = opts.compression.unwrap_or(Compression::Stored);
 
     let result = match opts.cmd {
-        Commands::Append { path, compression, recursive } => {
-            append(path, opts.selected_files, compression, opts.verbose)
-        },
-        Commands::List { path, } => {
-            list(path, opts.selected_files, opts.verbose)
-        },
-        Commands::Extract { path, } => {
-            extract(path, opts.selected_files, opts.verbose)
-        },
-        Commands::Create { path, alignment, compression, recursive } => {
-            create(
-                path,
-                opts.selected_files,
-                compression,
-                recursive,
-                opts.verbose,
-                alignment,
-            )
-        }
+        Commands::Append {
+            path,
+            compression,
+            recursive,
+        } => append(path, opts.selected_files, compression, opts.verbose),
+        Commands::List { path } => list(path, opts.selected_files, opts.verbose),
+        Commands::Extract { path } => extract(path, opts.selected_files, opts.verbose),
+        Commands::Create {
+            path,
+            alignment,
+            compression,
+            recursive,
+        } => create(
+            path,
+            opts.selected_files,
+            compression,
+            recursive,
+            opts.verbose,
+            alignment,
+        ),
     };
 
-    match result {
-        Err(e) => {
-            eprintln!("{:?}", e);
-            std::process::exit(1);
-        }
-        _ => {}
+    if let Err(e) = result {
+        eprintln!("{:?}", e);
+        std::process::exit(1);
     }
 }
