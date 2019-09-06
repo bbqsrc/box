@@ -267,6 +267,18 @@ pub struct FileRecord {
     pub attrs: AttrMap,
 }
 
+impl FileRecord {
+    #[inline(always)]
+    pub fn attr<S: AsRef<str>>(
+        &self,
+        boxfile: &BoxFile,
+        key: S
+    ) -> Option<&Vec<u8>> {
+        let key = boxfile.attr_key_for(key.as_ref())?;
+        self.attrs.get(&key)
+    }
+}
+
 trait Serialize {
     fn write<W: Write>(&self, writer: &mut W) -> std::io::Result<()>;
 }
@@ -823,7 +835,7 @@ impl BoxFile {
             record.attrs_mut().insert(key, value);
         }
 
-        Ok(())
+        self.write_header_and_trailer()
     }
 
     pub fn attr<P: AsRef<str>, S: AsRef<str>>(

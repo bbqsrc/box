@@ -8,6 +8,7 @@ use box_format::{BoxFile, Compression, Record};
 use byteorder::{LittleEndian, ReadBytesExt};
 use structopt::StructOpt;
 use walkdir::{DirEntry, WalkDir};
+use crc32fast::Hasher as Crc32Hasher;
 
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
@@ -299,13 +300,9 @@ fn list(path: PathBuf, selected_files: Vec<PathBuf>, verbose: bool) -> Result<()
         None => "None".into()
     };
     println!("Box archive: {} (alignment: {})", path.display(), alignment);
-    println!(
-        "-------------  -------------  -------------  ---------------------  ----------  --------"
-    );
-    println!(" Method         Compressed     Length         Created                Unix ACL    Path");
-    println!(
-        "-------------  -------------  -------------  ---------------------  ----------  --------"
-    );
+    println!("-------------  -------------  -------------  ---------------------  ----------  ---------  --------");
+    println!(" Method         Compressed     Length         Created                Unix ACL    CRC32      Path");
+    println!("-------------  -------------  -------------  ---------------------  ----------  ---------  --------");
     for record in metadata.records().iter() {
         let acl = unix_acl(record.attr(&bf, "unix.acl"));
         let time = time(record.attr(&bf, "created"));
@@ -314,8 +311,8 @@ fn list(path: PathBuf, selected_files: Vec<PathBuf>, verbose: bool) -> Result<()
         match record {
             Record::Directory(_) => {
                 println!(
-                    " {:12}  {:>12}   {:>12}   {:<20}   {:<9}   {}",
-                    "<directory>", "-", "-", time, acl, path,
+                    " {:12}  {:>12}   {:>12}   {:<20}   {:<9}   {:>8}   {}",
+                    "<directory>", "-", "-", time, acl, "-", path,
                 );
             }
             Record::File(record) => {
@@ -324,14 +321,22 @@ fn list(path: PathBuf, selected_files: Vec<PathBuf>, verbose: bool) -> Result<()
                     .decompressed_length
                     .file_size(options::BINARY)
                     .unwrap();
+                let crc32 = record.attr(&bf, "crc32")
+                    .map(|x| {
+                        Some(u32::from_le_bytes([x[0], x[1], x[2], x[3]]))
+                    })
+                    .unwrap_or(None)
+                    .map(|x| format!("{:x}", x))
+                    .unwrap_or_else(|| "-".to_string());
 
                 println!(
-                    " {:12}  {:>12}   {:>12}   {:<20}   {:<9}   {}",
+                    " {:12}  {:>12}   {:>12}   {:<20}   {:<9}   {:>8}   {}",
                     format!("{:?}", record.compression),
                     length,
                     decompressed_length,
                     time,
                     acl,
+                    crc32,
                     path,
                 );
             }
@@ -426,6 +431,15 @@ fn is_hidden(entry: &DirEntry) -> bool {
 }
 
 #[inline(always)]
+fn add_crc32(bf: &mut BoxFile, box_path: &String) -> std::io::Result<()> {
+    let mut hasher = Crc32Hasher::new();
+    let record = bf.metadata().records().last().unwrap().as_file().unwrap();
+    hasher.update(&*bf.data(record).unwrap());
+    let hash = hasher.finalize().to_le_bytes().to_vec();
+    bf.set_attr(box_path, "crc32", hash)
+}
+
+#[inline(always)]
 fn process_files<I: Iterator<Item = PathBuf>>(iter: I, recursive: bool, compression: Compression, bf: &mut BoxFile, known_dirs: &mut HashSet<String>) -> std::io::Result<()> {
     for file_path in iter {
         let parents = collect_parent_directories(&file_path);
@@ -445,7 +459,8 @@ fn process_files<I: Iterator<Item = PathBuf>>(iter: I, recursive: bool, compress
             }
         } else {
             let file = std::fs::File::open(&file_path)?;
-            bf.insert(compression, box_path, file, metadata(&file_path))?;
+            bf.insert(compression, &box_path, file, metadata(&file_path))?;
+            add_crc32(bf, &box_path)?;
         }
     }
 
@@ -460,8 +475,6 @@ fn create(
     verbose: bool,
     alignment: Option<NonZeroU64>,
 ) -> Result<()> {
-    println!("{:?}", alignment);
-
     // TODO: silently ignore self-archiving unless it's the only thing in the list.
     if selected_files.contains(&path) {
         eprintln!("Cowardly refusing to recursively archive self; aborting.");
@@ -507,7 +520,7 @@ fn main() {
     };
 
     if let Err(e) = result {
-        eprintln!("{:?}", e);
+        eprintln!("Error: {:?}", e);
         std::process::exit(1);
     }
 }
