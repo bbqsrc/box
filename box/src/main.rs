@@ -34,6 +34,7 @@ use structopt::clap::{ArgGroup, AppSettings::*};
 #[derive(Debug, StructOpt)]
 #[structopt(
     name = "box",
+    author = "Brendan Molloy <brendan@bbqsrc.net>",
     about = "Create, modify and extract box archives.",
     settings = &[ArgRequiredElseHelp, DontCollapseArgsInUsage],
     group = ArgGroup::with_name("verb").required(true),
