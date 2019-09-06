@@ -463,19 +463,6 @@ fn create(
 fn main() {
     let opts = CliOpts::from_args();
 
-    // let actions_count = [opts.append, opts.list, opts.create, opts.extract]
-    //     .into_iter()
-    //     .filter(|x| **x)
-    //     .count();
-
-    // if actions_count > 1 {
-    //     eprintln!("Multiple actions selected; aborting.");
-    // } else if actions_count == 0 {
-    //     eprintln!("No actions selected; aborting.");
-    // }
-
-    // let compression = opts.compression.unwrap_or(Compression::Stored);
-
     let result = match opts.cmd {
         Commands::Append {
             path,

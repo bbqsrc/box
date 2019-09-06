@@ -79,12 +79,10 @@ impl Compression {
             Zstd => ZstdCompressor.compress(writer, data),
             Xz => XzCompressor.compress(writer, data),
             Snappy => SnappyCompressor.compress(writer, data),
-            Unknown(id) => {
-                Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
-                    format!("Cannot handle compression with id {}", id),
-                ))
-            }
+            Unknown(id) => Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("Cannot handle compression with id {}", id),
+            )),
         }
     }
 
@@ -97,12 +95,10 @@ impl Compression {
             Zstd => ZstdDecompressor.from_reader(reader),
             Xz => XzDecompressor.from_reader(reader),
             Snappy => SnappyDecompressor.from_reader(reader),
-            Unknown(id) => {
-                Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
-                    format!("Cannot handle decompression with id {}", id),
-                ))
-            }
+            Unknown(id) => Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("Cannot handle decompression with id {}", id),
+            )),
         }
     }
 
@@ -115,12 +111,10 @@ impl Compression {
             Zstd => ZstdDecompressor.copy(reader, writer),
             Xz => XzDecompressor.copy(reader, writer),
             Snappy => SnappyDecompressor.copy(reader, writer),
-            Unknown(id) => {
-                Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
-                    format!("Cannot handle decompression with id {}", id),
-                ))
-            }
+            Unknown(id) => Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("Cannot handle decompression with id {}", id),
+            )),
         }?;
 
         Ok(())
@@ -584,7 +578,10 @@ mod tests {
         assert!(bf.read_trailer().is_ok());
     }
 
-    fn insert_impl<F>(filename: &str, f: F) where F: Fn(&str) -> BoxFile {
+    fn insert_impl<F>(filename: &str, f: F)
+    where
+        F: Fn(&str) -> BoxFile,
+    {
         let _ = std::fs::remove_file(&filename);
         let v =
             "This, this, this, this, this is a compressable string string string string string.\n"
@@ -598,7 +595,7 @@ mod tests {
                 .as_secs()
                 .to_le_bytes();
 
-            let mut bf = f(filename);//BoxFile::create(&filename).expect("Mah box");
+            let mut bf = f(filename); //BoxFile::create(&filename).expect("Mah box");
 
             let mut dir_attrs = HashMap::new();
             dir_attrs.insert("created".to_string(), now.to_vec());
@@ -645,8 +642,12 @@ mod tests {
     #[test]
     fn insert() {
         insert_impl("./insert_garbage.box", |n| BoxFile::create(n).unwrap());
-        insert_impl("./insert_garbage_align8.box", |n| BoxFile::create_with_alignment(n, NonZeroU64::new(8).unwrap()).unwrap());
-        insert_impl("./insert_garbage_align7.box", |n| BoxFile::create_with_alignment(n, NonZeroU64::new(7).unwrap()).unwrap());
+        insert_impl("./insert_garbage_align8.box", |n| {
+            BoxFile::create_with_alignment(n, NonZeroU64::new(8).unwrap()).unwrap()
+        });
+        insert_impl("./insert_garbage_align7.box", |n| {
+            BoxFile::create_with_alignment(n, NonZeroU64::new(7).unwrap()).unwrap()
+        });
     }
 }
 
@@ -700,7 +701,10 @@ impl BoxFile {
 
     /// This will create a new `.box` file for reading and writing, and error if the file already exists.
     /// Will insert byte-aligned values based on provided `alignment` value. For best results, consider a power of 2.
-    pub fn create_with_alignment<P: AsRef<Path>>(path: P, alignment: NonZeroU64) -> std::io::Result<BoxFile> {
+    pub fn create_with_alignment<P: AsRef<Path>>(
+        path: P,
+        alignment: NonZeroU64,
+    ) -> std::io::Result<BoxFile> {
         let mut boxfile = OpenOptions::new()
             .write(true)
             .read(true)
@@ -736,14 +740,15 @@ impl BoxFile {
 
     #[inline(always)]
     pub fn next_write_addr(&self) -> NonZeroU64 {
-        let offset = self.meta
+        let offset = self
+            .meta
             .records
             .iter()
             .rev()
             .find_map(|r| r.as_file())
             .map(|r| r.data.get() + r.length)
             .unwrap_or(std::mem::size_of::<BoxHeader>() as u64);
-        
+
         let v = match self.header.alignment {
             None => offset,
             Some(alignment) => {
