@@ -10,6 +10,8 @@ use comde::{
     deflate::{DeflateCompressor, DeflateDecompressor},
     stored::{StoredCompressor, StoredDecompressor},
     zstd::{ZstdCompressor, ZstdDecompressor},
+    xz::{XzCompressor, XzDecompressor},
+    snappy::{SnappyCompressor, SnappyDecompressor},
     ByteCount, Compress, Compressor, Decompress, Decompressor,
 };
 use memmap::MmapOptions;
@@ -19,6 +21,8 @@ pub enum Compression {
     Stored,
     Deflate,
     Zstd,
+    Xz,
+    Snappy,
     Unknown(u32),
 }
 
@@ -30,6 +34,8 @@ impl Compression {
             Stored => 0x00_0000,
             Deflate => 0x01_0000,
             Zstd => 0x02_0000,
+            Xz => 0x03_0000,
+            Snappy => 0x04_0000,
             Unknown(id) => id,
         }
     }
@@ -41,6 +47,8 @@ impl Compression {
             Stored => StoredCompressor.compress(writer, data),
             Deflate => DeflateCompressor.compress(writer, data),
             Zstd => ZstdCompressor.compress(writer, data),
+            Xz => XzCompressor.compress(writer, data),
+            Snappy => SnappyCompressor.compress(writer, data),
             Unknown(id) => {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidInput,
@@ -57,6 +65,8 @@ impl Compression {
             Stored => StoredDecompressor.from_reader(reader),
             Deflate => DeflateDecompressor.from_reader(reader),
             Zstd => ZstdDecompressor.from_reader(reader),
+            Xz => XzDecompressor.from_reader(reader),
+            Snappy => SnappyDecompressor.from_reader(reader),
             Unknown(id) => {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidInput,
@@ -73,6 +83,8 @@ impl Compression {
             Stored => StoredDecompressor.copy(reader, writer),
             Deflate => DeflateDecompressor.copy(reader, writer),
             Zstd => ZstdDecompressor.copy(reader, writer),
+            Xz => XzDecompressor.copy(reader, writer),
+            Snappy => SnappyDecompressor.copy(reader, writer),
             Unknown(id) => {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidInput,
