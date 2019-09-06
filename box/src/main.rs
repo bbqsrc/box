@@ -28,37 +28,53 @@ fn parse_compression(src: &str) -> std::result::Result<Compression, ParseCompres
     Ok(compression)
 }
 
+use structopt::clap::{ArgGroup, AppSettings::*};
+
+
 #[derive(Debug, StructOpt)]
-#[structopt(name = "box", about = "Create, modify and extract box archives.")]
+#[structopt(
+    name = "box",
+    about = "Create, modify and extract box archives.",
+    settings = &[ArgRequiredElseHelp, DontCollapseArgsInUsage],
+    group = ArgGroup::with_name("verb").required(true),
+    usage = "box <-a|-c|-l|-x> [FLAGS|OPTIONS] <boxfile> [files]..."
+)]
 struct CliOpts {
-    #[structopt(short = "a", long)]
+    #[structopt(short = "a", long, group = "verb", conflicts_with_all = &["create", "list", "extract"], help = "Append files to an existing archive")]
     append: bool,
 
-    #[structopt(short = "l", long)]
+    #[structopt(short = "l", long, group = "verb", conflicts_with_all = &["append", "create", "extract"], help = "List files of an archive")]
     list: bool,
 
-    #[structopt(short = "c", long)]
+    #[structopt(short = "c", long, group = "verb", conflicts_with_all = &["append", "list", "extract"], help = "Create a new archive")]
     create: bool,
 
-    #[structopt(short = "x", long)]
+    #[structopt(short = "x", long, group = "verb", conflicts_with_all = &["append", "create", "list"], help = "Extract files from an archive")]
     extract: bool,
 
-    #[structopt(short = "A", long)]
+    #[structopt(
+        short = "A",
+        long,
+        help = "Byte alignment to be used for an archive (create only, default none)"
+    )]
     alignment: Option<u64>,
 
-    #[structopt(short = "C", long, parse(try_from_str = parse_compression))]
+    #[structopt(short = "C", long, parse(try_from_str = parse_compression), help = "Compression to be used for a file (create/append only, default stored)")]
     compression: Option<Compression>,
 
-    #[structopt(short, long)]
+    #[structopt(short, long, help = "Recursively handle provided paths")]
     recursive: bool,
 
-    #[structopt(short, long)]
+    #[structopt(short, long, help = "Show verbose output")]
     verbose: bool,
 
-    #[structopt(parse(from_os_str))]
+    #[structopt(parse(from_os_str), help = "Path to the .box archive")]
     path: PathBuf,
 
-    #[structopt(parse(from_os_str))]
+    #[structopt(
+        parse(from_os_str),
+        help = "Selected files/directories to extract, list or add to an archive"
+    )]
     selected_files: Vec<PathBuf>,
 }
 
@@ -75,7 +91,7 @@ fn append(
 
     let mut bf = BoxFile::open(path)?;
 
-    let (mut known_dirs, mut known_files) = {
+    let (mut known_dirs, known_files) = {
         (
             bf.metadata()
                 .records()
@@ -335,7 +351,7 @@ fn create(
         eprintln!("Cowardly refusing to recursively archive self; aborting.");
         std::process::exit(1);
     }
-    
+
     let mut bf = BoxFile::create(path)?;
     let mut known_dirs = std::collections::HashSet::new();
 
@@ -397,7 +413,9 @@ fn main() {
     } else if opts.extract {
         extract(opts.path, opts.selected_files, opts.verbose)
     } else {
-        unreachable!();
+        CliOpts::clap().print_help().unwrap();
+        println!();
+        std::process::exit(1);
     };
 
     match result {
