@@ -7,6 +7,9 @@ use box_format::{BoxFile, Compression, Record};
 use byteorder::{LittleEndian, ReadBytesExt};
 use structopt::StructOpt;
 
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
+
 #[derive(Debug)]
 struct ParseCompressionError(String);
 
@@ -386,7 +389,6 @@ fn collect_parent_directories(path: &Path) -> Vec<(String, HashMap<String, Vec<u
 }
 
 fn metadata(path: &Path) -> HashMap<String, Vec<u8>> {
-    use std::os::unix::fs::PermissionsExt;
     use std::time::SystemTime;
 
     let mut attrs = HashMap::new();
@@ -404,6 +406,7 @@ fn metadata(path: &Path) -> HashMap<String, Vec<u8>> {
         attrs.insert("created".into(), bytes.to_vec());
     }
 
+    #[cfg(unix)]
     attrs.insert(
         "unix.acl".into(),
         meta.permissions().mode().to_le_bytes().to_vec(),
