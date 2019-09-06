@@ -24,7 +24,7 @@ pub enum Compression {
     Zstd,
     Xz,
     Snappy,
-    Unknown(u32),
+    Unknown(u8),
 }
 
 impl fmt::Display for Compression {
@@ -50,16 +50,22 @@ impl fmt::Debug for Compression {
     }
 }
 
+const COMPRESSION_STORED: u8 = 0x00;
+const COMPRESSION_DEFLATE: u8 = 0x10;
+const COMPRESSION_ZSTD: u8 = 0x20;
+const COMPRESSION_XZ: u8 = 0x30;
+const COMPRESSION_SNAPPY: u8 = 0x40;
+
 impl Compression {
-    pub fn id(self) -> u32 {
+    pub fn id(self) -> u8 {
         use Compression::*;
 
         match self {
-            Stored => 0x00_0000,
-            Deflate => 0x01_0000,
-            Zstd => 0x02_0000,
-            Xz => 0x03_0000,
-            Snappy => 0x04_0000,
+            Stored => COMPRESSION_STORED,
+            Deflate => COMPRESSION_DEFLATE,
+            Zstd => COMPRESSION_ZSTD,
+            Xz => COMPRESSION_XZ,
+            Snappy => COMPRESSION_SNAPPY,
             Unknown(id) => id,
         }
     }
@@ -267,7 +273,7 @@ trait DeserializeOwned {
 
 impl Serialize for Compression {
     fn write<W: Write>(&self, writer: &mut W) -> std::io::Result<()> {
-        writer.write_u24::<LittleEndian>(self.id())
+        writer.write_u8(self.id())
     }
 }
 
@@ -276,16 +282,16 @@ impl DeserializeOwned for Compression {
     where
         Self: Sized,
     {
-        let id = reader.read_u24::<LittleEndian>()?;
+        let id = reader.read_u8()?;
 
         use Compression::*;
 
         Ok(match id {
-            0x00_0000 => Stored,
-            0x01_0000 => Deflate,
-            0x02_0000 => Zstd,
-            0x03_0000 => Xz,
-            0x04_0000 => Snappy,
+            COMPRESSION_STORED => Stored,
+            COMPRESSION_DEFLATE => Deflate,
+            COMPRESSION_ZSTD => Zstd,
+            COMPRESSION_XZ => Xz,
+            COMPRESSION_SNAPPY => Snappy,
             id => Unknown(id),
         })
     }
@@ -393,7 +399,7 @@ where
 impl Serialize for FileRecord {
     fn write<W: Write>(&self, writer: &mut W) -> std::io::Result<()> {
         writer.write_u8(0x0)?;
-        writer.write_u24::<LittleEndian>(self.compression.id())?;
+        writer.write_u8(self.compression.id())?;
         writer.write_u64::<LittleEndian>(self.length)?;
         writer.write_u64::<LittleEndian>(self.decompressed_length)?;
 
@@ -519,15 +525,6 @@ impl DeserializeOwned for BoxMetadata {
 mod tests {
     use super::*;
     use std::io::Cursor;
-
-    #[test]
-    fn read_u24() {
-        let mut lolvec = Cursor::new(0x1234_5678u32.to_le_bytes().to_vec());
-        let a = lolvec.read_u8().unwrap();
-        let b = lolvec.read_u24::<LittleEndian>().unwrap();
-        assert_eq!(a, 0x78u8);
-        assert_eq!(b, 0x123456u32);
-    }
 
     fn create_test_box<F: AsRef<Path>>(filename: F) {
         let _ = std::fs::remove_file(filename.as_ref());
