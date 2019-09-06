@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::default::Default;
+use std::fmt;
 use std::fs::OpenOptions;
 use std::io::{prelude::*, Result, SeekFrom};
 use std::num::NonZeroU64;
@@ -8,15 +9,15 @@ use std::path::Path;
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use comde::{
     deflate::{DeflateCompressor, DeflateDecompressor},
-    stored::{StoredCompressor, StoredDecompressor},
-    zstd::{ZstdCompressor, ZstdDecompressor},
-    xz::{XzCompressor, XzDecompressor},
     snappy::{SnappyCompressor, SnappyDecompressor},
+    stored::{StoredCompressor, StoredDecompressor},
+    xz::{XzCompressor, XzDecompressor},
+    zstd::{ZstdCompressor, ZstdDecompressor},
     ByteCount, Compress, Compressor, Decompress, Decompressor,
 };
 use memmap::MmapOptions;
 
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+#[derive(Clone, Copy, Eq, PartialEq)]
 pub enum Compression {
     Stored,
     Deflate,
@@ -24,6 +25,29 @@ pub enum Compression {
     Xz,
     Snappy,
     Unknown(u32),
+}
+
+impl fmt::Display for Compression {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        use Compression::*;
+
+        let s = match self {
+            Stored => "stored",
+            Deflate => "DEFLATE",
+            Zstd => "Zstandard",
+            Xz => "xz",
+            Snappy => "Snappy",
+            Unknown(id) => return write!(f, "Unknown(id: {:x})", id),
+        };
+
+        write!(f, "{}", s)
+    }
+}
+
+impl fmt::Debug for Compression {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(self, f)
+    }
 }
 
 impl Compression {
@@ -246,6 +270,8 @@ impl DeserializeOwned for Compression {
             0x00_0000 => Stored,
             0x01_0000 => Deflate,
             0x02_0000 => Zstd,
+            0x03_0000 => Xz,
+            0x04_0000 => Snappy,
             id => Unknown(id),
         })
     }
@@ -415,8 +441,13 @@ impl DeserializeOwned for Record {
         let ty = reader.read_u8()?;
         match ty {
             0 => Ok(Record::File(FileRecord::deserialize_owned(reader)?)),
-            1 => Ok(Record::Directory(DirectoryRecord::deserialize_owned(reader)?)),
-            _ => Err(std::io::Error::new(std::io::ErrorKind::InvalidData, format!("invalid or unsupported field type: {}", ty)))
+            1 => Ok(Record::Directory(DirectoryRecord::deserialize_owned(
+                reader,
+            )?)),
+            _ => Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("invalid or unsupported field type: {}", ty),
+            )),
         }
     }
 }
@@ -568,10 +599,7 @@ mod tests {
             attrs.insert("created".to_string(), now.to_vec());
             attrs.insert("unix.acl".to_string(), 0o644u16.to_le_bytes().to_vec());
 
-            bf.mkdir(
-                "test",
-                dir_attrs
-            ).unwrap();
+            bf.mkdir("test", dir_attrs).unwrap();
 
             bf.insert(
                 Compression::Zstd,
@@ -600,7 +628,8 @@ mod tests {
         );
         assert_eq!(
             v,
-            bf.data::<String>(&bf.meta.records[2].as_file().unwrap()).unwrap()
+            bf.data::<String>(&bf.meta.records[2].as_file().unwrap())
+                .unwrap()
         );
     }
 }
@@ -675,21 +704,16 @@ impl BoxFile {
         .unwrap()
     }
 
-    pub fn data<V: Decompress>(
-        &self,
-        record: &FileRecord,
-    ) -> std::io::Result<V> {
+    pub fn data<V: Decompress>(&self, record: &FileRecord) -> std::io::Result<V> {
         let mmap = self.read_data(record)?;
         record.compression.decompress(std::io::Cursor::new(mmap))
     }
 
-    pub fn decompress<W: Write>(
-        &self,
-        record: &FileRecord,
-        dest: W
-    ) -> std::io::Result<()> {
+    pub fn decompress<W: Write>(&self, record: &FileRecord, dest: W) -> std::io::Result<()> {
         let mmap = self.read_data(record)?;
-        record.compression.decompress_write(std::io::Cursor::new(mmap), dest)
+        record
+            .compression
+            .decompress_write(std::io::Cursor::new(mmap), dest)
     }
 
     pub fn set_attr<P: AsRef<str>, S: AsRef<str>>(
@@ -715,10 +739,9 @@ impl BoxFile {
     ) -> std::io::Result<()> {
         let path = path.as_ref().to_string();
 
-        self.meta.records.push(Record::Directory(DirectoryRecord {
-            path,
-            attrs
-        }));
+        self.meta
+            .records
+            .push(Record::Directory(DirectoryRecord { path, attrs }));
         self.write_trailer()?;
         Ok(())
     }
