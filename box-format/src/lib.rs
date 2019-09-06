@@ -608,7 +608,7 @@ mod tests {
                 .as_secs()
                 .to_le_bytes();
 
-            let mut bf = f(filename); //BoxFile::create(&filename).expect("Mah box");
+            let mut bf = f(filename);
 
             let mut dir_attrs = HashMap::new();
             dir_attrs.insert("created".into(), now.to_vec());
@@ -800,7 +800,7 @@ impl BoxFile {
             Some(v) => v as u32,
             None => {
                 self.meta.attr_keys.push(key.to_string());
-                self.meta.attr_keys.len() as u32
+                (self.meta.attr_keys.len() - 1) as u32
             }
         }
     }
