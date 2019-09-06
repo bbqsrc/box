@@ -122,27 +122,41 @@ impl Compression {
 }
 
 #[derive(Debug)]
-struct FileHeader {
+pub struct BoxHeader {
     magic_bytes: [u8; 4],
     version: u32,
     alignment: Option<NonZeroU64>,
     trailer: Option<NonZeroU64>,
 }
 
-impl FileHeader {
-    fn new(trailer: Option<NonZeroU64>) -> FileHeader {
-        FileHeader {
+impl BoxHeader {
+    fn new(trailer: Option<NonZeroU64>) -> BoxHeader {
+        BoxHeader {
             magic_bytes: *b"BOX\0",
             version: 0x0,
             alignment: None,
             trailer,
         }
     }
+
+    fn with_alignment(alignment: NonZeroU64) -> BoxHeader {
+        let mut header = BoxHeader::default();
+        header.alignment = Some(alignment);
+        header
+    }
+
+    pub fn alignment(&self) -> Option<NonZeroU64> {
+        self.alignment
+    }
+
+    pub fn version(&self) -> u32 {
+        self.version
+    }
 }
 
-impl Default for FileHeader {
+impl Default for BoxHeader {
     fn default() -> Self {
-        FileHeader::new(None)
+        BoxHeader::new(None)
     }
 }
 
@@ -452,7 +466,7 @@ impl DeserializeOwned for Record {
     }
 }
 
-impl Serialize for FileHeader {
+impl Serialize for BoxHeader {
     fn write<W: Write>(&self, writer: &mut W) -> std::io::Result<()> {
         writer.write_all(&self.magic_bytes)?;
         writer.write_u32::<LittleEndian>(self.version)?;
@@ -461,7 +475,7 @@ impl Serialize for FileHeader {
     }
 }
 
-impl DeserializeOwned for FileHeader {
+impl DeserializeOwned for BoxHeader {
     fn deserialize_owned<R: Read>(reader: &mut R) -> std::io::Result<Self> {
         let magic_bytes = reader.read_u32::<LittleEndian>()?.to_le_bytes();
 
@@ -476,7 +490,7 @@ impl DeserializeOwned for FileHeader {
         let alignment = NonZeroU64::new(reader.read_u64::<LittleEndian>()?);
         let trailer = reader.read_u64::<LittleEndian>()?;
 
-        Ok(FileHeader {
+        Ok(BoxHeader {
             magic_bytes,
             version,
             alignment,
@@ -521,19 +535,19 @@ mod tests {
         let mut cursor: Cursor<Vec<u8>> = Cursor::new(vec![]);
         let data = b"hello\0\0\0";
 
-        let mut header = FileHeader::default();
+        let mut header = BoxHeader::default();
         // header.alignment = NonZeroU64::new(8);
         let mut trailer = BoxMetadata::default();
         trailer.records.push(Record::File(FileRecord {
             compression: Compression::Stored,
             length: data.len() as u64,
             decompressed_length: data.len() as u64,
-            data: NonZeroU64::new(std::mem::size_of::<FileHeader>() as u64).unwrap(),
+            data: NonZeroU64::new(std::mem::size_of::<BoxHeader>() as u64).unwrap(),
             path: "hello.txt".into(),
             attrs: HashMap::new(),
         }));
 
-        header.trailer = NonZeroU64::new(std::mem::size_of::<FileHeader>() as u64 + 8);
+        header.trailer = NonZeroU64::new(std::mem::size_of::<BoxHeader>() as u64 + 8);
 
         header.write(&mut cursor).unwrap();
         cursor.write_all(data).unwrap();
@@ -573,9 +587,7 @@ mod tests {
         assert!(bf.read_trailer().is_ok());
     }
 
-    #[test]
-    fn insert() {
-        let filename = "./insert_garbage.box";
+    fn insert_impl<F>(filename: &str, f: F) where F: Fn(&str) -> BoxFile {
         let _ = std::fs::remove_file(&filename);
         let v =
             "This, this, this, this, this is a compressable string string string string string.\n"
@@ -589,7 +601,7 @@ mod tests {
                 .as_secs()
                 .to_le_bytes();
 
-            let mut bf = BoxFile::create(&filename).expect("Mah box");
+            let mut bf = f(filename);//BoxFile::create(&filename).expect("Mah box");
 
             let mut dir_attrs = HashMap::new();
             dir_attrs.insert("created".to_string(), now.to_vec());
@@ -623,21 +635,28 @@ mod tests {
 
         assert_eq!(
             v,
-            bf.data::<String>(&bf.meta.records[1].as_file().unwrap())
+            bf.decompress_value::<String>(&bf.meta.records[1].as_file().unwrap())
                 .unwrap()
         );
         assert_eq!(
             v,
-            bf.data::<String>(&bf.meta.records[2].as_file().unwrap())
+            bf.decompress_value::<String>(&bf.meta.records[2].as_file().unwrap())
                 .unwrap()
         );
+    }
+
+    #[test]
+    fn insert() {
+        insert_impl("./insert_garbage.box", |n| BoxFile::create(n).unwrap());
+        insert_impl("./insert_garbage_align8.box", |n| BoxFile::create_with_alignment(n, NonZeroU64::new(8).unwrap()).unwrap());
+        insert_impl("./insert_garbage_align7.box", |n| BoxFile::create_with_alignment(n, NonZeroU64::new(7).unwrap()).unwrap());
     }
 }
 
 #[derive(Debug)]
 pub struct BoxFile {
     file: std::fs::File,
-    header: FileHeader,
+    header: BoxHeader,
     meta: BoxMetadata,
 }
 
@@ -651,7 +670,7 @@ impl BoxFile {
             .map(|file| {
                 let mut f = BoxFile {
                     file,
-                    header: FileHeader::default(),
+                    header: BoxHeader::default(),
                     meta: BoxMetadata::default(),
                 };
 
@@ -673,16 +692,44 @@ impl BoxFile {
             .open(path.as_ref())
             .map(|file| BoxFile {
                 file,
-                header: FileHeader::default(),
+                header: BoxHeader::default(),
                 meta: BoxMetadata::default(),
             })?;
 
-        boxfile.write_header()?;
-        let pos = boxfile.write_trailer()?;
-        boxfile.header.trailer = Some(NonZeroU64::new(pos).unwrap());
-        boxfile.write_header()?;
+        boxfile.write_header_and_trailer()?;
 
         Ok(boxfile)
+    }
+
+    /// This will create a new `.box` file for reading and writing, and error if the file already exists.
+    /// Will insert byte-aligned values based on provided `alignment` value. For best results, consider a power of 2.
+    pub fn create_with_alignment<P: AsRef<Path>>(path: P, alignment: NonZeroU64) -> std::io::Result<BoxFile> {
+        let mut boxfile = OpenOptions::new()
+            .write(true)
+            .read(true)
+            .create_new(true)
+            .open(path.as_ref())
+            .map(|file| BoxFile {
+                file,
+                header: BoxHeader::with_alignment(alignment),
+                meta: BoxMetadata::default(),
+            })?;
+
+        boxfile.write_header_and_trailer()?;
+
+        Ok(boxfile)
+    }
+
+    #[inline(always)]
+    fn write_header_and_trailer(&mut self) -> std::io::Result<()> {
+        self.write_header()?;
+        let pos = self.write_trailer()?;
+        self.header.trailer = Some(NonZeroU64::new(pos).unwrap());
+        self.write_header()
+    }
+
+    pub fn header(&self) -> &BoxHeader {
+        &self.header
     }
 
     /// Will return the metadata for the `.box` if it has been provided.
@@ -692,19 +739,35 @@ impl BoxFile {
 
     #[inline(always)]
     pub fn next_write_addr(&self) -> NonZeroU64 {
-        NonZeroU64::new(
-            self.meta
-                .records
-                .iter()
-                .rev()
-                .find_map(|r| r.as_file())
-                .map(|r| r.data.get() + r.length)
-                .unwrap_or(std::mem::size_of::<FileHeader>() as u64),
-        )
-        .unwrap()
+        let offset = self.meta
+            .records
+            .iter()
+            .rev()
+            .find_map(|r| r.as_file())
+            .map(|r| r.data.get() + r.length)
+            .unwrap_or(std::mem::size_of::<BoxHeader>() as u64);
+        
+        let v = match self.header.alignment {
+            None => offset,
+            Some(alignment) => {
+                let alignment = alignment.get();
+                let diff = offset % alignment;
+                if diff == 0 {
+                    offset
+                } else {
+                    offset + (alignment - diff)
+                }
+            }
+        };
+
+        NonZeroU64::new(v).unwrap()
     }
 
-    pub fn data<V: Decompress>(&self, record: &FileRecord) -> std::io::Result<V> {
+    pub fn data(&self, record: &FileRecord) -> std::io::Result<memmap::Mmap> {
+        self.read_data(record)
+    }
+
+    pub fn decompress_value<V: Decompress>(&self, record: &FileRecord) -> std::io::Result<V> {
         let mmap = self.read_data(record)?;
         record.compression.decompress(std::io::Cursor::new(mmap))
     }
@@ -783,9 +846,9 @@ impl BoxFile {
     }
 
     #[inline(always)]
-    fn read_header(&mut self) -> std::io::Result<FileHeader> {
+    fn read_header(&mut self) -> std::io::Result<BoxHeader> {
         self.file.seek(SeekFrom::Start(0))?;
-        FileHeader::deserialize_owned(&mut self.file)
+        BoxHeader::deserialize_owned(&mut self.file)
     }
 
     #[inline(always)]

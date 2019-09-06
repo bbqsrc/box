@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::io::Result;
 use std::path::{Path, PathBuf};
+use std::num::NonZeroU64;
 
 use box_format::{BoxFile, Compression, Record};
 use byteorder::{LittleEndian, ReadBytesExt};
@@ -31,6 +32,12 @@ fn parse_compression(src: &str) -> std::result::Result<Compression, ParseCompres
 }
 
 use structopt::clap::AppSettings::*;
+
+#[inline(always)]
+#[allow(dead_code)] // used in Commands
+fn stored() -> Compression {
+    Compression::Stored
+}
 
 #[derive(Debug, StructOpt)]
 enum Commands {
@@ -76,16 +83,16 @@ enum Commands {
         #[structopt(
             short = "A",
             long,
-            help = "Align inserted records by specified bytes [unsigned 64-bit int, default: 0]"
+            help = "Align inserted records by specified bytes [unsigned 64-bit int, default: none]",
         )]
-        alignment: Option<u64>,
+        alignment: Option<NonZeroU64>,
 
         #[structopt(
             short = "C",
             long,
             parse(try_from_str = parse_compression),
             hide_default_value = true,
-            default_value = "Compression::Stored",
+            default_value = "stored",
             help = "Compression to be used for a file [default: stored]"
         )]
         compression: Compression,
@@ -281,12 +288,20 @@ fn unix_acl(attrs: &HashMap<String, Vec<u8>>) -> String {
 fn list(path: PathBuf, selected_files: Vec<PathBuf>, verbose: bool) -> Result<()> {
     use humansize::{file_size_opts as options, FileSize};
 
-    let bf = BoxFile::open(path)?;
+    let bf = BoxFile::open(&path)?;
     let metadata = bf.metadata();
 
-    println!("Method        Compressed     Length         Created                Unix ACL    Path");
+    let alignment = match bf.header().alignment() {
+        Some(v) => format!("{} bytes", v.get()),
+        None => "None".into()
+    };
+    println!("Box archive: {} (alignment: {})", path.display(), alignment);
     println!(
-        "------------  -------------  -------------  ---------------------  ----------  --------"
+        "-------------  -------------  -------------  ---------------------  ----------  --------"
+    );
+    println!(" Method         Compressed     Length         Created                Unix ACL    Path");
+    println!(
+        "-------------  -------------  -------------  ---------------------  ----------  --------"
     );
     for record in metadata.records().iter() {
         let acl = unix_acl(record.attrs());
@@ -296,7 +311,7 @@ fn list(path: PathBuf, selected_files: Vec<PathBuf>, verbose: bool) -> Result<()
         match record {
             Record::Directory(_) => {
                 println!(
-                    "{:12}  {:>12}   {:>12}   {:<20}   {:<9}   {}",
+                    " {:12}  {:>12}   {:>12}   {:<20}   {:<9}   {}",
                     "<directory>", "-", "-", time, acl, path,
                 );
             }
@@ -308,7 +323,7 @@ fn list(path: PathBuf, selected_files: Vec<PathBuf>, verbose: bool) -> Result<()
                     .unwrap();
 
                 println!(
-                    "{:12}  {:>12}   {:>12}   {:<20}   {:<9}   {}",
+                    " {:12}  {:>12}   {:>12}   {:<20}   {:<9}   {}",
                     format!("{:?}", record.compression),
                     length,
                     decompressed_length,
@@ -405,14 +420,21 @@ fn create(
     compression: Compression,
     recursive: bool,
     verbose: bool,
-    alignment: Option<u64>,
+    alignment: Option<NonZeroU64>,
 ) -> Result<()> {
+    println!("{:?}", alignment);
+
+    // TODO: silently ignore self-archiving unless it's the only thing in the list.
     if selected_files.contains(&path) {
         eprintln!("Cowardly refusing to recursively archive self; aborting.");
         std::process::exit(1);
     }
 
-    let mut bf = BoxFile::create(path)?;
+    let mut bf = match alignment {
+        None => BoxFile::create(path),
+        Some(alignment) => BoxFile::create_with_alignment(path, alignment)
+    }?;
+
     let mut known_dirs = std::collections::HashSet::new();
 
     for file_path in selected_files.into_iter() {
