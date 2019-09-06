@@ -22,59 +22,111 @@ fn parse_compression(src: &str) -> std::result::Result<Compression, ParseCompres
         "stored" => Compression::Stored,
         "deflate" => Compression::Deflate,
         "zstd" | "zstandard" => Compression::Zstd,
+        "xz" => Compression::Xz,
+        "snappy" => Compression::Snappy,
         _ => return Err(ParseCompressionError(src.to_string())),
     };
 
     Ok(compression)
 }
 
-use structopt::clap::{ArgGroup, AppSettings::*};
+use structopt::clap::AppSettings::*;
 
+#[derive(Debug, StructOpt)]
+enum Commands {
+    #[structopt(
+        name = "a",
+        visible_alias = "append",
+        about = "Append files to an existing archive",
+    )]
+    Append {
+        #[structopt(
+            short = "C",
+            long,
+            parse(try_from_str = parse_compression),
+            hide_default_value = true,
+            default_value = "Compression::Stored",
+            help = "Compression to be used for a file [default: stored]"
+        )]
+        compression: Compression,
+
+        #[structopt(short, long, help = "Recursively handle provided paths")]
+        recursive: bool,
+
+        #[structopt(name = "boxfile", parse(from_os_str), help = "Path to the .box archive")]
+        path: PathBuf,
+    },
+
+    #[structopt(
+        name = "l",
+        visible_alias = "list",
+        about = "List files of an archive",
+    )]
+    List {
+        #[structopt(name = "boxfile", parse(from_os_str), help = "Path to the .box archive")]
+        path: PathBuf,
+    },
+
+    #[structopt(
+        name = "c",
+        visible_alias = "create",
+        about = "Create a new archive",
+    )]
+    Create {
+        #[structopt(
+            short = "A",
+            long,
+            help = "Align inserted records by specified bytes [unsigned 64-bit int, default: 0]"
+        )]
+        alignment: Option<u64>,
+
+        #[structopt(
+            short = "C",
+            long,
+            parse(try_from_str = parse_compression),
+            hide_default_value = true,
+            default_value = "Compression::Stored",
+            help = "Compression to be used for a file [default: stored]"
+        )]
+        compression: Compression,
+
+        #[structopt(short, long, help = "Recursively handle provided paths")]
+        recursive: bool,
+
+        #[structopt(name = "boxfile", parse(from_os_str), help = "Path to the .box archive")]
+        path: PathBuf,
+    },
+
+    #[structopt(
+        name = "x",
+        visible_alias = "extract",
+        about = "Extract files from an archive",
+    )]
+    Extract {
+        #[structopt(name = "boxfile", parse(from_os_str), help = "Path to the .box archive")]
+        path: PathBuf,
+    }
+}
 
 #[derive(Debug, StructOpt)]
 #[structopt(
     name = "box",
     about = "Brendan Molloy <https://github.com/bbqsrc/box>\nCreate, modify and extract box archives.",
-    settings = &[ArgRequiredElseHelp, DontCollapseArgsInUsage],
-    group = ArgGroup::with_name("verb").required(true),
-    usage = "box <-a|-c|-l|-x> [FLAGS|OPTIONS] <boxfile> [files]..."
+    settings = &[SubcommandRequiredElseHelp, DisableHelpSubcommand, VersionlessSubcommands],
+    usage = "box (a|c|l|x) [FLAGS|OPTIONS] <boxfile> [files]..."
 )]
 struct CliOpts {
-    #[structopt(short = "a", long, group = "verb", conflicts_with_all = &["create", "list", "extract"], help = "Append files to an existing archive")]
-    append: bool,
-
-    #[structopt(short = "l", long, group = "verb", conflicts_with_all = &["append", "create", "extract"], help = "List files of an archive")]
-    list: bool,
-
-    #[structopt(short = "c", long, group = "verb", conflicts_with_all = &["append", "list", "extract"], help = "Create a new archive")]
-    create: bool,
-
-    #[structopt(short = "x", long, group = "verb", conflicts_with_all = &["append", "create", "list"], help = "Extract files from an archive")]
-    extract: bool,
-
-    #[structopt(
-        short = "A",
-        long,
-        help = "Byte alignment to be used for an archive (create only, default none)"
-    )]
-    alignment: Option<u64>,
-
-    #[structopt(short = "C", long, parse(try_from_str = parse_compression), help = "Compression to be used for a file (create/append only, default stored)")]
-    compression: Option<Compression>,
-
-    #[structopt(short, long, help = "Recursively handle provided paths")]
-    recursive: bool,
-
-    #[structopt(short, long, help = "Show verbose output")]
+    #[structopt(short, long, help = "Show verbose output", global = true)]
     verbose: bool,
 
-    #[structopt(name = "boxfile", parse(from_os_str), help = "Path to the .box archive")]
-    path: PathBuf,
+    #[structopt(subcommand)]
+    cmd: Commands,
 
     #[structopt(
         name = "files",
         parse(from_os_str),
-        help = "Selected files/directories to extract, list or add to an archive"
+        help = "Selected files/directories to extract, list or add to an archive",
+        global = true
     )]
     selected_files: Vec<PathBuf>,
 }
@@ -227,8 +279,8 @@ fn list(path: PathBuf, selected_files: Vec<PathBuf>, verbose: bool) -> Result<()
     let bf = BoxFile::open(path)?;
     let metadata = bf.metadata();
 
-    println!("Method    Compressed     Length         Created                Unix ACL    Path");
-    println!("--------  -------------  -------------  ---------------------  ----------  --------");
+    println!("Method        Compressed     Length         Created                Unix ACL    Path");
+    println!("------------  -------------  -------------  ---------------------  ----------  --------");
     for record in metadata.records().iter() {
         let acl = unix_acl(record.attrs());
         let time = time(record.attrs());
@@ -237,8 +289,8 @@ fn list(path: PathBuf, selected_files: Vec<PathBuf>, verbose: bool) -> Result<()
         match record {
             Record::Directory(record) => {
                 println!(
-                    "{:8}  {:>12}  {:>12}    {:<20}   {:<9}   {}",
-                    "", "", "", time, acl, path,
+                    "{:12}  {:>12}   {:>12}   {:<20}   {:<9}   {}",
+                    "<directory>", "-", "-", time, acl, path,
                 );
             }
             Record::File(record) => {
@@ -249,7 +301,7 @@ fn list(path: PathBuf, selected_files: Vec<PathBuf>, verbose: bool) -> Result<()
                     .unwrap();
 
                 println!(
-                    "{:<8}  {:>12}   {:>12}   {:<20}   {:<9}   {}",
+                    "{:12}  {:>12}   {:>12}   {:<20}   {:<9}   {}",
                     format!("{:?}", record.compression),
                     length,
                     decompressed_length,
@@ -385,38 +437,39 @@ fn create(
 fn main() {
     let opts = CliOpts::from_args();
 
-    let actions_count = [opts.append, opts.list, opts.create, opts.extract]
-        .into_iter()
-        .filter(|x| **x)
-        .count();
+    // let actions_count = [opts.append, opts.list, opts.create, opts.extract]
+    //     .into_iter()
+    //     .filter(|x| **x)
+    //     .count();
 
-    if actions_count > 1 {
-        eprintln!("Multiple actions selected; aborting.");
-    } else if actions_count == 0 {
-        eprintln!("No actions selected; aborting.");
-    }
+    // if actions_count > 1 {
+    //     eprintln!("Multiple actions selected; aborting.");
+    // } else if actions_count == 0 {
+    //     eprintln!("No actions selected; aborting.");
+    // }
 
-    let compression = opts.compression.unwrap_or(Compression::Stored);
+    // let compression = opts.compression.unwrap_or(Compression::Stored);
 
-    let result = if opts.append {
-        append(opts.path, opts.selected_files, compression, opts.verbose)
-    } else if opts.list {
-        list(opts.path, opts.selected_files, opts.verbose)
-    } else if opts.create {
-        create(
-            opts.path,
-            opts.selected_files,
-            compression,
-            opts.recursive,
-            opts.verbose,
-            opts.alignment,
-        )
-    } else if opts.extract {
-        extract(opts.path, opts.selected_files, opts.verbose)
-    } else {
-        CliOpts::clap().print_help().unwrap();
-        println!();
-        std::process::exit(1);
+    let result = match opts.cmd {
+        Commands::Append { path, compression, recursive } => {
+            append(path, opts.selected_files, compression, opts.verbose)
+        },
+        Commands::List { path, } => {
+            list(path, opts.selected_files, opts.verbose)
+        },
+        Commands::Extract { path, } => {
+            extract(path, opts.selected_files, opts.verbose)
+        },
+        Commands::Create { path, alignment, compression, recursive } => {
+            create(
+                path,
+                opts.selected_files,
+                compression,
+                recursive,
+                opts.verbose,
+                alignment,
+            )
+        }
     };
 
     match result {
