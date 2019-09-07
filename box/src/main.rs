@@ -1,14 +1,14 @@
 use std::collections::HashMap;
-use std::io::Result;
-use std::path::{Path, PathBuf};
-use std::num::NonZeroU64;
 use std::collections::HashSet;
+use std::io::Result;
+use std::num::NonZeroU64;
+use std::path::{Path, PathBuf};
 
-use box_format::{BoxFile, Compression, Record, BoxPath, AttrMap, PATH_BOX_SEP, PATH_PLATFORM_SEP};
+use box_format::{AttrMap, BoxFile, BoxPath, Compression, Record, PATH_BOX_SEP, PATH_PLATFORM_SEP};
 use byteorder::{LittleEndian, ReadBytesExt};
+use crc32fast::Hasher as Crc32Hasher;
 use structopt::StructOpt;
 use walkdir::{DirEntry, WalkDir};
-use crc32fast::Hasher as Crc32Hasher;
 
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
@@ -89,7 +89,7 @@ enum Commands {
         #[structopt(
             short = "A",
             long,
-            help = "Align inserted records by specified bytes [unsigned 64-bit int, default: none]",
+            help = "Align inserted records by specified bytes [unsigned 64-bit int, default: none]"
         )]
         alignment: Option<NonZeroU64>,
 
@@ -140,7 +140,7 @@ enum Commands {
             help = "Path to the .box archive"
         )]
         path: PathBuf,
-    }
+    },
 }
 
 #[derive(Debug, StructOpt)]
@@ -279,8 +279,7 @@ fn from_acl_u16(acl: u16) -> String {
 
 #[inline(always)]
 fn time(attr: Option<&Vec<u8>>) -> String {
-    attr
-        .and_then(|x| x.as_slice().read_u64::<LittleEndian>().ok())
+    attr.and_then(|x| x.as_slice().read_u64::<LittleEndian>().ok())
         .map(|x| std::time::UNIX_EPOCH + std::time::Duration::new(x, 0))
         .map(|x| {
             let datetime: chrono::DateTime<chrono::Utc> = x.into();
@@ -291,8 +290,7 @@ fn time(attr: Option<&Vec<u8>>) -> String {
 
 #[inline(always)]
 fn unix_acl(attr: Option<&Vec<u8>>) -> String {
-    attr
-        .map(|x| from_acl_u16(u16::from_le_bytes([x[0], x[1]])))
+    attr.map(|x| from_acl_u16(u16::from_le_bytes([x[0], x[1]])))
         .unwrap_or_else(|| "-".into())
 }
 
@@ -304,7 +302,7 @@ fn list(path: PathBuf, selected_files: Vec<PathBuf>, verbose: bool) -> Result<()
 
     let alignment = match bf.header().alignment() {
         Some(v) => format!("{} bytes", v.get()),
-        None => "None".into()
+        None => "None".into(),
     };
     println!("Box archive: {} (alignment: {})", path.display(), alignment);
     println!("-------------  -------------  -------------  ---------------------  ----------  ---------  --------");
@@ -328,10 +326,9 @@ fn list(path: PathBuf, selected_files: Vec<PathBuf>, verbose: bool) -> Result<()
                     .decompressed_length
                     .file_size(options::BINARY)
                     .unwrap();
-                let crc32 = record.attr(&bf, "crc32")
-                    .map(|x| {
-                        Some(u32::from_le_bytes([x[0], x[1], x[2], x[3]]))
-                    })
+                let crc32 = record
+                    .attr(&bf, "crc32")
+                    .map(|x| Some(u32::from_le_bytes([x[0], x[1], x[2], x[3]])))
                     .unwrap_or(None)
                     .map(|x| format!("{:x}", x))
                     .unwrap_or_else(|| "-".to_string());
@@ -420,10 +417,11 @@ fn metadata(path: &Path) -> HashMap<String, Vec<u8>> {
 
 #[inline(always)]
 fn is_hidden(entry: &DirEntry) -> bool {
-    entry.file_name()
-         .to_str()
-         .map(|s| s.starts_with("."))
-         .unwrap_or(false)
+    entry
+        .file_name()
+        .to_str()
+        .map(|s| s.starts_with("."))
+        .unwrap_or(false)
 }
 
 #[inline(always)]
@@ -436,7 +434,14 @@ fn add_crc32(bf: &mut BoxFile, box_path: &BoxPath) -> std::io::Result<()> {
 }
 
 #[inline(always)]
-fn process_files<I: Iterator<Item = PathBuf>>(iter: I, recursive: bool, verbose: bool, compression: Compression, bf: &mut BoxFile, known_dirs: &mut HashSet<BoxPath>) -> std::io::Result<()> {
+fn process_files<I: Iterator<Item = PathBuf>>(
+    iter: I,
+    recursive: bool,
+    verbose: bool,
+    compression: Compression,
+    bf: &mut BoxFile,
+    known_dirs: &mut HashSet<BoxPath>,
+) -> std::io::Result<()> {
     for file_path in iter {
         let parents = collect_parent_directories(&file_path);
         let box_path = BoxPath::new(&file_path).unwrap();
@@ -460,7 +465,12 @@ fn process_files<I: Iterator<Item = PathBuf>>(iter: I, recursive: bool, verbose:
             let file = std::fs::File::open(&file_path)?;
             let record = bf.insert(compression, box_path.clone(), file, metadata(&file_path))?;
             if verbose {
-                println!("{} (compressed {:.*}%)", &file_path.display(), 2, 100.0 - (record.length as f64 / record.decompressed_length as f64 * 100.0));
+                println!(
+                    "{} (compressed {:.*}%)",
+                    &file_path.display(),
+                    2,
+                    100.0 - (record.length as f64 / record.decompressed_length as f64 * 100.0)
+                );
             }
             add_crc32(bf, &box_path)?;
         }
@@ -485,12 +495,19 @@ fn create(
 
     let mut bf = match alignment {
         None => BoxFile::create(path),
-        Some(alignment) => BoxFile::create_with_alignment(path, alignment)
+        Some(alignment) => BoxFile::create_with_alignment(path, alignment),
     }?;
 
     let mut known_dirs = std::collections::HashSet::new();
 
-    process_files(selected_files.into_iter(), recursive, verbose, compression, &mut bf, &mut known_dirs)?;
+    process_files(
+        selected_files.into_iter(),
+        recursive,
+        verbose,
+        compression,
+        &mut bf,
+        &mut known_dirs,
+    )?;
 
     Ok(())
 }
@@ -519,11 +536,7 @@ fn main() {
             opts.verbose,
             alignment,
         ),
-        Commands::Test {
-            path
-        } => {
-            unimplemented!()
-        }
+        Commands::Test { path } => unimplemented!(),
     };
 
     if let Err(e) = result {
