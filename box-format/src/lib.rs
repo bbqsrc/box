@@ -6,7 +6,12 @@ use std::io::{prelude::*, Result, SeekFrom};
 use std::num::NonZeroU64;
 use std::path::{Path, PathBuf};
 
-use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
+mod de;
+mod ser;
+
+use de::DeserializeOwned;
+use ser::Serialize;
+
 use comde::{
     deflate::{DeflateCompressor, DeflateDecompressor},
     snappy::{SnappyCompressor, SnappyDecompressor},
@@ -383,489 +388,6 @@ impl FileRecord {
     }
 }
 
-trait Serialize {
-    fn write<W: Write>(&self, writer: &mut W) -> std::io::Result<()>;
-}
-
-trait DeserializeOwned {
-    fn deserialize_owned<R: Read>(reader: &mut R) -> std::io::Result<Self>
-    where
-        Self: Sized;
-}
-
-impl Serialize for Compression {
-    fn write<W: Write>(&self, writer: &mut W) -> std::io::Result<()> {
-        writer.write_u8(self.id())
-    }
-}
-
-impl DeserializeOwned for Compression {
-    fn deserialize_owned<R: Read>(reader: &mut R) -> std::io::Result<Self>
-    where
-        Self: Sized,
-    {
-        let id = reader.read_u8()?;
-
-        use Compression::*;
-
-        Ok(match id {
-            COMPRESSION_STORED => Stored,
-            COMPRESSION_DEFLATE => Deflate,
-            COMPRESSION_ZSTD => Zstd,
-            COMPRESSION_XZ => Xz,
-            COMPRESSION_SNAPPY => Snappy,
-            id => Unknown(id),
-        })
-    }
-}
-
-impl Serialize for String {
-    fn write<W: Write>(&self, writer: &mut W) -> std::io::Result<()> {
-        writer.write_u64::<LittleEndian>(self.len() as u64)?;
-        writer.write_all(self.as_bytes())
-    }
-}
-
-impl DeserializeOwned for String {
-    fn deserialize_owned<R: Read>(reader: &mut R) -> std::io::Result<Self>
-    where
-        Self: Sized,
-    {
-        let len = reader.read_u64::<LittleEndian>()?;
-        let mut string = String::with_capacity(len as usize);
-        reader.take(len).read_to_string(&mut string)?;
-        Ok(string)
-    }
-}
-
-impl Serialize for Vec<u8> {
-    fn write<W: Write>(&self, writer: &mut W) -> std::io::Result<()> {
-        writer.write_u64::<LittleEndian>(self.len() as u64)?;
-        writer.write_all(&*self)
-    }
-}
-
-impl DeserializeOwned for Vec<u8> {
-    fn deserialize_owned<R: Read>(reader: &mut R) -> std::io::Result<Self>
-    where
-        Self: Sized,
-    {
-        let len = reader.read_u64::<LittleEndian>()?;
-        let mut buf = Vec::with_capacity(len as usize);
-        reader.take(len).read_to_end(&mut buf)?;
-        Ok(buf)
-    }
-}
-
-impl<T: Serialize> Serialize for Vec<T> {
-    fn write<W: Write>(&self, writer: &mut W) -> std::io::Result<()> {
-        writer.write_u64::<LittleEndian>(self.len() as u64)?;
-        for item in self.iter() {
-            item.write(writer)?;
-        }
-        Ok(())
-    }
-}
-
-impl<T: DeserializeOwned> DeserializeOwned for Vec<T> {
-    fn deserialize_owned<R: Read>(reader: &mut R) -> std::io::Result<Self>
-    where
-        Self: Sized,
-    {
-        let len = reader.read_u64::<LittleEndian>()?;
-        let mut buf = Vec::with_capacity(len as usize);
-        for _ in 0..len {
-            buf.push(T::deserialize_owned(reader)?);
-        }
-        Ok(buf)
-    }
-}
-
-impl Serialize for AttrMap {
-    fn write<W: Write>(&self, writer: &mut W) -> std::io::Result<()> {
-        writer.write_u64::<LittleEndian>(self.len() as u64)?;
-        for (key, value) in self.iter() {
-            writer.write_u32::<LittleEndian>(*key)?;
-            value.write(writer)?;
-        }
-        Ok(())
-    }
-}
-
-impl Serialize for BoxPath {
-    fn write<W: Write>(&self, writer: &mut W) -> std::io::Result<()> {
-        self.0.write(writer)
-    }
-}
-
-impl DeserializeOwned for BoxPath {
-    fn deserialize_owned<R: Read>(reader: &mut R) -> std::io::Result<Self>
-    where
-        Self: Sized,
-    {
-        Ok(BoxPath(String::deserialize_owned(reader)?))
-    }
-}
-
-impl DeserializeOwned for u32 {
-    fn deserialize_owned<R: Read>(reader: &mut R) -> std::io::Result<Self>
-    where
-        Self: Sized,
-    {
-        reader.read_u32::<LittleEndian>()
-    }
-}
-
-impl DeserializeOwned for AttrMap {
-    fn deserialize_owned<R: Read>(reader: &mut R) -> std::io::Result<Self>
-    where
-        Self: Sized,
-    {
-        let len = reader.read_u64::<LittleEndian>()?;
-        let mut buf = HashMap::with_capacity(len as usize);
-        for _ in 0..len {
-            let key = u32::deserialize_owned(reader)?;
-            let value = Vec::deserialize_owned(reader)?;
-            buf.insert(key, value);
-        }
-        Ok(buf)
-    }
-}
-
-impl Serialize for FileRecord {
-    fn write<W: Write>(&self, writer: &mut W) -> std::io::Result<()> {
-        writer.write_u8(0x0)?;
-        writer.write_u8(self.compression.id())?;
-        writer.write_u64::<LittleEndian>(self.length)?;
-        writer.write_u64::<LittleEndian>(self.decompressed_length)?;
-
-        self.path.write(writer)?;
-        self.attrs.write(writer)?;
-
-        writer.write_u64::<LittleEndian>(self.data.get())
-    }
-}
-
-impl Serialize for DirectoryRecord {
-    fn write<W: Write>(&self, writer: &mut W) -> std::io::Result<()> {
-        writer.write_u8(0x1)?;
-        self.path.write(writer)?;
-        self.attrs.write(writer)
-    }
-}
-
-impl Serialize for Record {
-    fn write<W: Write>(&self, writer: &mut W) -> std::io::Result<()> {
-        match self {
-            Record::File(file) => file.write(writer),
-            Record::Directory(directory) => directory.write(writer),
-        }
-    }
-}
-
-impl DeserializeOwned for FileRecord {
-    fn deserialize_owned<R: Read>(reader: &mut R) -> std::io::Result<Self> {
-        let compression = Compression::deserialize_owned(reader)?;
-        let length = reader.read_u64::<LittleEndian>()?;
-        let decompressed_length = reader.read_u64::<LittleEndian>()?;
-        let path = BoxPath::deserialize_owned(reader)?;
-        let attrs = HashMap::deserialize_owned(reader)?;
-        let data = reader.read_u64::<LittleEndian>()?;
-
-        Ok(FileRecord {
-            compression,
-            length,
-            decompressed_length,
-            path,
-            attrs,
-            data: NonZeroU64::new(data).expect("non zero"),
-        })
-    }
-}
-
-impl DeserializeOwned for DirectoryRecord {
-    fn deserialize_owned<R: Read>(reader: &mut R) -> std::io::Result<Self> {
-        let path = BoxPath::deserialize_owned(reader)?;
-        let attrs = HashMap::deserialize_owned(reader)?;
-
-        Ok(DirectoryRecord { path, attrs })
-    }
-}
-
-impl DeserializeOwned for Record {
-    fn deserialize_owned<R: Read>(reader: &mut R) -> std::io::Result<Self> {
-        let ty = reader.read_u8()?;
-        match ty {
-            0 => Ok(Record::File(FileRecord::deserialize_owned(reader)?)),
-            1 => Ok(Record::Directory(DirectoryRecord::deserialize_owned(
-                reader,
-            )?)),
-            _ => Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!("invalid or unsupported field type: {}", ty),
-            )),
-        }
-    }
-}
-
-impl Serialize for BoxHeader {
-    fn write<W: Write>(&self, writer: &mut W) -> std::io::Result<()> {
-        writer.write_all(&self.magic_bytes)?;
-        writer.write_u32::<LittleEndian>(self.version)?;
-        writer.write_u64::<LittleEndian>(self.alignment.map(|x| x.get()).unwrap_or(0))?;
-        writer.write_u64::<LittleEndian>(self.trailer.map(|x| x.get()).unwrap_or(0))
-    }
-}
-
-impl DeserializeOwned for BoxHeader {
-    fn deserialize_owned<R: Read>(reader: &mut R) -> std::io::Result<Self> {
-        let magic_bytes = reader.read_u32::<LittleEndian>()?.to_le_bytes();
-
-        if &magic_bytes != b"BOX\0" {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "Magic bytes invalid",
-            ));
-        }
-
-        let version = reader.read_u32::<LittleEndian>()?;
-        let alignment = NonZeroU64::new(reader.read_u64::<LittleEndian>()?);
-        let trailer = reader.read_u64::<LittleEndian>()?;
-
-        Ok(BoxHeader {
-            magic_bytes,
-            version,
-            alignment,
-            trailer: NonZeroU64::new(trailer),
-        })
-    }
-}
-
-impl Serialize for BoxMetadata {
-    fn write<W: Write>(&self, writer: &mut W) -> std::io::Result<()> {
-        self.records.write(writer)?;
-        self.attr_keys.write(writer)?;
-        self.attrs.write(writer)
-    }
-}
-
-impl DeserializeOwned for BoxMetadata {
-    fn deserialize_owned<R: Read>(reader: &mut R) -> std::io::Result<Self> {
-        let records = Vec::deserialize_owned(reader)?;
-        let attr_keys = Vec::deserialize_owned(reader)?;
-        let attrs = HashMap::deserialize_owned(reader)?;
-
-        Ok(BoxMetadata {
-            records,
-            attr_keys,
-            attrs,
-        })
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::io::Cursor;
-
-    fn create_test_box<F: AsRef<Path>>(filename: F) {
-        let _ = std::fs::remove_file(filename.as_ref());
-
-        let mut cursor: Cursor<Vec<u8>> = Cursor::new(vec![]);
-        let data = b"hello\0\0\0";
-
-        let mut header = BoxHeader::default();
-        let mut trailer = BoxMetadata::default();
-        trailer.records.push(Record::File(FileRecord {
-            compression: Compression::Stored,
-            length: data.len() as u64,
-            decompressed_length: data.len() as u64,
-            data: NonZeroU64::new(std::mem::size_of::<BoxHeader>() as u64).unwrap(),
-            path: BoxPath::new("hello.txt").unwrap(),
-            attrs: HashMap::new(),
-        }));
-
-        header.trailer = NonZeroU64::new(std::mem::size_of::<BoxHeader>() as u64 + 8);
-
-        header.write(&mut cursor).unwrap();
-        cursor.write_all(data).unwrap();
-        trailer.write(&mut cursor).unwrap();
-
-        let mut f = std::fs::File::create(filename.as_ref()).unwrap();
-        f.write_all(&*cursor.get_ref()).unwrap();
-    }
-
-    #[test]
-    fn create_box_file() {
-        create_test_box("./smoketest.box");
-    }
-
-    #[test]
-    fn read_garbage() {
-        let filename = "./read_garbage.box";
-        create_test_box(&filename);
-
-        let mut bf = BoxFile::open(&filename).unwrap();
-        let trailer = bf.read_trailer().unwrap();
-        println!("{:?}", bf.read_header());
-        println!("{:?}", &trailer);
-        let file_data = bf
-            .read_data(&trailer.records[0].as_file().unwrap())
-            .unwrap();
-        println!("{:?}", &*file_data);
-        assert_eq!(&*file_data, b"hello\0\0\0")
-    }
-
-    #[test]
-    fn create_garbage() {
-        let filename = "./create_garbage.box";
-        let _ = std::fs::remove_file(&filename);
-        let mut bf = BoxFile::create(&filename).expect("Mah box");
-        assert!(bf.read_header().is_ok());
-        assert!(bf.read_trailer().is_ok());
-    }
-
-    #[test]
-    fn box_path_sanitisation() {
-        let box_path = BoxPath::new("/something/../somethingelse/./foo.txt").unwrap();
-        assert_eq!(box_path, "somethingelse\x1ffoo.txt");
-        let box_path = BoxPath::new("../something/../somethingelse/./foo.txt/.").unwrap();
-        assert_eq!(box_path, "somethingelse\x1ffoo.txt");
-
-        // This one will do different things on Windows and Unix, because Unix loves a good backslash
-        let box_path = BoxPath::new(r"..\something\..\somethingelse\.\foo.txt\.");
-
-        #[cfg(not(windows))]
-        assert!(box_path.is_err());
-        #[cfg(windows)]
-        assert_eq!(box_path.unwrap().0, "somethingelse\x1ffoo.txt");
-
-        let box_path = BoxPath::new(r"..\something/..\somethingelse\./foodir\");
-        #[cfg(not(windows))]
-        assert!(box_path.is_err());
-        #[cfg(windows)]
-        assert_eq!(box_path.unwrap().0, "somethingelse\x1ffoodir");
-    }
-
-    #[test]
-    fn box_path_sanitisation2() {
-        // Null is a sassy fellow
-        let box_path = BoxPath::new("\0");
-        assert!(box_path.is_err());
-    }
-
-    #[test]
-    fn box_path_sanitisation3() {
-        // Blank string is a sassy fellow if you can find him
-        let box_path = BoxPath::new("");
-        assert!(box_path.is_err());
-    }
-
-    #[test]
-    fn box_path_sanitisation4() {
-        // Blank string is a sassy fellow if you can find him
-        let box_path = BoxPath::new("/cant/hate//the/path");
-        println!("{:?}", box_path);
-        assert_eq!(box_path.unwrap().0, "cant\x1fhate\x1fthe\x1fpath");
-    }
-
-    #[test]
-    fn box_path_sanitisation_bidi() {
-        // Blank string is a sassy fellow if you can find him
-        let box_path = BoxPath::new("this is now العَرَبِيَّة.txt");
-        println!("{:?}", box_path);
-        assert_eq!(box_path.unwrap().0, "this is now العَرَبِيَّة.txt");
-    }
-
-    #[test]
-    fn box_path_sanitisation_basmala() {
-        // Blank string is a sassy fellow if you can find him
-        let box_path = BoxPath::new("this is now ﷽.txt");
-        println!("{:?}", box_path);
-        assert_eq!(box_path.unwrap().0, "this is now ﷽.txt");
-    }
-
-    #[test]
-    fn box_path_sanitisation_icecube_emoji() {
-        let box_path = BoxPath::new("///🧊/🧊");
-        println!("{:?}", box_path);
-        assert_eq!(box_path.unwrap().0, "🧊\x1f🧊");
-    }
-    
-
-    fn insert_impl<F>(filename: &str, f: F)
-    where
-        F: Fn(&str) -> BoxFile,
-    {
-        let _ = std::fs::remove_file(&filename);
-        let v =
-            "This, this, this, this, this is a compressable string string string string string.\n"
-                .to_string();
-
-        {
-            use std::time::SystemTime;
-            let now = SystemTime::now()
-                .duration_since(SystemTime::UNIX_EPOCH)
-                .unwrap()
-                .as_secs()
-                .to_le_bytes();
-
-            let mut bf = f(filename);
-
-            let mut dir_attrs = HashMap::new();
-            dir_attrs.insert("created".into(), now.to_vec());
-            dir_attrs.insert("unix.acl".into(), 0o755u16.to_le_bytes().to_vec());
-
-            let mut attrs = HashMap::new();
-            attrs.insert("created".into(), now.to_vec());
-            attrs.insert("unix.acl".into(), 0o644u16.to_le_bytes().to_vec());
-
-            bf.mkdir(BoxPath::new("test").unwrap(), dir_attrs).unwrap();
-
-            bf.insert(
-                Compression::Zstd,
-                BoxPath::new("test/string.txt").unwrap(),
-                v.clone(),
-                attrs.clone(),
-            )
-            .unwrap();
-            bf.insert(
-                Compression::Deflate,
-                BoxPath::new("test/string2.txt").unwrap(),
-                v.clone(),
-                attrs.clone(),
-            )
-            .unwrap();
-            println!("{:?}", &bf);
-        }
-
-        let bf = BoxFile::open(&filename).expect("Mah box");
-        println!("{:#?}", &bf);
-
-        assert_eq!(
-            v,
-            bf.decompress_value::<String>(&bf.meta.records[1].as_file().unwrap())
-                .unwrap()
-        );
-        assert_eq!(
-            v,
-            bf.decompress_value::<String>(&bf.meta.records[2].as_file().unwrap())
-                .unwrap()
-        );
-    }
-
-    #[test]
-    fn insert() {
-        insert_impl("./insert_garbage.box", |n| BoxFile::create(n).unwrap());
-        insert_impl("./insert_garbage_align8.box", |n| {
-            BoxFile::create_with_alignment(n, NonZeroU64::new(8).unwrap()).unwrap()
-        });
-        insert_impl("./insert_garbage_align7.box", |n| {
-            BoxFile::create_with_alignment(n, NonZeroU64::new(7).unwrap()).unwrap()
-        });
-    }
-}
-
 #[derive(Debug)]
 pub struct BoxFile {
     file: std::fs::File,
@@ -1149,5 +671,208 @@ impl BoxFile {
                 .len(header.length as usize)
                 .map(&self.file)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Cursor;
+
+    fn create_test_box<F: AsRef<Path>>(filename: F) {
+        let _ = std::fs::remove_file(filename.as_ref());
+
+        let mut cursor: Cursor<Vec<u8>> = Cursor::new(vec![]);
+        let data = b"hello\0\0\0";
+
+        let mut header = BoxHeader::default();
+        let mut trailer = BoxMetadata::default();
+        trailer.records.push(Record::File(FileRecord {
+            compression: Compression::Stored,
+            length: data.len() as u64,
+            decompressed_length: data.len() as u64,
+            data: NonZeroU64::new(std::mem::size_of::<BoxHeader>() as u64).unwrap(),
+            path: BoxPath::new("hello.txt").unwrap(),
+            attrs: HashMap::new(),
+        }));
+
+        header.trailer = NonZeroU64::new(std::mem::size_of::<BoxHeader>() as u64 + 8);
+
+        header.write(&mut cursor).unwrap();
+        cursor.write_all(data).unwrap();
+        trailer.write(&mut cursor).unwrap();
+
+        let mut f = std::fs::File::create(filename.as_ref()).unwrap();
+        f.write_all(&*cursor.get_ref()).unwrap();
+    }
+
+    #[test]
+    fn create_box_file() {
+        create_test_box("./smoketest.box");
+    }
+
+    #[test]
+    fn read_garbage() {
+        let filename = "./read_garbage.box";
+        create_test_box(&filename);
+
+        let mut bf = BoxFile::open(&filename).unwrap();
+        let trailer = bf.read_trailer().unwrap();
+        println!("{:?}", bf.read_header());
+        println!("{:?}", &trailer);
+        let file_data = bf
+            .read_data(&trailer.records[0].as_file().unwrap())
+            .unwrap();
+        println!("{:?}", &*file_data);
+        assert_eq!(&*file_data, b"hello\0\0\0")
+    }
+
+    #[test]
+    fn create_garbage() {
+        let filename = "./create_garbage.box";
+        let _ = std::fs::remove_file(&filename);
+        let mut bf = BoxFile::create(&filename).expect("Mah box");
+        assert!(bf.read_header().is_ok());
+        assert!(bf.read_trailer().is_ok());
+    }
+
+    #[test]
+    fn box_path_sanitisation() {
+        let box_path = BoxPath::new("/something/../somethingelse/./foo.txt").unwrap();
+        assert_eq!(box_path, "somethingelse\x1ffoo.txt");
+        let box_path = BoxPath::new("../something/../somethingelse/./foo.txt/.").unwrap();
+        assert_eq!(box_path, "somethingelse\x1ffoo.txt");
+
+        // This one will do different things on Windows and Unix, because Unix loves a good backslash
+        let box_path = BoxPath::new(r"..\something\..\somethingelse\.\foo.txt\.");
+
+        #[cfg(not(windows))]
+        assert!(box_path.is_err());
+        #[cfg(windows)]
+        assert_eq!(box_path.unwrap().0, "somethingelse\x1ffoo.txt");
+
+        let box_path = BoxPath::new(r"..\something/..\somethingelse\./foodir\");
+        #[cfg(not(windows))]
+        assert!(box_path.is_err());
+        #[cfg(windows)]
+        assert_eq!(box_path.unwrap().0, "somethingelse\x1ffoodir");
+    }
+
+    #[test]
+    fn box_path_sanitisation2() {
+        // Null is a sassy fellow
+        let box_path = BoxPath::new("\0");
+        assert!(box_path.is_err());
+    }
+
+    #[test]
+    fn box_path_sanitisation3() {
+        // Blank string is a sassy fellow if you can find him
+        let box_path = BoxPath::new("");
+        assert!(box_path.is_err());
+    }
+
+    #[test]
+    fn box_path_sanitisation4() {
+        // Blank string is a sassy fellow if you can find him
+        let box_path = BoxPath::new("/cant/hate//the/path");
+        println!("{:?}", box_path);
+        assert_eq!(box_path.unwrap().0, "cant\x1fhate\x1fthe\x1fpath");
+    }
+
+    #[test]
+    fn box_path_sanitisation_bidi() {
+        // Blank string is a sassy fellow if you can find him
+        let box_path = BoxPath::new("this is now العَرَبِيَّة.txt");
+        println!("{:?}", box_path);
+        assert_eq!(box_path.unwrap().0, "this is now العَرَبِيَّة.txt");
+    }
+
+    #[test]
+    fn box_path_sanitisation_basmala() {
+        // Blank string is a sassy fellow if you can find him
+        let box_path = BoxPath::new("this is now ﷽.txt");
+        println!("{:?}", box_path);
+        assert_eq!(box_path.unwrap().0, "this is now ﷽.txt");
+    }
+
+    #[test]
+    fn box_path_sanitisation_icecube_emoji() {
+        let box_path = BoxPath::new("///🧊/🧊");
+        println!("{:?}", box_path);
+        assert_eq!(box_path.unwrap().0, "🧊\x1f🧊");
+    }
+    
+
+    fn insert_impl<F>(filename: &str, f: F)
+    where
+        F: Fn(&str) -> BoxFile,
+    {
+        let _ = std::fs::remove_file(&filename);
+        let v =
+            "This, this, this, this, this is a compressable string string string string string.\n"
+                .to_string();
+
+        {
+            use std::time::SystemTime;
+            let now = SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_secs()
+                .to_le_bytes();
+
+            let mut bf = f(filename);
+
+            let mut dir_attrs = HashMap::new();
+            dir_attrs.insert("created".into(), now.to_vec());
+            dir_attrs.insert("unix.acl".into(), 0o755u16.to_le_bytes().to_vec());
+
+            let mut attrs = HashMap::new();
+            attrs.insert("created".into(), now.to_vec());
+            attrs.insert("unix.acl".into(), 0o644u16.to_le_bytes().to_vec());
+
+            bf.mkdir(BoxPath::new("test").unwrap(), dir_attrs).unwrap();
+
+            bf.insert(
+                Compression::Zstd,
+                BoxPath::new("test/string.txt").unwrap(),
+                v.clone(),
+                attrs.clone(),
+            )
+            .unwrap();
+            bf.insert(
+                Compression::Deflate,
+                BoxPath::new("test/string2.txt").unwrap(),
+                v.clone(),
+                attrs.clone(),
+            )
+            .unwrap();
+            println!("{:?}", &bf);
+        }
+
+        let bf = BoxFile::open(&filename).expect("Mah box");
+        println!("{:#?}", &bf);
+
+        assert_eq!(
+            v,
+            bf.decompress_value::<String>(&bf.meta.records[1].as_file().unwrap())
+                .unwrap()
+        );
+        assert_eq!(
+            v,
+            bf.decompress_value::<String>(&bf.meta.records[2].as_file().unwrap())
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn insert() {
+        insert_impl("./insert_garbage.box", |n| BoxFile::create(n).unwrap());
+        insert_impl("./insert_garbage_align8.box", |n| {
+            BoxFile::create_with_alignment(n, NonZeroU64::new(8).unwrap()).unwrap()
+        });
+        insert_impl("./insert_garbage_align7.box", |n| {
+            BoxFile::create_with_alignment(n, NonZeroU64::new(7).unwrap()).unwrap()
+        });
     }
 }
