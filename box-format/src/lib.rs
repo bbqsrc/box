@@ -12,50 +12,13 @@ mod de;
 mod ser;
 mod compression;
 mod path;
+mod header;
 
 use de::DeserializeOwned;
 use ser::Serialize;
 pub use compression::Compression;
 pub use path::BoxPath;
-
-#[derive(Debug)]
-pub struct BoxHeader {
-    magic_bytes: [u8; 4],
-    version: u32,
-    alignment: Option<NonZeroU64>,
-    trailer: Option<NonZeroU64>,
-}
-
-impl BoxHeader {
-    fn new(trailer: Option<NonZeroU64>) -> BoxHeader {
-        BoxHeader {
-            magic_bytes: *b"BOX\0",
-            version: 0x0,
-            alignment: None,
-            trailer,
-        }
-    }
-
-    fn with_alignment(alignment: NonZeroU64) -> BoxHeader {
-        let mut header = BoxHeader::default();
-        header.alignment = Some(alignment);
-        header
-    }
-
-    pub fn alignment(&self) -> Option<NonZeroU64> {
-        self.alignment
-    }
-
-    pub fn version(&self) -> u32 {
-        self.version
-    }
-}
-
-impl Default for BoxHeader {
-    fn default() -> Self {
-        BoxHeader::new(None)
-    }
-}
+use header::BoxHeader;
 
 pub type AttrMap = HashMap<u32, Vec<u8>>;
 
@@ -247,8 +210,12 @@ impl BoxFile {
         self.write_header()
     }
 
-    pub fn header(&self) -> &BoxHeader {
-        &self.header
+    pub fn alignment(&self) -> Option<NonZeroU64> {
+        self.header.alignment
+    }
+
+    pub fn version(&self) -> u32 {
+        self.header.version
     }
 
     /// Will return the metadata for the `.box` if it has been provided.
