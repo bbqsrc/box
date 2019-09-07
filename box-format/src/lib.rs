@@ -6,21 +6,16 @@ use std::io::{prelude::*, Result, SeekFrom};
 use std::num::NonZeroU64;
 use std::path::{Path, PathBuf};
 
+use comde::{Compress, Decompress};
+use memmap::MmapOptions;
+
 mod de;
 mod ser;
+mod compression;
 
 use de::DeserializeOwned;
 use ser::Serialize;
-
-use comde::{
-    deflate::{DeflateCompressor, DeflateDecompressor},
-    snappy::{SnappyCompressor, SnappyDecompressor},
-    stored::{StoredCompressor, StoredDecompressor},
-    xz::{XzCompressor, XzDecompressor},
-    zstd::{ZstdCompressor, ZstdDecompressor},
-    ByteCount, Compress, Compressor, Decompress, Decompressor,
-};
-use memmap::MmapOptions;
+pub use compression::Compression;
 
 #[cfg(not(windows))]
 /// The platform-specific separator as a string, used for splitting
@@ -37,110 +32,6 @@ pub const PATH_PLATFORM_SEP: &str = "\\";
 /// The separator used in `BoxPath` type paths, used primarily in
 /// `FileRecord` and `DirectoryRecord` fields.
 pub const PATH_BOX_SEP: &str = "\x1f";
-
-#[derive(Clone, Copy, Eq, PartialEq)]
-pub enum Compression {
-    Stored,
-    Deflate,
-    Zstd,
-    Xz,
-    Snappy,
-    Unknown(u8),
-}
-
-impl fmt::Display for Compression {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        use Compression::*;
-
-        let s = match self {
-            Stored => "stored",
-            Deflate => "DEFLATE",
-            Zstd => "Zstandard",
-            Xz => "xz",
-            Snappy => "Snappy",
-            Unknown(id) => return write!(f, "Unknown(id: {:x})", id),
-        };
-
-        write!(f, "{}", s)
-    }
-}
-
-impl fmt::Debug for Compression {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        fmt::Display::fmt(self, f)
-    }
-}
-
-const COMPRESSION_STORED: u8 = 0x00;
-const COMPRESSION_DEFLATE: u8 = 0x10;
-const COMPRESSION_ZSTD: u8 = 0x20;
-const COMPRESSION_XZ: u8 = 0x30;
-const COMPRESSION_SNAPPY: u8 = 0x40;
-
-impl Compression {
-    pub fn id(self) -> u8 {
-        use Compression::*;
-
-        match self {
-            Stored => COMPRESSION_STORED,
-            Deflate => COMPRESSION_DEFLATE,
-            Zstd => COMPRESSION_ZSTD,
-            Xz => COMPRESSION_XZ,
-            Snappy => COMPRESSION_SNAPPY,
-            Unknown(id) => id,
-        }
-    }
-
-    fn compress<W: Write + Seek, V: Compress>(self, writer: W, data: V) -> Result<ByteCount> {
-        use Compression::*;
-
-        match self {
-            Stored => StoredCompressor.compress(writer, data),
-            Deflate => DeflateCompressor.compress(writer, data),
-            Zstd => ZstdCompressor.compress(writer, data),
-            Xz => XzCompressor.compress(writer, data),
-            Snappy => SnappyCompressor.compress(writer, data),
-            Unknown(id) => Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                format!("Cannot handle compression with id {}", id),
-            )),
-        }
-    }
-
-    fn decompress<R: Read, V: Decompress>(self, reader: R) -> Result<V> {
-        use Compression::*;
-
-        match self {
-            Stored => StoredDecompressor.from_reader(reader),
-            Deflate => DeflateDecompressor.from_reader(reader),
-            Zstd => ZstdDecompressor.from_reader(reader),
-            Xz => XzDecompressor.from_reader(reader),
-            Snappy => SnappyDecompressor.from_reader(reader),
-            Unknown(id) => Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                format!("Cannot handle decompression with id {}", id),
-            )),
-        }
-    }
-
-    fn decompress_write<R: Read, W: Write>(self, reader: R, writer: W) -> Result<()> {
-        use Compression::*;
-
-        match self {
-            Stored => StoredDecompressor.copy(reader, writer),
-            Deflate => DeflateDecompressor.copy(reader, writer),
-            Zstd => ZstdDecompressor.copy(reader, writer),
-            Xz => XzDecompressor.copy(reader, writer),
-            Snappy => SnappyDecompressor.copy(reader, writer),
-            Unknown(id) => Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                format!("Cannot handle decompression with id {}", id),
-            )),
-        }?;
-
-        Ok(())
-    }
-}
 
 #[derive(Debug)]
 pub struct BoxHeader {

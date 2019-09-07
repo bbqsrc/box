@@ -8,9 +8,7 @@ use crate::{
     AttrMap, BoxHeader, BoxMetadata, BoxPath, Compression, DirectoryRecord, FileRecord, Record,
 };
 
-use crate::{
-    COMPRESSION_DEFLATE, COMPRESSION_SNAPPY, COMPRESSION_STORED, COMPRESSION_XZ, COMPRESSION_ZSTD,
-};
+use crate::compression::constants::*;
 
 pub(crate) trait DeserializeOwned {
     fn deserialize_owned<R: Read>(reader: &mut R) -> std::io::Result<Self>
