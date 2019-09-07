@@ -251,10 +251,9 @@ pub struct BoxPath(String);
 
 #[derive(Debug, Clone)]
 pub enum IntoBoxPathError {
-    InvalidCurrentWorkingDirectory,
     UnrepresentableStr,
     NonCanonical,
-    FailedPathDiff,
+    EmptyPath,
 }
 
 impl std::error::Error for IntoBoxPathError {}
@@ -268,12 +267,9 @@ impl fmt::Display for IntoBoxPathError {
 impl IntoBoxPathError {
     pub fn as_str(&self) -> &str {
         match self {
-            IntoBoxPathError::InvalidCurrentWorkingDirectory => {
-                "no current working directory could be found"
-            }
             IntoBoxPathError::NonCanonical => "non-canonical path received as input",
-            IntoBoxPathError::FailedPathDiff => "could not get relative path",
             IntoBoxPathError::UnrepresentableStr => "unrepresentable string found in path",
+            IntoBoxPathError::EmptyPath => "no path provided",
         }
     }
 
@@ -303,9 +299,15 @@ impl BoxPath {
                 Component::Normal(os_str) => out.push(
                     os_str
                         .to_str()
+                        .map(|x| x.trim())
+                        .filter(|x| x.len() > 0 && !x.contains('\\') && !x.contains('\0'))
                         .ok_or(IntoBoxPathError::UnrepresentableStr)?,
                 ),
             }
+        }
+
+        if out.len() == 0 {
+            return Err(IntoBoxPathError::EmptyPath);
         }
 
         Ok(BoxPath(out.join(PATH_BOX_SEP)))
@@ -719,10 +721,42 @@ mod tests {
         assert_eq!(box_path, "somethingelse\x1ffoo.txt");
         let box_path = BoxPath::new("../something/../somethingelse/./foo.txt/.").unwrap();
         assert_eq!(box_path, "somethingelse\x1ffoo.txt");
-        let box_path = BoxPath::new(r"..\something\..\somethingelse\.\foo.txt\.").unwrap();
-        assert_eq!(box_path, "somethingelse\x1ffoo.txt");
-        let box_path = BoxPath::new(r"..\something/..\somethingelse\./foodir\").unwrap();
-        assert_eq!(box_path, "somethingelse\x1ffoodir");
+
+        // This one will do different things on Windows and Unix, because Unix loves a good backslash
+        let box_path = BoxPath::new(r"..\something\..\somethingelse\.\foo.txt\.");
+
+        #[cfg(not(windows))]
+        assert!(box_path.is_err());
+        #[cfg(windows)]
+        assert_eq!(box_path.unwrap().0, "somethingelse\x1ffoo.txt");
+
+        let box_path = BoxPath::new(r"..\something/..\somethingelse\./foodir\");
+        #[cfg(not(windows))]
+        assert!(box_path.is_err());
+        #[cfg(windows)]
+        assert_eq!(box_path.unwrap().0, "somethingelse\x1ffoodir");
+    }
+
+    #[test]
+    fn box_path_sanitisation2() {
+        // Null is a sassy fellow
+        let box_path = BoxPath::new("\0");
+        assert!(box_path.is_err());
+    }
+
+    #[test]
+    fn box_path_sanitisation3() {
+        // Blank string is a sassy fellow if you can find him
+        let box_path = BoxPath::new("");
+        assert!(box_path.is_err());
+    }
+
+    #[test]
+    fn box_path_sanitisation4() {
+        // Blank string is a sassy fellow if you can find him
+        let box_path = BoxPath::new("/cant/hate//the/path");
+        println!("{:?}", box_path);
+        assert_eq!(box_path.unwrap().0, "cant\x1fhate\x1fthe\x1fpath");
     }
 
     fn insert_impl<F>(filename: &str, f: F)
@@ -973,11 +1007,7 @@ impl BoxFile {
         }
     }
 
-    pub fn mkdir(
-        &mut self,
-        path: BoxPath,
-        attrs: HashMap<String, Vec<u8>>,
-    ) -> std::io::Result<()> {
+    pub fn mkdir(&mut self, path: BoxPath, attrs: HashMap<String, Vec<u8>>) -> std::io::Result<()> {
         let attrs = attrs
             .into_iter()
             .map(|(k, v)| {
