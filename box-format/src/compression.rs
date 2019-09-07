@@ -1,5 +1,5 @@
 use std::fmt;
-use std::io::{Read, Write, Seek, Result};
+use std::io::{Read, Result, Seek, Write};
 
 use comde::{
     deflate::{DeflateCompressor, DeflateDecompressor},

@@ -1,10 +1,5 @@
+use crate::{compression::Compression, path::BoxPath, AttrMap, BoxFile};
 use std::num::NonZeroU64;
-use crate::{
-    AttrMap,
-    BoxFile,
-    compression::Compression,
-    path::BoxPath
-};
 
 #[derive(Debug)]
 pub enum Record {
@@ -59,7 +54,6 @@ impl Record {
         }
     }
 }
-
 
 #[derive(Debug)]
 pub struct DirectoryRecord {

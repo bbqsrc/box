@@ -1,4 +1,3 @@
-
 use std::path::{Path, PathBuf};
 
 pub mod error;
@@ -53,7 +52,9 @@ impl BoxPath {
                         .filter(|x| {
                             !x.chars().any(|c| {
                                 let cat = GeneralCategory::of(c);
-                                c == '\\' || cat == GeneralCategory::Control || (cat.is_separator() && c != ' ')
+                                c == '\\'
+                                    || cat == GeneralCategory::Control
+                                    || (cat.is_separator() && c != ' ')
                             })
                         })
                         .map(|x| x.nfc().collect::<String>())
@@ -90,7 +91,7 @@ impl BoxPath {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn sanitisation() {
         let box_path = BoxPath::new("/something/../somethingelse/./foo.txt").unwrap();
@@ -140,7 +141,10 @@ mod tests {
         // Blank string is a sassy fellow if you can find him
         let box_path = BoxPath::new("this is now العَرَبِيَّة.txt");
         println!("{:?}", box_path);
-        assert_eq!(box_path.unwrap().0, "this is now العَرَبِيَّة.txt");
+        assert_eq!(
+            box_path.unwrap().0,
+            "this is now العَرَبِيَّة.txt"
+        );
     }
 
     #[test]
