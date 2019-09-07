@@ -4,7 +4,7 @@ use std::fmt;
 use std::fs::OpenOptions;
 use std::io::{prelude::*, Result, SeekFrom};
 use std::num::NonZeroU64;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use comde::{
@@ -16,6 +16,22 @@ use comde::{
     ByteCount, Compress, Compressor, Decompress, Decompressor,
 };
 use memmap::MmapOptions;
+
+#[cfg(not(windows))]
+/// The platform-specific separator as a string, used for splitting
+/// platform-supplied paths and printing `BoxPath`s in the platform-preferred
+/// manner.
+pub const PATH_PLATFORM_SEP: &str = "/";
+
+#[cfg(windows)]
+/// The platform-specific separator as a string, used for splitting
+/// platform-supplied paths and printing `BoxPath`s in the platform-preferred
+/// manner.
+pub const PATH_PLATFORM_SEP: &str = "\\";
+
+/// The separator used in `BoxPath` type paths, used primarily in
+/// `FileRecord` and `DirectoryRecord` fields.
+pub const PATH_BOX_SEP: &str = "\x1f";
 
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub enum Compression {
@@ -199,7 +215,7 @@ impl Record {
     }
 
     #[inline(always)]
-    pub fn path(&self) -> &str {
+    pub fn path(&self) -> &BoxPath {
         match self {
             Record::File(file) => &file.path,
             Record::Directory(dir) => &dir.path,
@@ -207,11 +223,7 @@ impl Record {
     }
 
     #[inline(always)]
-    pub fn attr<S: AsRef<str>>(
-        &self,
-        boxfile: &BoxFile,
-        key: S
-    ) -> Option<&Vec<u8>> {
+    pub fn attr<S: AsRef<str>>(&self, boxfile: &BoxFile, key: S) -> Option<&Vec<u8>> {
         let key = boxfile.attr_key_for(key.as_ref())?;
         self.attrs().get(&key)
     }
@@ -233,12 +245,96 @@ impl Record {
     }
 }
 
+#[derive(Debug, Clone, PartialOrd, Ord, PartialEq, Eq, Hash)]
+#[repr(transparent)]
+pub struct BoxPath(String);
+
+#[derive(Debug, Clone)]
+pub enum IntoBoxPathError {
+    InvalidCurrentWorkingDirectory,
+    UnrepresentableStr,
+    NonCanonical,
+    FailedPathDiff,
+}
+
+impl std::error::Error for IntoBoxPathError {}
+
+impl fmt::Display for IntoBoxPathError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
+}
+
+impl IntoBoxPathError {
+    pub fn as_str(&self) -> &str {
+        match self {
+            IntoBoxPathError::InvalidCurrentWorkingDirectory => {
+                "no current working directory could be found"
+            }
+            IntoBoxPathError::NonCanonical => "non-canonical path received as input",
+            IntoBoxPathError::FailedPathDiff => "could not get relative path",
+            IntoBoxPathError::UnrepresentableStr => "unrepresentable string found in path",
+        }
+    }
+
+    pub fn as_io_error(&self) -> std::io::Error {
+        use std::io::{Error, ErrorKind};
+        Error::new(ErrorKind::InvalidInput, self.as_str())
+    }
+}
+
+impl<'a> PartialEq<&'a str> for BoxPath {
+    fn eq(&self, other: &&'a str) -> bool {
+        self.0 == *other
+    }
+}
+
+impl BoxPath {
+    pub fn new<P: AsRef<Path>>(path: P) -> std::result::Result<BoxPath, IntoBoxPathError> {
+        use std::path::Component;
+        let mut out = vec![];
+
+        for component in path.as_ref().components() {
+            match component {
+                Component::CurDir | Component::RootDir | Component::Prefix(_) => {}
+                Component::ParentDir => {
+                    out.pop();
+                }
+                Component::Normal(os_str) => out.push(
+                    os_str
+                        .to_str()
+                        .ok_or(IntoBoxPathError::UnrepresentableStr)?,
+                ),
+            }
+        }
+
+        Ok(BoxPath(out.join(PATH_BOX_SEP)))
+    }
+
+    pub fn to_string(&self) -> String {
+        let mut s = String::with_capacity(self.0.len());
+        let mut iter = self.0.split(PATH_BOX_SEP);
+        if let Some(v) = iter.next() {
+            s.push_str(v);
+        }
+        iter.for_each(|v| {
+            s.push_str(PATH_PLATFORM_SEP);
+            s.push_str(v);
+        });
+        s
+    }
+
+    pub fn to_path_buf(&self) -> PathBuf {
+        PathBuf::from(self.to_string())
+    }
+}
+
 #[derive(Debug)]
 pub struct DirectoryRecord {
     /// The path of the directory. A path is always relative (no leading separator),
     /// always delimited by a `UNIT SEPARATOR U+001F` (`"\x1f"`), and may not contain
     /// any `.` or `..` path chunks.
-    pub path: String,
+    pub path: BoxPath,
 
     /// Optional attributes for the given paths, such as Windows or Unix ACLs, last accessed time, etc.
     pub attrs: AttrMap,
@@ -261,7 +357,7 @@ pub struct FileRecord {
     /// The path of the file. A path is always relative (no leading separator),
     /// always delimited by a `UNIT SEPARATOR U+001F` (`"\x1f"`), and may not contain
     /// any `.` or `..` path chunks.
-    pub path: String,
+    pub path: BoxPath,
 
     /// Optional attributes for the given paths, such as Windows or Unix ACLs, last accessed time, etc.
     pub attrs: AttrMap,
@@ -269,11 +365,7 @@ pub struct FileRecord {
 
 impl FileRecord {
     #[inline(always)]
-    pub fn attr<S: AsRef<str>>(
-        &self,
-        boxfile: &BoxFile,
-        key: S
-    ) -> Option<&Vec<u8>> {
+    pub fn attr<S: AsRef<str>>(&self, boxfile: &BoxFile, key: S) -> Option<&Vec<u8>> {
         let key = boxfile.attr_key_for(key.as_ref())?;
         self.attrs.get(&key)
     }
@@ -388,17 +480,31 @@ impl Serialize for AttrMap {
     }
 }
 
+impl Serialize for BoxPath {
+    fn write<W: Write>(&self, writer: &mut W) -> std::io::Result<()> {
+        self.0.write(writer)
+    }
+}
+
+impl DeserializeOwned for BoxPath {
+    fn deserialize_owned<R: Read>(reader: &mut R) -> std::io::Result<Self>
+    where
+        Self: Sized,
+    {
+        Ok(BoxPath(String::deserialize_owned(reader)?))
+    }
+}
+
 impl DeserializeOwned for u32 {
     fn deserialize_owned<R: Read>(reader: &mut R) -> std::io::Result<Self>
     where
-        Self: Sized
+        Self: Sized,
     {
         reader.read_u32::<LittleEndian>()
     }
 }
 
-impl DeserializeOwned for AttrMap
-{
+impl DeserializeOwned for AttrMap {
     fn deserialize_owned<R: Read>(reader: &mut R) -> std::io::Result<Self>
     where
         Self: Sized,
@@ -450,7 +556,7 @@ impl DeserializeOwned for FileRecord {
         let compression = Compression::deserialize_owned(reader)?;
         let length = reader.read_u64::<LittleEndian>()?;
         let decompressed_length = reader.read_u64::<LittleEndian>()?;
-        let path = String::deserialize_owned(reader)?;
+        let path = BoxPath::deserialize_owned(reader)?;
         let attrs = HashMap::deserialize_owned(reader)?;
         let data = reader.read_u64::<LittleEndian>()?;
 
@@ -467,7 +573,7 @@ impl DeserializeOwned for FileRecord {
 
 impl DeserializeOwned for DirectoryRecord {
     fn deserialize_owned<R: Read>(reader: &mut R) -> std::io::Result<Self> {
-        let path = String::deserialize_owned(reader)?;
+        let path = BoxPath::deserialize_owned(reader)?;
         let attrs = HashMap::deserialize_owned(reader)?;
 
         Ok(DirectoryRecord { path, attrs })
@@ -537,7 +643,11 @@ impl DeserializeOwned for BoxMetadata {
         let attr_keys = Vec::deserialize_owned(reader)?;
         let attrs = HashMap::deserialize_owned(reader)?;
 
-        Ok(BoxMetadata { records, attr_keys, attrs })
+        Ok(BoxMetadata {
+            records,
+            attr_keys,
+            attrs,
+        })
     }
 }
 
@@ -559,7 +669,7 @@ mod tests {
             length: data.len() as u64,
             decompressed_length: data.len() as u64,
             data: NonZeroU64::new(std::mem::size_of::<BoxHeader>() as u64).unwrap(),
-            path: "hello.txt".into(),
+            path: BoxPath::new("hello.txt").unwrap(),
             attrs: HashMap::new(),
         }));
 
@@ -601,6 +711,18 @@ mod tests {
         let mut bf = BoxFile::create(&filename).expect("Mah box");
         assert!(bf.read_header().is_ok());
         assert!(bf.read_trailer().is_ok());
+    }
+
+    #[test]
+    fn box_path_sanitisation() {
+        let box_path = BoxPath::new("/something/../somethingelse/./foo.txt").unwrap();
+        assert_eq!(box_path, "somethingelse\x1ffoo.txt");
+        let box_path = BoxPath::new("../something/../somethingelse/./foo.txt/.").unwrap();
+        assert_eq!(box_path, "somethingelse\x1ffoo.txt");
+        let box_path = BoxPath::new(r"..\something\..\somethingelse\.\foo.txt\.").unwrap();
+        assert_eq!(box_path, "somethingelse\x1ffoo.txt");
+        let box_path = BoxPath::new(r"..\something/..\somethingelse\./foodir\").unwrap();
+        assert_eq!(box_path, "somethingelse\x1ffoodir");
     }
 
     fn insert_impl<F>(filename: &str, f: F)
@@ -819,16 +941,19 @@ impl BoxFile {
 
     #[inline(always)]
     fn attr_key_for(&self, key: &str) -> Option<u32> {
-        self.meta.attr_keys.iter().position(|r| r == key).map(|v| v as u32)
+        self.meta
+            .attr_keys
+            .iter()
+            .position(|r| r == key)
+            .map(|v| v as u32)
     }
 
-    pub fn set_attr<P: AsRef<str>, S: AsRef<str>>(
+    pub fn set_attr<S: AsRef<str>>(
         &mut self,
-        path: P,
+        path: &BoxPath,
         key: S,
         value: Vec<u8>,
     ) -> Result<()> {
-        let path = path.as_ref();
         let key = self.attr_key_for_mut(key.as_ref());
 
         if let Some(record) = self.meta.records.iter_mut().find(|r| r.path() == path) {
@@ -838,14 +963,9 @@ impl BoxFile {
         self.write_header_and_trailer()
     }
 
-    pub fn attr<P: AsRef<str>, S: AsRef<str>>(
-        &self,
-        path: P,
-        key: S
-    ) -> Option<&Vec<u8>> {
-        let path = path.as_ref();
+    pub fn attr<S: AsRef<str>>(&self, path: &BoxPath, key: S) -> Option<&Vec<u8>> {
         let key = self.attr_key_for(key.as_ref())?;
-        
+
         if let Some(record) = self.meta.records.iter().find(|r| r.path() == path) {
             record.attrs().get(&key)
         } else {
@@ -858,11 +978,14 @@ impl BoxFile {
         path: P,
         attrs: HashMap<String, Vec<u8>>,
     ) -> std::io::Result<()> {
-        let path = path.as_ref().to_string();
-        let attrs = attrs.into_iter().map(|(k, v)| {
-            let k = self.attr_key_for_mut(&k);
-            (k, v)
-        }).collect::<HashMap<_, _>>();
+        let path = BoxPath::new(path.as_ref()).map_err(|e| e.as_io_error())?;
+        let attrs = attrs
+            .into_iter()
+            .map(|(k, v)| {
+                let k = self.attr_key_for_mut(&k);
+                (k, v)
+            })
+            .collect::<HashMap<_, _>>();
 
         self.meta
             .records
@@ -878,16 +1001,19 @@ impl BoxFile {
         value: V,
         attrs: HashMap<String, Vec<u8>>,
     ) -> std::io::Result<&FileRecord> {
-        let path = path.as_ref().to_string();
+        let path = BoxPath::new(path.as_ref().to_string()).map_err(|e| e.as_io_error())?;
         let data = self.next_write_addr();
         let bytes = self.write_data::<V>(compression, data.get(), value)?;
-        let attrs = attrs.into_iter().map(|(k, v)| {
-            let k = self.attr_key_for_mut(&k);
-            (k, v)
-        }).collect::<HashMap<_, _>>();
+        let attrs = attrs
+            .into_iter()
+            .map(|(k, v)| {
+                let k = self.attr_key_for_mut(&k);
+                (k, v)
+            })
+            .collect::<HashMap<_, _>>();
 
         // Check there isn't already a record for this path
-        if self.meta.records.iter().any(|x| x.path() == path) {
+        if self.meta.records.iter().any(|x| x.path() == &path) {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::AlreadyExists,
                 "path already found",
