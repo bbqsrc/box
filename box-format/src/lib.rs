@@ -752,18 +752,18 @@ mod tests {
             attrs.insert("created".into(), now.to_vec());
             attrs.insert("unix.acl".into(), 0o644u16.to_le_bytes().to_vec());
 
-            bf.mkdir("test", dir_attrs).unwrap();
+            bf.mkdir(BoxPath::new("test").unwrap(), dir_attrs).unwrap();
 
             bf.insert(
                 Compression::Zstd,
-                "test\x1fstring.txt",
+                BoxPath::new("test/string.txt").unwrap(),
                 v.clone(),
                 attrs.clone(),
             )
             .unwrap();
             bf.insert(
                 Compression::Deflate,
-                "test\x1fstring2.txt",
+                BoxPath::new("test/string2.txt").unwrap(),
                 v.clone(),
                 attrs.clone(),
             )
@@ -973,12 +973,11 @@ impl BoxFile {
         }
     }
 
-    pub fn mkdir<P: AsRef<str>>(
+    pub fn mkdir(
         &mut self,
-        path: P,
+        path: BoxPath,
         attrs: HashMap<String, Vec<u8>>,
     ) -> std::io::Result<()> {
-        let path = BoxPath::new(path.as_ref()).map_err(|e| e.as_io_error())?;
         let attrs = attrs
             .into_iter()
             .map(|(k, v)| {
@@ -994,14 +993,13 @@ impl BoxFile {
         Ok(())
     }
 
-    pub fn insert<P: AsRef<str>, V: Compress>(
+    pub fn insert<V: Compress>(
         &mut self,
         compression: Compression,
-        path: P,
+        path: BoxPath,
         value: V,
         attrs: HashMap<String, Vec<u8>>,
     ) -> std::io::Result<&FileRecord> {
-        let path = BoxPath::new(path.as_ref().to_string()).map_err(|e| e.as_io_error())?;
         let data = self.next_write_addr();
         let bytes = self.write_data::<V>(compression, data.get(), value)?;
         let attrs = attrs

@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::num::NonZeroU64;
 use std::collections::HashSet;
 
-use box_format::{BoxFile, Compression, Record};
+use box_format::{BoxFile, Compression, Record, BoxPath, AttrMap, PATH_BOX_SEP, PATH_PLATFORM_SEP};
 use byteorder::{LittleEndian, ReadBytesExt};
 use structopt::StructOpt;
 use walkdir::{DirEntry, WalkDir};
@@ -127,6 +127,20 @@ enum Commands {
         )]
         path: PathBuf,
     },
+
+    #[structopt(
+        name = "t",
+        visible_alias = "test",
+        about = "Test and verify integrity of archive"
+    )]
+    Test {
+        #[structopt(
+            name = "boxfile",
+            parse(from_os_str),
+            help = "Path to the .box archive"
+        )]
+        path: PathBuf,
+    }
 }
 
 #[derive(Debug, StructOpt)]
@@ -134,7 +148,7 @@ enum Commands {
     name = "box",
     about = "Brendan Molloy <https://github.com/bbqsrc/box>\nCreate, modify and extract box archives.",
     settings = &[SubcommandRequiredElseHelp, DisableHelpSubcommand, VersionlessSubcommands],
-    usage = "box (a|c|l|x) [FLAGS|OPTIONS] <boxfile> [files]..."
+    usage = "box (a|c|l|t|x) [FLAGS|OPTIONS] <boxfile> [files]..."
 )]
 struct CliOpts {
     #[structopt(short, long, help = "Show verbose output", global = true)]
@@ -171,26 +185,26 @@ fn append(
                 .records()
                 .iter()
                 .filter_map(|x| x.as_directory())
-                .map(|r| r.path.to_string())
+                .map(|r| r.path.clone())
                 .collect::<std::collections::HashSet<_>>(),
             bf.metadata()
                 .records()
                 .iter()
                 .filter_map(|x| x.as_file())
-                .map(|r| r.path.to_string())
+                .map(|r| r.path.clone())
                 .collect::<std::collections::HashSet<_>>(),
         )
     };
 
     let duplicate = selected_files
         .iter()
-        .map(|x| convert_to_box_path(&x).unwrap())
+        .map(|x| BoxPath::new(&x).unwrap())
         .find(|x| known_files.contains(x));
 
     if let Some(duplicate) = duplicate {
         eprintln!(
             "Archive already contains file for path: {}; aborting.",
-            duplicate.split(STD_SEP).collect::<Vec<_>>().join(SEP)
+            duplicate.to_string()
         );
         std::process::exit(1);
     }
@@ -198,17 +212,17 @@ fn append(
     // Iterate to capture all known directories
     for file_path in selected_files.into_iter() {
         let parents = collect_parent_directories(&file_path);
-        let box_path = convert_to_box_path(&file_path).unwrap();
+        let box_path = BoxPath::new(&file_path).unwrap();
 
         for (parent, meta) in parents.into_iter() {
             if known_dirs.get(&parent).is_none() {
-                bf.mkdir(&parent, meta)?;
+                bf.mkdir(parent.clone(), meta)?;
                 known_dirs.insert(parent);
             }
         }
 
         if file_path.is_dir() {
-            bf.mkdir(&box_path, metadata(&file_path))?;
+            bf.mkdir(box_path.clone(), metadata(&file_path))?;
             known_dirs.insert(box_path);
         } else {
             let file = std::fs::File::open(&file_path)?;
@@ -228,20 +242,13 @@ macro_rules! add {
     };
 }
 
-#[cfg(not(windows))]
-const SEP: &str = "/";
-#[cfg(windows)]
-const SEP: &str = "\\";
-
-const STD_SEP: &str = "\x1f";
-
 #[inline(always)]
 fn format_path(record: &Record) -> String {
-    let mut path = record.path().split(STD_SEP).collect::<Vec<_>>();
+    let mut path = record.path().to_string();
     if record.as_directory().is_some() {
-        path.push("");
+        path.push_str(PATH_PLATFORM_SEP);
     }
-    path.join(SEP)
+    path
 }
 
 #[inline(always)]
@@ -362,7 +369,7 @@ fn extract(path: PathBuf, selected_files: Vec<PathBuf>, verbose: bool) -> Result
                 bf.decompress(file, out_file)?;
             }
             Record::Directory(dir) => {
-                std::fs::create_dir_all(&dir.path)?;
+                std::fs::create_dir_all(&dir.path.to_path_buf())?;
             }
         }
     }
@@ -370,25 +377,14 @@ fn extract(path: PathBuf, selected_files: Vec<PathBuf>, verbose: bool) -> Result
     Ok(())
 }
 
-fn convert_to_box_path(path: &Path) -> std::result::Result<String, String> {
-    // TODO do this right
-    match path
-        .to_str()
-        .map(|x| x.split(SEP).collect::<Vec<_>>().join(STD_SEP))
-    {
-        Some(v) => Ok(v),
-        None => Err("Invalid path".into()),
-    }
-}
-
-fn collect_parent_directories(path: &Path) -> Vec<(String, HashMap<String, Vec<u8>>)> {
+fn collect_parent_directories(path: &Path) -> Vec<(BoxPath, HashMap<String, Vec<u8>>)> {
     let mut out = vec![];
     let path = match path.parent() {
         Some(v) => v,
         None => return vec![],
     };
     for ancestor in path.ancestors() {
-        out.push((convert_to_box_path(ancestor).unwrap(), metadata(ancestor)));
+        out.push((BoxPath::new(ancestor).unwrap(), metadata(ancestor)));
     }
     out.pop();
     out.reverse();
@@ -431,7 +427,7 @@ fn is_hidden(entry: &DirEntry) -> bool {
 }
 
 #[inline(always)]
-fn add_crc32(bf: &mut BoxFile, box_path: &String) -> std::io::Result<()> {
+fn add_crc32(bf: &mut BoxFile, box_path: &BoxPath) -> std::io::Result<()> {
     let mut hasher = Crc32Hasher::new();
     let record = bf.metadata().records().last().unwrap().as_file().unwrap();
     hasher.update(&*bf.data(record).unwrap());
@@ -440,14 +436,14 @@ fn add_crc32(bf: &mut BoxFile, box_path: &String) -> std::io::Result<()> {
 }
 
 #[inline(always)]
-fn process_files<I: Iterator<Item = PathBuf>>(iter: I, recursive: bool, verbose: bool, compression: Compression, bf: &mut BoxFile, known_dirs: &mut HashSet<String>) -> std::io::Result<()> {
+fn process_files<I: Iterator<Item = PathBuf>>(iter: I, recursive: bool, verbose: bool, compression: Compression, bf: &mut BoxFile, known_dirs: &mut HashSet<BoxPath>) -> std::io::Result<()> {
     for file_path in iter {
         let parents = collect_parent_directories(&file_path);
-        let box_path = convert_to_box_path(&file_path).unwrap();
+        let box_path = BoxPath::new(&file_path).unwrap();
 
         for (parent, meta) in parents.into_iter() {
             if known_dirs.contains(&parent) {
-                bf.mkdir(&parent, meta)?;
+                bf.mkdir(parent.clone(), meta)?;
                 known_dirs.insert(parent);
             }
         }
@@ -457,12 +453,12 @@ fn process_files<I: Iterator<Item = PathBuf>>(iter: I, recursive: bool, verbose:
                 if verbose {
                     println!("{} (directory)", &file_path.display());
                 }
-                bf.mkdir(&box_path, metadata(&file_path))?;
+                bf.mkdir(box_path.clone(), metadata(&file_path))?;
                 known_dirs.insert(box_path);
             }
         } else {
             let file = std::fs::File::open(&file_path)?;
-            let record = bf.insert(compression, &box_path, file, metadata(&file_path))?;
+            let record = bf.insert(compression, box_path.clone(), file, metadata(&file_path))?;
             if verbose {
                 println!("{} (compressed {:.*}%)", &file_path.display(), 2, 100.0 - (record.length as f64 / record.decompressed_length as f64 * 100.0));
             }
@@ -523,6 +519,11 @@ fn main() {
             opts.verbose,
             alignment,
         ),
+        Commands::Test {
+            path
+        } => {
+            unimplemented!()
+        }
     };
 
     if let Err(e) = result {
