@@ -2,7 +2,7 @@ mod compression;
 mod de;
 mod file;
 mod header;
-mod path;
+pub mod path;
 mod record;
 mod ser;
 

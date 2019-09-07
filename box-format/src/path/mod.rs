@@ -1,8 +1,8 @@
 use std::path::{Path, PathBuf};
 
-pub mod error;
+mod error;
 
-use self::error::IntoBoxPathError;
+pub use self::error::IntoBoxPathError;
 
 #[cfg(not(windows))]
 /// The platform-specific separator as a string, used for splitting

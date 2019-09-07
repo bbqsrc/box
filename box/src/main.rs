@@ -4,7 +4,7 @@ use std::io::Result;
 use std::num::NonZeroU64;
 use std::path::{Path, PathBuf};
 
-use box_format::{AttrMap, BoxFile, BoxPath, Compression, Record, PATH_BOX_SEP, PATH_PLATFORM_SEP};
+use box_format::{path::PATH_PLATFORM_SEP, BoxFile, BoxPath, Compression, Record};
 use byteorder::{LittleEndian, ReadBytesExt};
 use crc32fast::Hasher as Crc32Hasher;
 use structopt::StructOpt;
@@ -300,7 +300,7 @@ fn list(path: PathBuf, selected_files: Vec<PathBuf>, verbose: bool) -> Result<()
     let bf = BoxFile::open(&path)?;
     let metadata = bf.metadata();
 
-    let alignment = match bf.header().alignment() {
+    let alignment = match bf.alignment() {
         Some(v) => format!("{} bytes", v.get()),
         None => "None".into(),
     };
