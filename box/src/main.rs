@@ -1,3 +1,6 @@
+// Copyright (c) 2019  Brendan Molloy <brendan@bbqsrc.net>
+// Licensed under the EUPL 1.2 or later. See LICENSE file.
+
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::io::Result;
