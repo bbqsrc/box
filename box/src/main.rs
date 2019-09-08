@@ -57,7 +57,7 @@ enum Commands {
             long,
             parse(try_from_str = parse_compression),
             hide_default_value = true,
-            default_value = "Compression::Stored",
+            default_value = "stored",
             possible_values = Compression::available_variants(),
             help = "Compression to be used for a file [default: stored]"
         )]
@@ -171,67 +171,41 @@ fn append(
     path: PathBuf,
     selected_files: Vec<PathBuf>,
     compression: Compression,
+    recursive: bool,
     verbose: bool,
 ) -> Result<()> {
+    let mut bf = BoxFile::open(&path).context(CannotOpenArchive { path: &path })?;
+
+    let (mut known_dirs, known_files) = {
+        (
+            bf.metadata()
+                .records()
+                .iter()
+                .filter_map(|x| x.as_directory())
+                .map(|r| r.path.clone())
+                .collect::<std::collections::HashSet<_>>(),
+            bf.metadata()
+                .records()
+                .iter()
+                .filter_map(|x| x.as_file())
+                .map(|r| r.path.clone())
+                .collect::<std::collections::HashSet<_>>(),
+        )
+    };
+
+    process_files(
+        selected_files.into_iter(),
+        recursive,
+        verbose,
+        compression,
+        bf,
+        known_dirs,
+        known_files,
+    )
+    .map_err(Box::new)
+    .context(CannotAddFiles { path: &path })?;
+
     Ok(())
-    // if selected_files.contains(&path) {
-    //     eprintln!("Cowardly refusing to recursively archive self; aborting.");
-    //     std::process::exit(1);
-    // }
-
-    // let mut bf = BoxFile::open(path)?;
-
-    // let (mut known_dirs, known_files) = {
-    //     (
-    //         bf.metadata()
-    //             .records()
-    //             .iter()
-    //             .filter_map(|x| x.as_directory())
-    //             .map(|r| r.path.clone())
-    //             .collect::<std::collections::HashSet<_>>(),
-    //         bf.metadata()
-    //             .records()
-    //             .iter()
-    //             .filter_map(|x| x.as_file())
-    //             .map(|r| r.path.clone())
-    //             .collect::<std::collections::HashSet<_>>(),
-    //     )
-    // };
-
-    // let duplicate = selected_files
-    //     .iter()
-    //     .map(|x| BoxPath::new(&x).unwrap())
-    //     .find(|x| known_files.contains(x));
-
-    // if let Some(duplicate) = duplicate {
-    //     eprintln!(
-    //         "Archive already contains file for path: {}; aborting.",
-    //         duplicate.to_string()
-    //     );
-    //     std::process::exit(1);
-    // }
-
-    // // Iterate to capture all known directories
-    // for file_path in selected_files.into_iter() {
-    //     let parents = collect_parent_directories(&file_path);
-    //     let box_path = BoxPath::new(&file_path).unwrap();
-
-    //     for (parent, meta) in parents.into_iter() {
-    //         if known_dirs.get(&parent).is_none() {
-    //             bf.mkdir(parent.clone(), meta)?;
-    //             known_dirs.insert(parent);
-    //         }
-    //     }
-
-    //     if file_path.is_dir() {
-    //         bf.mkdir(box_path.clone(), metadata(&file_path))?;
-    //         known_dirs.insert(box_path);
-    //     } else {
-    //         let file = std::fs::File::open(&file_path)?;
-    //         bf.insert(compression, box_path, file, metadata(&file_path))?;
-    //     }
-    // }
-    // Ok(())
 }
 
 macro_rules! add {
@@ -462,11 +436,10 @@ fn process_files<I: Iterator<Item = PathBuf>>(
     recursive: bool,
     verbose: bool,
     compression: Compression,
-    bf: &mut BoxFile,
+    mut bf: BoxFile,
+    mut known_dirs: HashSet<BoxPath>,
+    mut known_files: HashSet<BoxPath>,
 ) -> Result<()> {
-    let mut known_dirs = HashSet::new();
-    let mut known_files = HashSet::new();
-
     let iter = iter.flat_map(|path| {
         let mut walker = jwalk::WalkDir::new(&path).sort(true).preload_metadata(true);
         if !recursive {
@@ -532,7 +505,7 @@ fn process_files<I: Iterator<Item = PathBuf>>(
                         100.0 - (record.length as f64 / record.decompressed_length as f64 * 100.0)
                     );
                 }
-                add_crc32(bf, &box_path).context(CannotAddChecksum { path: &file_path })?;
+                add_crc32(&mut bf, &box_path).context(CannotAddChecksum { path: &file_path })?;
                 known_files.insert(box_path);
             }
         }
@@ -560,7 +533,9 @@ fn create(
         recursive,
         verbose,
         compression,
-        &mut bf,
+        bf,
+        HashSet::new(),
+        HashSet::new(),
     )
     .map_err(Box::new)
     .context(CannotAddFiles { path: &path })?;
@@ -576,7 +551,13 @@ fn main() -> Result<()> {
             path,
             compression,
             recursive,
-        } => append(path, opts.selected_files, compression, opts.verbose),
+        } => append(
+            path,
+            opts.selected_files,
+            compression,
+            recursive,
+            opts.verbose,
+        ),
         Commands::List { path } => list(&path, opts.selected_files, opts.verbose),
         Commands::Extract { path } => extract(&path, opts.selected_files, opts.verbose),
         Commands::Create {
