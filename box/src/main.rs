@@ -213,7 +213,7 @@ fn append(
     // Iterate to capture all known directories
     for file_path in selected_files.into_iter() {
         let parents = collect_parent_directories(&file_path)?;
-        let box_path = BoxPath::new(&file_path).unwrap();
+        let box_path = BoxPath::new(&file_path).context(CannotHandlePath { path: &file_path })?;
 
         for (parent, meta) in parents.into_iter() {
             if known_dirs.get(&parent).is_none() {
