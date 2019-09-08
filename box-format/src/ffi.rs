@@ -6,14 +6,11 @@ use crate::BoxFile;
 
 struct BoxFileResultMarshaler;
 
-impl ToForeign<std::io::Result<BoxFile>, *const libc::c_void> for BoxFileResultMarshaler {
+impl ToForeign<BoxFile, *const libc::c_void> for BoxFileResultMarshaler {
     type Error = std::io::Error;
 
-    fn to_foreign(result: std::io::Result<BoxFile>) -> Result<*const libc::c_void, Self::Error> {
-        match result {
-            Ok(v) => Ok(Box::into_raw(Box::new(v)) as *const _),
-            Err(e) => Err(e)
-        }
+    fn to_foreign(file: BoxFile) -> Result<*const libc::c_void, Self::Error> {
+        Ok(Box::into_raw(Box::new(file)) as *const _)
     }
 }
 
