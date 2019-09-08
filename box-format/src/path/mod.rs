@@ -30,38 +30,44 @@ impl<'a> PartialEq<&'a str> for BoxPath {
     }
 }
 
+pub fn sanitize<P: AsRef<Path>>(path: P) -> Option<Vec<String>> {
+    use std::path::Component;
+    use unic_normal::StrNormalForm;
+    use unic_ucd::GeneralCategory;
+
+    let mut out = vec![];
+
+    for component in path.as_ref().components() {
+        match component {
+            Component::CurDir | Component::RootDir | Component::Prefix(_) => {}
+            Component::ParentDir => {
+                out.pop();
+            }
+            Component::Normal(os_str) => out.push(
+                os_str
+                    .to_str()
+                    .map(|x| x.trim())
+                    .filter(|x| x.len() > 0)
+                    .filter(|x| {
+                        !x.chars().any(|c| {
+                            let cat = GeneralCategory::of(c);
+                            c == '\\'
+                                || cat == GeneralCategory::Control
+                                || (cat.is_separator() && c != ' ')
+                        })
+                    })
+                    .map(|x| x.nfc().collect::<String>())?,
+            ),
+        }
+    }
+
+    Some(out)
+}
+
 impl BoxPath {
     pub fn new<P: AsRef<Path>>(path: P) -> std::result::Result<BoxPath, IntoBoxPathError> {
-        use std::path::Component;
-        use unic_normal::StrNormalForm;
-        use unic_ucd::GeneralCategory;
 
-        let mut out = vec![];
-
-        for component in path.as_ref().components() {
-            match component {
-                Component::CurDir | Component::RootDir | Component::Prefix(_) => {}
-                Component::ParentDir => {
-                    out.pop();
-                }
-                Component::Normal(os_str) => out.push(
-                    os_str
-                        .to_str()
-                        .map(|x| x.trim())
-                        .filter(|x| x.len() > 0)
-                        .filter(|x| {
-                            !x.chars().any(|c| {
-                                let cat = GeneralCategory::of(c);
-                                c == '\\'
-                                    || cat == GeneralCategory::Control
-                                    || (cat.is_separator() && c != ' ')
-                            })
-                        })
-                        .map(|x| x.nfc().collect::<String>())
-                        .ok_or(IntoBoxPathError::UnrepresentableStr)?,
-                ),
-            }
-        }
+        let out = sanitize(path).ok_or(IntoBoxPathError::UnrepresentableStr)?;
 
         if out.len() == 0 {
             return Err(IntoBoxPathError::EmptyPath);
@@ -160,5 +166,19 @@ mod tests {
         let box_path = BoxPath::new("///🧊/🧊");
         println!("{:?}", box_path);
         assert_eq!(box_path.unwrap().0, "🧊\x1f🧊");
+    }
+
+    #[test]
+    fn sanitisation_simple_self() {
+        let box_path = BoxPath::new("./self");
+        println!("{:?}", box_path);
+        assert_eq!(box_path.unwrap().0, "self");
+    }
+
+    #[test]
+    fn sanitisation_slash() {
+        let box_path = BoxPath::new("/");
+        println!("{:?}", box_path);
+        assert!(box_path.is_err());
     }
 }

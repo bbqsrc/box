@@ -376,16 +376,12 @@ fn extract(path: PathBuf, selected_files: Vec<PathBuf>, verbose: bool) -> Result
 
 fn collect_parent_directories(path: &Path) -> Vec<(BoxPath, HashMap<String, Vec<u8>>)> {
     let mut out = vec![];
-    let path = match path.parent() {
+    let path = match path.parent().and_then(|p| box_format::path::sanitize(p)) {
         Some(v) => v,
         None => return vec![],
     };
-    for ancestor in path.ancestors() {
-        out.push((BoxPath::new(ancestor).unwrap(), metadata(ancestor)));
-    }
-    out.pop();
-    out.reverse();
-    out
+
+    out.into_iter().map(|x| (BoxPath::new(x).unwrap(), metadata(x))).collect()
 }
 
 fn metadata(path: &Path) -> HashMap<String, Vec<u8>> {
