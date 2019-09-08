@@ -67,7 +67,7 @@ pub fn sanitize<P: AsRef<Path>>(path: P) -> Option<Vec<String>> {
 impl BoxPath {
     pub fn new<P: AsRef<Path>>(path: P) -> std::result::Result<BoxPath, IntoBoxPathError> {
         let out = sanitize(&path).ok_or(IntoBoxPathError::UnrepresentableStr)?;
-        
+
         if out.len() == 0 {
             return Err(IntoBoxPathError::EmptyPath);
         }
@@ -150,10 +150,7 @@ mod tests {
         // Blank string is a sassy fellow if you can find him
         let box_path = BoxPath::new("this is now العَرَبِيَّة.txt");
         println!("{:?}", box_path);
-        assert_eq!(
-            box_path.unwrap().0,
-            "this is now العَرَبِيَّة.txt"
-        );
+        assert_eq!(box_path.unwrap().0, "this is now العَرَبِيَّة.txt");
     }
 
     #[test]
