@@ -212,7 +212,7 @@ fn append(
 
     // Iterate to capture all known directories
     for file_path in selected_files.into_iter() {
-        let parents = collect_parent_directories(&file_path);
+        let parents = collect_parent_directories(&file_path)?;
         let box_path = BoxPath::new(&file_path).unwrap();
 
         for (parent, meta) in parents.into_iter() {
@@ -392,15 +392,18 @@ fn extract(path: &Path, selected_files: Vec<PathBuf>, verbose: bool) -> Result<(
     Ok(())
 }
 
-fn collect_parent_directories(path: &Path) -> Vec<(BoxPath, HashMap<String, Vec<u8>>)> {
+fn collect_parent_directories(path: &Path) -> Result<Vec<(BoxPath, HashMap<String, Vec<u8>>)>> {
     let mut out = vec![];
     let path = match path.parent().and_then(|p| box_format::path::sanitize(p)) {
         Some(v) => v,
-        None => return vec![],
+        None => return Ok(vec![]),
     };
 
     out.into_iter()
-        .map(|x| (BoxPath::new(x).unwrap(), metadata(x)))
+        .map(|x: &Path| {
+            let p = BoxPath::new(x).context(CannotHandlePath { path: x })?;
+            Ok((p, metadata(x)))
+        })
         .collect()
 }
 
@@ -457,14 +460,17 @@ fn process_files<I: Iterator<Item = PathBuf>>(
     compression: Compression,
     bf: &mut BoxFile,
     known_dirs: &mut HashSet<BoxPath>,
-) -> std::io::Result<()> {
+) -> Result<()> {
     for file_path in iter {
-        let parents = collect_parent_directories(&file_path);
-        let box_path = BoxPath::new(&file_path).unwrap();
+        let parents = collect_parent_directories(&file_path)?;
+        let box_path = BoxPath::new(&file_path).context(CannotHandlePath { path: &file_path })?;
 
         for (parent, meta) in parents.into_iter() {
             if known_dirs.contains(&parent) {
-                bf.mkdir(parent.clone(), meta)?;
+                bf.mkdir(parent.clone(), meta)
+                    .context(CannotCreateDirectory {
+                        path: parent.clone(),
+                    })?;
                 known_dirs.insert(parent);
             }
         }
@@ -474,12 +480,18 @@ fn process_files<I: Iterator<Item = PathBuf>>(
                 if verbose {
                     println!("{} (directory)", &file_path.display());
                 }
-                bf.mkdir(box_path.clone(), metadata(&file_path))?;
+                bf.mkdir(box_path.clone(), metadata(&file_path))
+                    .with_context(|| CannotCreateDirectory {
+                        path: box_path.clone(),
+                    })?;
                 known_dirs.insert(box_path);
             }
         } else {
-            let file = std::fs::File::open(&file_path)?;
-            let record = bf.insert(compression, box_path.clone(), file, metadata(&file_path))?;
+            let file =
+                std::fs::File::open(&file_path).context(CannotOpenFile { path: &file_path })?;
+            let record = bf
+                .insert(compression, box_path.clone(), file, metadata(&file_path))
+                .context(CannotAddFile { path: &file_path })?;
             if verbose {
                 println!(
                     "{} (compressed {:.*}%)",
@@ -488,7 +500,7 @@ fn process_files<I: Iterator<Item = PathBuf>>(
                     100.0 - (record.length as f64 / record.decompressed_length as f64 * 100.0)
                 );
             }
-            add_crc32(bf, &box_path)?;
+            add_crc32(bf, &box_path).context(CannotAddChecksum { path: &file_path })?;
         }
     }
 
@@ -521,8 +533,7 @@ fn create(
         compression,
         &mut bf,
         &mut known_dirs,
-    )
-    .context(CannotAddFiles { path: &path })?;
+    )?;
 
     Ok(())
 }
@@ -562,6 +573,12 @@ enum Error {
         name: String,
         backtrace: snafu::Backtrace,
     },
+    #[snafu(display("Cannot handle path `{}`", path.display()))]
+    CannotHandlePath {
+        path: PathBuf,
+        source: box_format::path::IntoBoxPathError,
+        backtrace: snafu::Backtrace,
+    },
     #[snafu(display("Cannot open archive `{}`", path.display()))]
     CannotOpenArchive {
         path: PathBuf,
@@ -588,6 +605,12 @@ enum Error {
     },
     #[snafu(display("Cannot create file `{}`", path.display()))]
     CannotCreateFile {
+        path: PathBuf,
+        source: std::io::Error,
+        backtrace: snafu::Backtrace,
+    },
+    #[snafu(display("Cannot add checksum for file `{}`", path.display()))]
+    CannotAddChecksum {
         path: PathBuf,
         source: std::io::Error,
         backtrace: snafu::Backtrace,
