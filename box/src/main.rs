@@ -615,7 +615,7 @@ enum Error {
         source: std::io::Error,
         backtrace: snafu::Backtrace,
     },
-    #[snafu(display("Cannot create directory `{}`", path.to_string()))]
+    #[snafu(display("Cannot create directory `{}`", path))]
     CannotCreateDirectory {
         path: BoxPath,
         source: std::io::Error,
@@ -651,7 +651,7 @@ enum Error {
         source: std::io::Error,
         backtrace: snafu::Backtrace,
     },
-    #[snafu(display("Cannot decompress file `{}` to `{}`", archive_path.to_string(), target_path.display()))]
+    #[snafu(display("Cannot decompress file `{}` to `{}`", archive_path, target_path.display()))]
     CannotDecompressFile {
         archive_path: BoxPath,
         target_path: PathBuf,

@@ -1,4 +1,7 @@
-use std::path::{Path, PathBuf};
+use std::{
+    fmt,
+    path::{Path, PathBuf},
+};
 
 mod error;
 
@@ -75,25 +78,26 @@ impl BoxPath {
         Ok(BoxPath(out.join(PATH_BOX_SEP)))
     }
 
-    pub fn to_string(&self) -> String {
-        let mut s = String::with_capacity(self.0.len());
-        let mut iter = self.0.split(PATH_BOX_SEP);
-        if let Some(v) = iter.next() {
-            s.push_str(v);
-        }
-        iter.for_each(|v| {
-            s.push_str(PATH_PLATFORM_SEP);
-            s.push_str(v);
-        });
-        s
-    }
-
     pub fn to_path_buf(&self) -> PathBuf {
         PathBuf::from(self.to_string())
     }
 
     pub fn levels(&self) -> usize {
         self.0.chars().filter(|c| c == &'\x1f').count()
+    }
+}
+
+impl fmt::Display for BoxPath {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut iter = self.0.split(PATH_BOX_SEP);
+        if let Some(v) = iter.next() {
+            f.write_str(v)?;
+        }
+        for v in iter {
+            f.write_str(PATH_PLATFORM_SEP)?;
+            f.write_str(v)?;
+        }
+        Ok(())
     }
 }
 
