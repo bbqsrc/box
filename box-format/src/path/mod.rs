@@ -150,7 +150,10 @@ mod tests {
         // Blank string is a sassy fellow if you can find him
         let box_path = BoxPath::new("this is now العَرَبِيَّة.txt");
         println!("{:?}", box_path);
-        assert_eq!(box_path.unwrap().0, "this is now العَرَبِيَّة.txt");
+        assert_eq!(
+            box_path.unwrap().0,
+            "this is now العَرَبِيَّة.txt"
+        );
     }
 
     #[test]

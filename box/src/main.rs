@@ -463,8 +463,10 @@ fn process_files<I: Iterator<Item = PathBuf>>(
     verbose: bool,
     compression: Compression,
     bf: &mut BoxFile,
-    known_dirs: &mut HashSet<BoxPath>,
 ) -> Result<()> {
+    let mut known_dirs = HashSet::new();
+    let mut known_files = HashSet::new();
+
     let iter = iter.flat_map(|path| {
         let mut walker = jwalk::WalkDir::new(&path).sort(true).preload_metadata(true);
         if !recursive {
@@ -481,7 +483,17 @@ fn process_files<I: Iterator<Item = PathBuf>>(
             .expect("read file metadata")
             .context(CannotProcessFile)?;
         let file_path = entry.parent_spec.path.join(&entry.file_name);
-        let parents = collect_parent_directories(&*file_path)?;
+        let canonical_path = file_path
+            .canonicalize()
+            .context(CannotProcessFile)?;
+
+        if bf.path() == canonical_path {
+            continue;
+        }
+
+        let parents = collect_parent_directories(&*file_path)
+            .map_err(Box::new)
+            .with_context(|| CannotProcessParents { path: file_path.clone() })?;
         let box_path = BoxPath::new(&file_path).context(CannotHandlePath { path: &file_path })?;
 
         for (parent, meta) in parents.into_iter() {
@@ -506,20 +518,23 @@ fn process_files<I: Iterator<Item = PathBuf>>(
                 known_dirs.insert(box_path);
             }
         } else {
-            let file =
-                std::fs::File::open(&file_path).context(CannotOpenFile { path: &file_path })?;
-            let record = bf
-                .insert(compression, box_path.clone(), file, metadata(meta))
-                .context(CannotAddFile { path: &file_path })?;
-            if verbose {
-                println!(
-                    "{} (compressed {:.*}%)",
-                    &file_path.to_string_lossy(),
-                    2,
-                    100.0 - (record.length as f64 / record.decompressed_length as f64 * 100.0)
-                );
+            if !known_files.contains(&box_path) {
+                let file =
+                    std::fs::File::open(&file_path).context(CannotOpenFile { path: &file_path })?;
+                let record = bf
+                    .insert(compression, box_path.clone(), file, metadata(meta))
+                    .context(CannotAddFile { path: &file_path })?;
+                if verbose {
+                    println!(
+                        "{} (compressed {:.*}%)",
+                        &file_path.to_string_lossy(),
+                        2,
+                        100.0 - (record.length as f64 / record.decompressed_length as f64 * 100.0)
+                    );
+                }
+                add_crc32(bf, &box_path).context(CannotAddChecksum { path: &file_path })?;
+                known_files.insert(box_path);
             }
-            add_crc32(bf, &box_path).context(CannotAddChecksum { path: &file_path })?;
         }
     }
 
@@ -534,16 +549,11 @@ fn create(
     verbose: bool,
     alignment: Option<NonZeroU64>,
 ) -> Result<()> {
-    // TODO: silently ignore self-archiving unless it's the only thing in the list.
-    snafu::ensure!(!selected_files.contains(&path), WillNotArchiveSelf { path });
-
     let mut bf = match alignment {
         None => BoxFile::create(&path),
         Some(alignment) => BoxFile::create_with_alignment(&path, alignment),
     }
     .context(CannotCreateArchive { path: &path })?;
-
-    let mut known_dirs = std::collections::HashSet::new();
 
     process_files(
         selected_files.into_iter(),
@@ -551,7 +561,6 @@ fn create(
         verbose,
         compression,
         &mut bf,
-        &mut known_dirs,
     )
     .map_err(Box::new)
     .context(CannotAddFiles { path: &path })?;
@@ -653,6 +662,12 @@ enum Error {
     CannotCreateArchive {
         path: PathBuf,
         source: std::io::Error,
+        backtrace: snafu::Backtrace,
+    },
+    #[snafu(display("Cannot process parents `{}`", path.display()))]
+    CannotProcessParents {
+        path: PathBuf,
+        source: Box<Error>,
         backtrace: snafu::Backtrace,
     },
     #[snafu(display("Cannot add files to archive `{}`", path.display()))]

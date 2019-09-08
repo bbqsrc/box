@@ -3,7 +3,7 @@ use std::default::Default;
 use std::fs::OpenOptions;
 use std::io::{prelude::*, Result, SeekFrom};
 use std::num::NonZeroU64;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use comde::{Compress, Decompress};
 use memmap::MmapOptions;
@@ -35,6 +35,7 @@ impl BoxMetadata {
 #[derive(Debug)]
 pub struct BoxFile {
     pub(crate) file: std::fs::File,
+    pub(crate) path: PathBuf,
     pub(crate) header: BoxHeader,
     pub(crate) meta: BoxMetadata,
 }
@@ -49,6 +50,7 @@ impl BoxFile {
             .map(|file| {
                 let mut f = BoxFile {
                     file,
+                    path: path.as_ref().to_path_buf().canonicalize()?,
                     header: BoxHeader::default(),
                     meta: BoxMetadata::default(),
                 };
@@ -69,10 +71,13 @@ impl BoxFile {
             .read(true)
             .create_new(true)
             .open(path.as_ref())
-            .map(|file| BoxFile {
-                file,
-                header: BoxHeader::default(),
-                meta: BoxMetadata::default(),
+            .and_then(|file| {
+                Ok(BoxFile {
+                    file,
+                    path: path.as_ref().to_path_buf().canonicalize()?,
+                    header: BoxHeader::default(),
+                    meta: BoxMetadata::default(),
+                })
             })?;
 
         boxfile.write_header_and_trailer()?;
@@ -91,10 +96,13 @@ impl BoxFile {
             .read(true)
             .create_new(true)
             .open(path.as_ref())
-            .map(|file| BoxFile {
-                file,
-                header: BoxHeader::with_alignment(alignment),
-                meta: BoxMetadata::default(),
+            .and_then(|file| {
+                Ok(BoxFile {
+                    file,
+                    path: path.as_ref().to_path_buf().canonicalize()?,
+                    header: BoxHeader::with_alignment(alignment),
+                    meta: BoxMetadata::default(),
+                })
             })?;
 
         boxfile.write_header_and_trailer()?;
@@ -108,6 +116,10 @@ impl BoxFile {
         let pos = self.write_trailer()?;
         self.header.trailer = Some(NonZeroU64::new(pos).unwrap());
         self.write_header()
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
     }
 
     pub fn alignment(&self) -> Option<NonZeroU64> {
