@@ -175,64 +175,65 @@ fn append(
     compression: Compression,
     verbose: bool,
 ) -> Result<()> {
-    if selected_files.contains(&path) {
-        eprintln!("Cowardly refusing to recursively archive self; aborting.");
-        std::process::exit(1);
-    }
-
-    let mut bf = BoxFile::open(path)?;
-
-    let (mut known_dirs, known_files) = {
-        (
-            bf.metadata()
-                .records()
-                .iter()
-                .filter_map(|x| x.as_directory())
-                .map(|r| r.path.clone())
-                .collect::<std::collections::HashSet<_>>(),
-            bf.metadata()
-                .records()
-                .iter()
-                .filter_map(|x| x.as_file())
-                .map(|r| r.path.clone())
-                .collect::<std::collections::HashSet<_>>(),
-        )
-    };
-
-    let duplicate = selected_files
-        .iter()
-        .map(|x| BoxPath::new(&x).unwrap())
-        .find(|x| known_files.contains(x));
-
-    if let Some(duplicate) = duplicate {
-        eprintln!(
-            "Archive already contains file for path: {}; aborting.",
-            duplicate.to_string()
-        );
-        std::process::exit(1);
-    }
-
-    // Iterate to capture all known directories
-    for file_path in selected_files.into_iter() {
-        let parents = collect_parent_directories(&file_path);
-        let box_path = BoxPath::new(&file_path).unwrap();
-
-        for (parent, meta) in parents.into_iter() {
-            if known_dirs.get(&parent).is_none() {
-                bf.mkdir(parent.clone(), meta)?;
-                known_dirs.insert(parent);
-            }
-        }
-
-        if file_path.is_dir() {
-            bf.mkdir(box_path.clone(), metadata(&file_path))?;
-            known_dirs.insert(box_path);
-        } else {
-            let file = std::fs::File::open(&file_path)?;
-            bf.insert(compression, box_path, file, metadata(&file_path))?;
-        }
-    }
     Ok(())
+    // if selected_files.contains(&path) {
+    //     eprintln!("Cowardly refusing to recursively archive self; aborting.");
+    //     std::process::exit(1);
+    // }
+
+    // let mut bf = BoxFile::open(path)?;
+
+    // let (mut known_dirs, known_files) = {
+    //     (
+    //         bf.metadata()
+    //             .records()
+    //             .iter()
+    //             .filter_map(|x| x.as_directory())
+    //             .map(|r| r.path.clone())
+    //             .collect::<std::collections::HashSet<_>>(),
+    //         bf.metadata()
+    //             .records()
+    //             .iter()
+    //             .filter_map(|x| x.as_file())
+    //             .map(|r| r.path.clone())
+    //             .collect::<std::collections::HashSet<_>>(),
+    //     )
+    // };
+
+    // let duplicate = selected_files
+    //     .iter()
+    //     .map(|x| BoxPath::new(&x).unwrap())
+    //     .find(|x| known_files.contains(x));
+
+    // if let Some(duplicate) = duplicate {
+    //     eprintln!(
+    //         "Archive already contains file for path: {}; aborting.",
+    //         duplicate.to_string()
+    //     );
+    //     std::process::exit(1);
+    // }
+
+    // // Iterate to capture all known directories
+    // for file_path in selected_files.into_iter() {
+    //     let parents = collect_parent_directories(&file_path);
+    //     let box_path = BoxPath::new(&file_path).unwrap();
+
+    //     for (parent, meta) in parents.into_iter() {
+    //         if known_dirs.get(&parent).is_none() {
+    //             bf.mkdir(parent.clone(), meta)?;
+    //             known_dirs.insert(parent);
+    //         }
+    //     }
+
+    //     if file_path.is_dir() {
+    //         bf.mkdir(box_path.clone(), metadata(&file_path))?;
+    //         known_dirs.insert(box_path);
+    //     } else {
+    //         let file = std::fs::File::open(&file_path)?;
+    //         bf.insert(compression, box_path, file, metadata(&file_path))?;
+    //     }
+    // }
+    // Ok(())
 }
 
 macro_rules! add {
@@ -377,24 +378,35 @@ fn extract(path: PathBuf, selected_files: Vec<PathBuf>, verbose: bool) -> Result
     Ok(())
 }
 
-fn collect_parent_directories(path: &Path) -> Vec<(BoxPath, HashMap<String, Vec<u8>>)> {
-    let mut out = vec![];
-    let path = match path.parent().and_then(|p| box_format::path::sanitize(p)) {
+fn collect_parent_directories<P: AsRef<Path>>(
+    path: P,
+) -> Result<Vec<(BoxPath, HashMap<String, Vec<u8>>)>> {
+    let box_path = BoxPath::new(&path).map_err(|e| e.as_io_error())?;
+    let levels = box_path.levels();
+
+    let path = match path.as_ref().parent() {
         Some(v) => v,
-        None => return vec![],
+        None => return Ok(vec![]),
     };
 
-    out.into_iter().map(|x| (BoxPath::new(x).unwrap(), metadata(x))).collect()
+    let mut v = path
+        .ancestors()
+        .take(levels)
+        .map(|path| {
+            Ok((
+                BoxPath::new(path).map_err(|e| e.as_io_error())?,
+                metadata(path.metadata()?),
+            ))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    v.reverse();
+    Ok(v)
 }
 
-fn metadata(path: &Path) -> HashMap<String, Vec<u8>> {
+fn metadata(meta: std::fs::Metadata) -> HashMap<String, Vec<u8>> {
     use std::time::SystemTime;
 
     let mut attrs = HashMap::new();
-    let meta = match path.metadata() {
-        Ok(v) => v,
-        Err(_) => return attrs,
-    };
 
     if let Ok(created) = meta.created() {
         let bytes = created
@@ -441,32 +453,44 @@ fn process_files<I: Iterator<Item = PathBuf>>(
     bf: &mut BoxFile,
     known_dirs: &mut HashSet<BoxPath>,
 ) -> std::io::Result<()> {
-    for file_path in iter {
-        let parents = collect_parent_directories(&file_path);
+    let iter = iter.flat_map(|path| {
+        let mut walker = jwalk::WalkDir::new(&path).sort(true).preload_metadata(true);
+        if !recursive {
+            walker = walker.num_threads(1).max_depth(0);
+        }
+        walker.into_iter()
+    });
+
+    for entry in iter {
+        let entry = entry?;
+        let file_type = entry.file_type?;
+        let meta = entry.metadata.unwrap()?;
+        let file_path = entry.parent_spec.path.join(&entry.file_name);
+        let parents = collect_parent_directories(&*file_path)?;
         let box_path = BoxPath::new(&file_path).unwrap();
 
         for (parent, meta) in parents.into_iter() {
-            if known_dirs.contains(&parent) {
+            if !known_dirs.contains(&parent) {
                 bf.mkdir(parent.clone(), meta)?;
                 known_dirs.insert(parent);
             }
         }
 
-        if file_path.is_dir() {
+        if file_type.is_dir() {
             if !known_dirs.contains(&box_path) {
                 if verbose {
-                    println!("{} (directory)", &file_path.display());
+                    println!("{} (directory)", &file_path.to_string_lossy());
                 }
-                bf.mkdir(box_path.clone(), metadata(&file_path))?;
+                bf.mkdir(box_path.clone(), metadata(meta))?;
                 known_dirs.insert(box_path);
             }
         } else {
             let file = std::fs::File::open(&file_path)?;
-            let record = bf.insert(compression, box_path.clone(), file, metadata(&file_path))?;
+            let record = bf.insert(compression, box_path.clone(), file, metadata(meta))?;
             if verbose {
                 println!(
                     "{} (compressed {:.*}%)",
-                    &file_path.display(),
+                    &file_path.to_string_lossy(),
                     2,
                     100.0 - (record.length as f64 / record.decompressed_length as f64 * 100.0)
                 );

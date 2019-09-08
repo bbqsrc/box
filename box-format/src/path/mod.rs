@@ -66,9 +66,8 @@ pub fn sanitize<P: AsRef<Path>>(path: P) -> Option<Vec<String>> {
 
 impl BoxPath {
     pub fn new<P: AsRef<Path>>(path: P) -> std::result::Result<BoxPath, IntoBoxPathError> {
-
-        let out = sanitize(path).ok_or(IntoBoxPathError::UnrepresentableStr)?;
-
+        let out = sanitize(&path).ok_or(IntoBoxPathError::UnrepresentableStr)?;
+        
         if out.len() == 0 {
             return Err(IntoBoxPathError::EmptyPath);
         }
@@ -91,6 +90,10 @@ impl BoxPath {
 
     pub fn to_path_buf(&self) -> PathBuf {
         PathBuf::from(self.to_string())
+    }
+
+    pub fn levels(&self) -> usize {
+        self.0.chars().filter(|c| c == &'\x1f').count()
     }
 }
 
