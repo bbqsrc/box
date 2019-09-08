@@ -6,6 +6,9 @@ pub mod path;
 mod record;
 mod ser;
 
+#[cfg(feature = "ffi")]
+pub mod ffi;
+
 pub use compression::Compression;
 pub use file::{AttrMap, BoxFile, BoxMetadata};
 use header::BoxHeader;
