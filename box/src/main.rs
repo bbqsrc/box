@@ -483,9 +483,7 @@ fn process_files<I: Iterator<Item = PathBuf>>(
             .expect("read file metadata")
             .context(CannotProcessFile)?;
         let file_path = entry.parent_spec.path.join(&entry.file_name);
-        let canonical_path = file_path
-            .canonicalize()
-            .context(CannotProcessFile)?;
+        let canonical_path = file_path.canonicalize().context(CannotProcessFile)?;
 
         if bf.path() == canonical_path {
             continue;
@@ -493,7 +491,9 @@ fn process_files<I: Iterator<Item = PathBuf>>(
 
         let parents = collect_parent_directories(&*file_path)
             .map_err(Box::new)
-            .with_context(|| CannotProcessParents { path: file_path.clone() })?;
+            .with_context(|| CannotProcessParents {
+                path: file_path.clone(),
+            })?;
         let box_path = BoxPath::new(&file_path).context(CannotHandlePath { path: &file_path })?;
 
         for (parent, meta) in parents.into_iter() {
