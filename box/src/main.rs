@@ -62,6 +62,7 @@ enum Commands {
             parse(try_from_str = parse_compression),
             hide_default_value = true,
             default_value = "Compression::Stored",
+            possible_values = Compression::available_variants(),
             help = "Compression to be used for a file [default: stored]"
         )]
         compression: Compression,
@@ -102,6 +103,7 @@ enum Commands {
             parse(try_from_str = parse_compression),
             hide_default_value = true,
             default_value = "stored",
+            possible_values = Compression::available_variants(),
             help = "Compression to be used for a file [default: stored]"
         )]
         compression: Compression,

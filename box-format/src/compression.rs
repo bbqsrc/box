@@ -30,6 +30,13 @@ pub enum Compression {
     Unknown(u8),
 }
 
+impl Compression {
+    // FIXME(killercup): Replace with strum-macros when new release is available
+    pub fn available_variants() -> &'static [&'static str] {
+        &["stored", "deflate", "zstd", "xz", "snappy"]
+    }
+}
+
 impl fmt::Display for Compression {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         use Compression::*;
