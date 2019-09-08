@@ -3,38 +3,34 @@
 
 use std::collections::HashMap;
 use std::collections::HashSet;
-use std::io::Result;
 use std::num::NonZeroU64;
 use std::path::{Path, PathBuf};
 
 use box_format::{path::PATH_PLATFORM_SEP, BoxFile, BoxPath, Compression, Record};
 use byteorder::{LittleEndian, ReadBytesExt};
 use crc32fast::Hasher as Crc32Hasher;
+use snafu::ResultExt;
 use structopt::StructOpt;
 use walkdir::{DirEntry, WalkDir};
+
+type Result<T> = std::result::Result<T, Error>;
 
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 
-#[derive(Debug)]
-struct ParseCompressionError(String);
-
-impl std::error::Error for ParseCompressionError {}
-
-impl std::fmt::Display for ParseCompressionError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Unknown compression method: {}", self.0)
-    }
-}
-
-fn parse_compression(src: &str) -> std::result::Result<Compression, ParseCompressionError> {
+fn parse_compression(src: &str) -> std::result::Result<Compression, Error> {
     let compression = match src {
         "stored" => Compression::Stored,
         "deflate" => Compression::Deflate,
         "zstd" | "zstandard" => Compression::Zstd,
         "xz" => Compression::Xz,
         "snappy" => Compression::Snappy,
-        _ => return Err(ParseCompressionError(src.to_string())),
+        _ => {
+            return UnknownCompressionFormat {
+                name: src.to_string(),
+            }
+            .fail()
+        }
     };
 
     Ok(compression)
@@ -182,7 +178,7 @@ fn append(
         std::process::exit(1);
     }
 
-    let mut bf = BoxFile::open(path)?;
+    let mut bf = BoxFile::open(&path).context(CannotOpenArchive { path: &path })?;
 
     let (mut known_dirs, known_files) = {
         (
@@ -221,17 +217,25 @@ fn append(
 
         for (parent, meta) in parents.into_iter() {
             if known_dirs.get(&parent).is_none() {
-                bf.mkdir(parent.clone(), meta)?;
+                bf.mkdir(parent.clone(), meta)
+                    .with_context(|| CannotCreateDirectory {
+                        path: parent.clone(),
+                    })?;
                 known_dirs.insert(parent);
             }
         }
 
         if file_path.is_dir() {
-            bf.mkdir(box_path.clone(), metadata(&file_path))?;
+            bf.mkdir(box_path.clone(), metadata(&file_path))
+                .with_context(|| CannotCreateDirectory {
+                    path: box_path.clone(),
+                })?;
             known_dirs.insert(box_path);
         } else {
-            let file = std::fs::File::open(&file_path)?;
-            bf.insert(compression, box_path, file, metadata(&file_path))?;
+            let file =
+                std::fs::File::open(&file_path).context(CannotOpenFile { path: &file_path })?;
+            bf.insert(compression, box_path, file, metadata(&file_path))
+                .context(CannotAddFile { path: &file_path })?;
         }
     }
     Ok(())
@@ -299,10 +303,10 @@ fn unix_acl(attr: Option<&Vec<u8>>) -> String {
         .unwrap_or_else(|| "-".into())
 }
 
-fn list(path: PathBuf, selected_files: Vec<PathBuf>, verbose: bool) -> Result<()> {
+fn list(path: &Path, selected_files: Vec<PathBuf>, verbose: bool) -> Result<()> {
     use humansize::{file_size_opts as options, FileSize};
 
-    let bf = BoxFile::open(&path)?;
+    let bf = BoxFile::open(path).context(CannotOpenArchive { path })?;
     let metadata = bf.metadata();
 
     let alignment = match bf.alignment() {
@@ -355,23 +359,32 @@ fn list(path: PathBuf, selected_files: Vec<PathBuf>, verbose: bool) -> Result<()
     Ok(())
 }
 
-fn extract(path: PathBuf, selected_files: Vec<PathBuf>, verbose: bool) -> Result<()> {
-    let bf = BoxFile::open(path)?;
+fn extract(path: &Path, selected_files: Vec<PathBuf>, verbose: bool) -> Result<()> {
+    let bf = BoxFile::open(path).context(CannotOpenArchive { path })?;
     let metadata = bf.metadata();
 
     for record in metadata.records().iter() {
-        let path = format_path(record);
+        let formatted_path = format_path(record);
         if verbose {
-            println!("{}", path);
+            println!("{}", formatted_path);
         }
 
         match record {
             Record::File(file) => {
-                let out_file = std::fs::File::create(&path)?;
-                bf.decompress(file, out_file)?;
+                let out_file =
+                    std::fs::File::create(&formatted_path).context(CannotCreateFile { path })?;
+                bf.decompress(&file, out_file)
+                    .with_context(|| CannotDecompressFile {
+                        archive_path: file.path.clone(),
+                        target_path: path,
+                    })?;
             }
             Record::Directory(dir) => {
-                std::fs::create_dir_all(&dir.path.to_path_buf())?;
+                std::fs::create_dir_all(&dir.path.to_path_buf()).context(
+                    CannotCreateDirectory {
+                        path: dir.path.clone(),
+                    },
+                )?;
             }
         }
     }
@@ -386,7 +399,9 @@ fn collect_parent_directories(path: &Path) -> Vec<(BoxPath, HashMap<String, Vec<
         None => return vec![],
     };
 
-    out.into_iter().map(|x| (BoxPath::new(x).unwrap(), metadata(x))).collect()
+    out.into_iter()
+        .map(|x| (BoxPath::new(x).unwrap(), metadata(x)))
+        .collect()
 }
 
 fn metadata(path: &Path) -> HashMap<String, Vec<u8>> {
@@ -489,15 +504,13 @@ fn create(
     alignment: Option<NonZeroU64>,
 ) -> Result<()> {
     // TODO: silently ignore self-archiving unless it's the only thing in the list.
-    if selected_files.contains(&path) {
-        eprintln!("Cowardly refusing to recursively archive self; aborting.");
-        std::process::exit(1);
-    }
+    snafu::ensure!(!selected_files.contains(&path), WillNotArchiveSelf { path });
 
     let mut bf = match alignment {
-        None => BoxFile::create(path),
-        Some(alignment) => BoxFile::create_with_alignment(path, alignment),
-    }?;
+        None => BoxFile::create(&path),
+        Some(alignment) => BoxFile::create_with_alignment(&path, alignment),
+    }
+    .context(CannotCreateArchive { path: &path })?;
 
     let mut known_dirs = std::collections::HashSet::new();
 
@@ -508,22 +521,23 @@ fn create(
         compression,
         &mut bf,
         &mut known_dirs,
-    )?;
+    )
+    .context(CannotAddFiles { path: &path })?;
 
     Ok(())
 }
 
-fn main() {
+fn main() -> Result<()> {
     let opts = CliOpts::from_args();
 
-    let result = match opts.cmd {
+    match opts.cmd {
         Commands::Append {
             path,
             compression,
             recursive,
         } => append(path, opts.selected_files, compression, opts.verbose),
-        Commands::List { path } => list(path, opts.selected_files, opts.verbose),
-        Commands::Extract { path } => extract(path, opts.selected_files, opts.verbose),
+        Commands::List { path } => list(&path, opts.selected_files, opts.verbose),
+        Commands::Extract { path } => extract(&path, opts.selected_files, opts.verbose),
         Commands::Create {
             path,
             alignment,
@@ -538,10 +552,68 @@ fn main() {
             alignment,
         ),
         Commands::Test { path } => unimplemented!(),
-    };
-
-    if let Err(e) = result {
-        eprintln!("Error: {:?}", e);
-        std::process::exit(1);
     }
+}
+
+#[derive(snafu::Snafu, snafu_cli_debug::SnafuCliDebug)]
+enum Error {
+    #[snafu(display("Unknown compression method `{}`", name))]
+    UnknownCompressionFormat {
+        name: String,
+        backtrace: snafu::Backtrace,
+    },
+    #[snafu(display("Cannot open archive `{}`", path.display()))]
+    CannotOpenArchive {
+        path: PathBuf,
+        source: std::io::Error,
+        backtrace: snafu::Backtrace,
+    },
+    #[snafu(display("Cannot create directory `{}`", path.to_string()))]
+    CannotCreateDirectory {
+        path: BoxPath,
+        source: std::io::Error,
+        backtrace: snafu::Backtrace,
+    },
+    #[snafu(display("Cannot open file `{}`", path.display()))]
+    CannotOpenFile {
+        path: PathBuf,
+        source: std::io::Error,
+        backtrace: snafu::Backtrace,
+    },
+    #[snafu(display("Cannot add file to archive `{}`", path.display()))]
+    CannotAddFile {
+        path: PathBuf,
+        source: std::io::Error,
+        backtrace: snafu::Backtrace,
+    },
+    #[snafu(display("Cannot create file `{}`", path.display()))]
+    CannotCreateFile {
+        path: PathBuf,
+        source: std::io::Error,
+        backtrace: snafu::Backtrace,
+    },
+    #[snafu(display("Cannot decompress file `{}` to `{}`", archive_path.to_string(), target_path.display()))]
+    CannotDecompressFile {
+        archive_path: BoxPath,
+        target_path: PathBuf,
+        source: std::io::Error,
+        backtrace: snafu::Backtrace,
+    },
+    #[snafu(display("Cannot create archive `{}`", path.display()))]
+    CannotCreateArchive {
+        path: PathBuf,
+        source: std::io::Error,
+        backtrace: snafu::Backtrace,
+    },
+    #[snafu(display("Cannot add files to archive `{}`", path.display()))]
+    CannotAddFiles {
+        path: PathBuf,
+        source: std::io::Error,
+        backtrace: snafu::Backtrace,
+    },
+    #[snafu(display("Cowardly refusing to recursively archive self. `{}` is part of selected files", path.display()))]
+    WillNotArchiveSelf {
+        path: PathBuf,
+        backtrace: snafu::Backtrace,
+    },
 }
