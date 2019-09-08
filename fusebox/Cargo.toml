@@ -1,0 +1,13 @@
+[package]
+name = "fusebox"
+version = "0.1.0"
+authors = ["Brendan Molloy <brendan@bbqsrc.net>"]
+edition = "2018"
+
+[dependencies]
+fuse = { git = "https://github.com/zargony/rust-fuse" }
+structopt = "0.3.1"
+box_format = { path = "../box-format" }
+env_logger = "0.6.2"
+libc = "0.2.62"
+log = "0.4.8"

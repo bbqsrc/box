@@ -33,6 +33,11 @@ impl Record {
     }
 
     #[inline(always)]
+    pub fn name(&self) -> String {
+        self.path().to_path_buf().file_name().unwrap().to_str().unwrap().to_string()
+    }
+
+    #[inline(always)]
     pub fn attr<S: AsRef<str>>(&self, boxfile: &BoxFile, key: S) -> Option<&Vec<u8>> {
         let key = boxfile.attr_key_for(key.as_ref())?;
         self.attrs().get(&key)

@@ -85,6 +85,15 @@ impl BoxPath {
     pub fn levels(&self) -> usize {
         self.0.chars().filter(|c| c == &'\x1f').count()
     }
+
+    pub fn starts_with(&self, other: &BoxPath) -> bool {
+        !self.0.split(PATH_BOX_SEP).zip(other.0.split(PATH_BOX_SEP)).any(|(a, b)| a != b)
+    }
+
+    pub fn join(&self, tail: &str) -> std::result::Result<BoxPath, IntoBoxPathError> {
+        let out = sanitize(&tail).ok_or(IntoBoxPathError::UnrepresentableStr)?;
+        Ok(BoxPath(format!("{}{}{}", self.0, PATH_BOX_SEP, out.join(PATH_BOX_SEP))))
+    }
 }
 
 impl fmt::Display for BoxPath {
