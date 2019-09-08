@@ -9,14 +9,23 @@ use std::path::{Path, PathBuf};
 use box_format::{path::PATH_PLATFORM_SEP, BoxFile, BoxPath, Compression, Record};
 use byteorder::{LittleEndian, ReadBytesExt};
 use crc32fast::Hasher as Crc32Hasher;
+use jwalk::DirEntry;
 use snafu::ResultExt;
 use structopt::StructOpt;
-use walkdir::{DirEntry, WalkDir};
 
 type Result<T> = std::result::Result<T, Error>;
 
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
+
+#[cfg(unix)]
+use std::os::unix::fs::MetadataExt;
+#[cfg(windows)]
+use std::os::windows::fs::MetadataExt;
+
+mod winapi {
+    pub const FILE_ATTRIBUTE_HIDDEN: u32 = 2;
+}
 
 fn parse_compression(src: &str) -> std::result::Result<Compression, Error> {
     let compression = match src {
@@ -66,6 +75,9 @@ enum Commands {
         #[structopt(short, long, help = "Recursively handle provided paths")]
         recursive: bool,
 
+        #[structopt(short = "H", long = "hidden", help = "Allow adding hidden files")]
+        allow_hidden: bool,
+
         #[structopt(
             name = "boxfile",
             parse(from_os_str),
@@ -106,6 +118,9 @@ enum Commands {
 
         #[structopt(short, long, help = "Recursively handle provided paths")]
         recursive: bool,
+
+        #[structopt(short = "H", long = "hidden", help = "Allow adding hidden files")]
+        allow_hidden: bool,
 
         #[structopt(
             name = "boxfile",
@@ -172,11 +187,12 @@ fn append(
     selected_files: Vec<PathBuf>,
     compression: Compression,
     recursive: bool,
+    allow_hidden: bool,
     verbose: bool,
 ) -> Result<()> {
-    let mut bf = BoxFile::open(&path).context(CannotOpenArchive { path: &path })?;
+    let bf = BoxFile::open(&path).context(CannotOpenArchive { path: &path })?;
 
-    let (mut known_dirs, known_files) = {
+    let (known_dirs, known_files) = {
         (
             bf.metadata()
                 .records()
@@ -196,6 +212,7 @@ fn append(
     process_files(
         selected_files.into_iter(),
         recursive,
+        allow_hidden,
         verbose,
         compression,
         bf,
@@ -270,7 +287,7 @@ fn unix_acl(attr: Option<&Vec<u8>>) -> String {
         .unwrap_or_else(|| "-".into())
 }
 
-fn list(path: &Path, selected_files: Vec<PathBuf>, verbose: bool) -> Result<()> {
+fn list(path: &Path, _selected_files: Vec<PathBuf>, _verbose: bool) -> Result<()> {
     use humansize::{file_size_opts as options, FileSize};
 
     let bf = BoxFile::open(path).context(CannotOpenArchive { path })?;
@@ -326,7 +343,7 @@ fn list(path: &Path, selected_files: Vec<PathBuf>, verbose: bool) -> Result<()> 
     Ok(())
 }
 
-fn extract(path: &Path, selected_files: Vec<PathBuf>, verbose: bool) -> Result<()> {
+fn extract(path: &Path, _selected_files: Vec<PathBuf>, verbose: bool) -> Result<()> {
     let bf = BoxFile::open(path).context(CannotOpenArchive { path })?;
     let metadata = bf.metadata();
 
@@ -413,12 +430,24 @@ fn metadata(meta: std::fs::Metadata) -> HashMap<String, Vec<u8>> {
 }
 
 #[inline(always)]
+#[cfg(not(windows))]
 fn is_hidden(entry: &DirEntry) -> bool {
     entry
         .file_name()
         .to_str()
         .map(|s| s.starts_with("."))
         .unwrap_or(false)
+}
+
+#[cfg(windows)]
+fn is_hidden(entry: &DirEntry) -> bool {
+    match entry.metadata.as_ref() {
+        Some(m) => m
+            .as_ref()
+            .map(|m| (m.file_attributes() & winapi::FILE_ATTRIBUTE_HIDDEN) != 0)
+            .unwrap_or(false),
+        None => false,
+    }
 }
 
 #[inline(always)]
@@ -434,6 +463,7 @@ fn add_crc32(bf: &mut BoxFile, box_path: &BoxPath) -> std::io::Result<()> {
 fn process_files<I: Iterator<Item = PathBuf>>(
     iter: I,
     recursive: bool,
+    allow_hidden: bool,
     verbose: bool,
     compression: Compression,
     mut bf: BoxFile,
@@ -444,6 +474,14 @@ fn process_files<I: Iterator<Item = PathBuf>>(
         let mut walker = jwalk::WalkDir::new(&path).sort(true).preload_metadata(true);
         if !recursive {
             walker = walker.num_threads(1).max_depth(0);
+        }
+        if !allow_hidden {
+            walker = walker.process_entries(|e| {
+                e.retain(|entry| match entry {
+                    Ok(v) => !is_hidden(&v),
+                    _ => true,
+                });
+            });
         }
         walker.into_iter()
     });
@@ -519,10 +557,11 @@ fn create(
     selected_files: Vec<PathBuf>,
     compression: Compression,
     recursive: bool,
+    allow_hidden: bool,
     verbose: bool,
     alignment: Option<NonZeroU64>,
 ) -> Result<()> {
-    let mut bf = match alignment {
+    let bf = match alignment {
         None => BoxFile::create(&path),
         Some(alignment) => BoxFile::create_with_alignment(&path, alignment),
     }
@@ -531,6 +570,7 @@ fn create(
     process_files(
         selected_files.into_iter(),
         recursive,
+        allow_hidden,
         verbose,
         compression,
         bf,
@@ -551,11 +591,13 @@ fn main() -> Result<()> {
             path,
             compression,
             recursive,
+            allow_hidden,
         } => append(
             path,
             opts.selected_files,
             compression,
             recursive,
+            allow_hidden,
             opts.verbose,
         ),
         Commands::List { path } => list(&path, opts.selected_files, opts.verbose),
@@ -565,15 +607,17 @@ fn main() -> Result<()> {
             alignment,
             compression,
             recursive,
+            allow_hidden,
         } => create(
             path,
             opts.selected_files,
             compression,
             recursive,
+            allow_hidden,
             opts.verbose,
             alignment,
         ),
-        Commands::Test { path } => unimplemented!(),
+        Commands::Test { .. } => unimplemented!(),
     }
 }
 
