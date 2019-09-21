@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::default::Default;
 use std::fs::OpenOptions;
-use std::io::{prelude::*, Result, SeekFrom};
+use std::io::{prelude::*, BufReader, BufWriter, Result, SeekFrom};
 use std::num::NonZeroU64;
 use std::path::{Path, PathBuf};
 
@@ -110,14 +110,6 @@ impl BoxFile {
         Ok(boxfile)
     }
 
-    #[inline(always)]
-    fn write_header_and_trailer(&mut self) -> std::io::Result<()> {
-        self.write_header()?;
-        let pos = self.write_trailer()?;
-        self.header.trailer = Some(NonZeroU64::new(pos).unwrap());
-        self.write_header()
-    }
-
     pub fn path(&self) -> &Path {
         &self.path
     }
@@ -135,67 +127,20 @@ impl BoxFile {
         &self.meta
     }
 
-    #[inline(always)]
-    fn next_write_addr(&self) -> NonZeroU64 {
-        let offset = self
-            .meta
-            .records
-            .iter()
-            .rev()
-            .find_map(|r| r.as_file())
-            .map(|r| r.data.get() + r.length)
-            .unwrap_or(std::mem::size_of::<BoxHeader>() as u64);
-
-        let v = match self.header.alignment {
-            None => offset,
-            Some(alignment) => {
-                let alignment = alignment.get();
-                let diff = offset % alignment;
-                if diff == 0 {
-                    offset
-                } else {
-                    offset + (alignment - diff)
-                }
-            }
-        };
-
-        NonZeroU64::new(v).unwrap()
-    }
-
-    pub fn data(&self, record: &FileRecord) -> std::io::Result<memmap::Mmap> {
+    pub unsafe fn data(&self, record: &FileRecord) -> std::io::Result<memmap::Mmap> {
         self.read_data(record)
     }
 
     pub fn decompress_value<V: Decompress>(&self, record: &FileRecord) -> std::io::Result<V> {
-        let mmap = self.read_data(record)?;
+        let mmap = unsafe { self.read_data(record)? };
         record.compression.decompress(std::io::Cursor::new(mmap))
     }
 
     pub fn decompress<W: Write>(&self, record: &FileRecord, dest: W) -> std::io::Result<()> {
-        let mmap = self.read_data(record)?;
+        let mmap = unsafe { self.read_data(record)? };
         record
             .compression
             .decompress_write(std::io::Cursor::new(mmap), dest)
-    }
-
-    #[inline(always)]
-    pub(crate) fn attr_key_for_mut(&mut self, key: &str) -> u32 {
-        match self.meta.attr_keys.iter().position(|r| r == key) {
-            Some(v) => v as u32,
-            None => {
-                self.meta.attr_keys.push(key.to_string());
-                (self.meta.attr_keys.len() - 1) as u32
-            }
-        }
-    }
-
-    #[inline(always)]
-    pub(crate) fn attr_key_for(&self, key: &str) -> Option<u32> {
-        self.meta
-            .attr_keys
-            .iter()
-            .position(|r| r == key)
-            .map(|v| v as u32)
     }
 
     pub fn set_attr<S: AsRef<str>>(
@@ -282,15 +227,70 @@ impl BoxFile {
     }
 
     #[inline(always)]
+    fn write_header_and_trailer(&mut self) -> std::io::Result<()> {
+        self.write_header()?;
+        let pos = self.write_trailer()?;
+        self.header.trailer = Some(NonZeroU64::new(pos).unwrap());
+        self.write_header()
+    }
+
+    #[inline(always)]
+    fn next_write_addr(&self) -> NonZeroU64 {
+        let offset = self
+            .meta
+            .records
+            .iter()
+            .rev()
+            .find_map(|r| r.as_file())
+            .map(|r| r.data.get() + r.length)
+            .unwrap_or(std::mem::size_of::<BoxHeader>() as u64);
+
+        let v = match self.header.alignment {
+            None => offset,
+            Some(alignment) => {
+                let alignment = alignment.get();
+                let diff = offset % alignment;
+                if diff == 0 {
+                    offset
+                } else {
+                    offset + (alignment - diff)
+                }
+            }
+        };
+
+        NonZeroU64::new(v).unwrap()
+    }
+
+    #[inline(always)]
+    pub(crate) fn attr_key_for_mut(&mut self, key: &str) -> u32 {
+        match self.meta.attr_keys.iter().position(|r| r == key) {
+            Some(v) => v as u32,
+            None => {
+                self.meta.attr_keys.push(key.to_string());
+                (self.meta.attr_keys.len() - 1) as u32
+            }
+        }
+    }
+
+    #[inline(always)]
+    pub(crate) fn attr_key_for(&self, key: &str) -> Option<u32> {
+        self.meta
+            .attr_keys
+            .iter()
+            .position(|r| r == key)
+            .map(|v| v as u32)
+    }
+
+    #[inline(always)]
     fn read_header(&mut self) -> std::io::Result<BoxHeader> {
         self.file.seek(SeekFrom::Start(0))?;
-        BoxHeader::deserialize_owned(&mut self.file)
+        BoxHeader::deserialize_owned(&mut BufReader::new(&mut self.file))
     }
 
     #[inline(always)]
     fn write_header(&mut self) -> std::io::Result<()> {
         self.file.seek(SeekFrom::Start(0))?;
-        self.header.write(&mut self.file)
+        self.header.write(&mut BufWriter::new(&mut self.file))
     }
 
     #[inline(always)]
@@ -298,7 +298,7 @@ impl BoxFile {
         let pos = self.next_write_addr().get();
         self.file.set_len(pos)?;
         self.file.seek(SeekFrom::Start(pos))?;
-        self.meta.write(&mut self.file)?;
+        self.meta.write(&mut BufWriter::new(&mut self.file))?;
         Ok(pos)
     }
 
@@ -310,7 +310,7 @@ impl BoxFile {
         reader: V,
     ) -> std::io::Result<comde::com::ByteCount> {
         self.file.seek(SeekFrom::Start(pos))?;
-        compression.compress(&mut self.file, reader)
+        compression.compress(&mut BufWriter::new(&mut self.file), reader)
     }
 
     #[inline(always)]
@@ -320,17 +320,15 @@ impl BoxFile {
             .trailer
             .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::Other, "no trailer found"))?;
         self.file.seek(SeekFrom::Start(ptr.get()))?;
-        BoxMetadata::deserialize_owned(&mut self.file)
+        BoxMetadata::deserialize_owned(&mut BufReader::new(&mut self.file))
     }
 
     #[inline(always)]
-    fn read_data(&self, header: &FileRecord) -> std::io::Result<memmap::Mmap> {
-        unsafe {
-            MmapOptions::new()
-                .offset(header.data.get())
-                .len(header.length as usize)
-                .map(&self.file)
-        }
+    unsafe fn read_data(&self, header: &FileRecord) -> std::io::Result<memmap::Mmap> {
+        MmapOptions::new()
+            .offset(header.data.get())
+            .len(header.length as usize)
+            .map(&self.file)
     }
 }
 
@@ -380,9 +378,10 @@ mod tests {
         let trailer = bf.read_trailer().unwrap();
         println!("{:?}", bf.read_header());
         println!("{:?}", &trailer);
-        let file_data = bf
-            .read_data(&trailer.records[0].as_file().unwrap())
-            .unwrap();
+        let file_data = unsafe {
+            bf.read_data(&trailer.records[0].as_file().unwrap())
+                .unwrap()
+        };
         println!("{:?}", &*file_data);
         assert_eq!(&*file_data, b"hello\0\0\0")
     }

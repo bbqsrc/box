@@ -23,6 +23,7 @@ use std::os::unix::fs::MetadataExt;
 #[cfg(windows)]
 use std::os::windows::fs::MetadataExt;
 
+#[cfg(windows)]
 mod winapi {
     pub const FILE_ATTRIBUTE_HIDDEN: u32 = 2;
 }
@@ -454,7 +455,7 @@ fn is_hidden(entry: &DirEntry) -> bool {
 fn add_crc32(bf: &mut BoxFile, box_path: &BoxPath) -> std::io::Result<()> {
     let mut hasher = Crc32Hasher::new();
     let record = bf.metadata().records().last().unwrap().as_file().unwrap();
-    hasher.update(&*bf.data(record).unwrap());
+    hasher.update(&* unsafe { bf.data(record) }.unwrap());
     let hash = hasher.finalize().to_le_bytes().to_vec();
     bf.set_attr(box_path, "crc32", hash)
 }

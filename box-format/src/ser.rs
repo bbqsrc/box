@@ -37,7 +37,7 @@ impl Serialize for Vec<u8> {
 impl Serialize for AttrMap {
     fn write<W: Write + Seek>(&self, writer: &mut W) -> std::io::Result<()> {
         // Write the length in bytes so implementations can skip the entire map if they so choose.
-        
+
         // Write it as u64::MAX, then seek back
         let size_index = writer.seek(SeekFrom::Current(0))?;
         writer.write_u64::<LittleEndian>(std::u64::MAX)?;

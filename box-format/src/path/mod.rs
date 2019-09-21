@@ -87,12 +87,21 @@ impl BoxPath {
     }
 
     pub fn starts_with(&self, other: &BoxPath) -> bool {
-        !self.0.split(PATH_BOX_SEP).zip(other.0.split(PATH_BOX_SEP)).any(|(a, b)| a != b)
+        !self
+            .0
+            .split(PATH_BOX_SEP)
+            .zip(other.0.split(PATH_BOX_SEP))
+            .any(|(a, b)| a != b)
     }
 
     pub fn join(&self, tail: &str) -> std::result::Result<BoxPath, IntoBoxPathError> {
         let out = sanitize(&tail).ok_or(IntoBoxPathError::UnrepresentableStr)?;
-        Ok(BoxPath(format!("{}{}{}", self.0, PATH_BOX_SEP, out.join(PATH_BOX_SEP))))
+        Ok(BoxPath(format!(
+            "{}{}{}",
+            self.0,
+            PATH_BOX_SEP,
+            out.join(PATH_BOX_SEP)
+        )))
     }
 }
 
@@ -163,10 +172,7 @@ mod tests {
         // Blank string is a sassy fellow if you can find him
         let box_path = BoxPath::new("this is now العَرَبِيَّة.txt");
         println!("{:?}", box_path);
-        assert_eq!(
-            box_path.unwrap().0,
-            "this is now العَرَبِيَّة.txt"
-        );
+        assert_eq!(box_path.unwrap().0, "this is now العَرَبِيَّة.txt");
     }
 
     #[test]

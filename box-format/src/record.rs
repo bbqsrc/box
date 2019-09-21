@@ -34,7 +34,13 @@ impl Record {
 
     #[inline(always)]
     pub fn name(&self) -> String {
-        self.path().to_path_buf().file_name().unwrap().to_str().unwrap().to_string()
+        self.path()
+            .to_path_buf()
+            .file_name()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string()
     }
 
     #[inline(always)]
