@@ -5,8 +5,9 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::num::NonZeroU64;
 use std::path::{Path, PathBuf};
+use std::io::{BufReader, BufWriter};
 
-use box_format::{path::PATH_PLATFORM_SEP, BoxFile, BoxPath, Compression, Record};
+use box_format::{path::PATH_PLATFORM_SEP, BoxFile, BoxFileWriter, BoxPath, Compression, Record};
 use byteorder::{LittleEndian, ReadBytesExt};
 use crc32fast::Hasher as Crc32Hasher;
 use jwalk::DirEntry;
@@ -191,7 +192,7 @@ fn append(
     allow_hidden: bool,
     verbose: bool,
 ) -> Result<()> {
-    let bf = BoxFile::open(&path).context(CannotOpenArchive { path: &path })?;
+    let bf = BoxFileWriter::open(&path).context(CannotOpenArchive { path: &path })?;
 
     let (known_dirs, known_files) = {
         (
@@ -358,6 +359,7 @@ fn extract(path: &Path, _selected_files: Vec<PathBuf>, verbose: bool) -> Result<
             Record::File(file) => {
                 let out_file =
                     std::fs::File::create(&formatted_path).context(CannotCreateFile { path })?;
+                let out_file = BufWriter::new(out_file);
                 bf.decompress(&file, out_file)
                     .with_context(|| CannotDecompressFile {
                         archive_path: file.path.clone(),
@@ -452,13 +454,46 @@ fn is_hidden(entry: &DirEntry) -> bool {
 }
 
 #[inline(always)]
-fn add_crc32(bf: &mut BoxFile, box_path: &BoxPath) -> std::io::Result<()> {
+fn add_crc32(bf: &mut BoxFileWriter, box_path: &BoxPath) -> std::io::Result<()> {
     let mut hasher = Crc32Hasher::new();
     let record = bf.metadata().records().last().unwrap().as_file().unwrap();
-    hasher.update(&* unsafe { bf.data(record) }.unwrap());
+    hasher.update(&*unsafe { bf.data(record) }.unwrap());
     let hash = hasher.finalize().to_le_bytes().to_vec();
     bf.set_attr(box_path, "crc32", hash)
 }
+
+use std::io::Read;
+
+struct Crc32Reader<R: Read> {
+    inner: R,
+    hasher: crc32fast::Hasher
+}
+
+impl<R: Read> Crc32Reader<R> {
+    pub fn new(inner: R) -> Crc32Reader<R> {
+        Crc32Reader {
+            inner,
+            hasher: crc32fast::Hasher::new()
+        }
+    }
+
+    pub fn finalize(self) -> u32 {
+        self.hasher.finalize()
+    }
+}
+
+impl<R: Read> Read for Crc32Reader<R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        self.hasher.update(&buf);
+        self.inner.read(buf)
+    }
+}
+
+// impl<R: Read> box_format::comde::Compress for Crc32Reader<R> {
+//     type Reader = Crc32Reader<R>;
+
+//     fn to_reader(&mut self) -> Self::Reader { self }
+// }
 
 #[inline(always)]
 fn process_files<I: Iterator<Item = PathBuf>>(
@@ -467,7 +502,7 @@ fn process_files<I: Iterator<Item = PathBuf>>(
     allow_hidden: bool,
     verbose: bool,
     compression: Compression,
-    mut bf: BoxFile,
+    mut bf: BoxFileWriter,
     mut known_dirs: HashSet<BoxPath>,
     mut known_files: HashSet<BoxPath>,
 ) -> Result<()> {
@@ -533,22 +568,33 @@ fn process_files<I: Iterator<Item = PathBuf>>(
             if !known_files.contains(&box_path) {
                 let file =
                     std::fs::File::open(&file_path).context(CannotOpenFile { path: &file_path })?;
+                let mut file = BufReader::new(Crc32Reader::new(file));
                 let record = bf
-                    .insert(compression, box_path.clone(), file, metadata(meta))
+                    .insert(compression, box_path.clone(), &mut file, metadata(meta))
                     .context(CannotAddFile { path: &file_path })?;
                 if verbose {
+                    let len = if record.decompressed_length == 0f64 {
+                        0f64
+                    } else {
+                        100.0 - (record.length as f64 / record.decompressed_length as f64 * 100.0)
+                    };
                     println!(
                         "{} (compressed {:.*}%)",
                         &file_path.to_string_lossy(),
                         2,
-                        100.0 - (record.length as f64 / record.decompressed_length as f64 * 100.0)
+                        len
                     );
                 }
-                add_crc32(&mut bf, &box_path).context(CannotAddChecksum { path: &file_path })?;
+
+                let hash = file.into_inner().finalize().to_le_bytes().to_vec();
+                bf.set_attr(&box_path, "crc32", hash).context(CannotAddChecksum { path: &file_path })?;
+
                 known_files.insert(box_path);
             }
         }
     }
+
+    bf.finish().unwrap();
 
     Ok(())
 }
@@ -563,8 +609,8 @@ fn create(
     alignment: Option<NonZeroU64>,
 ) -> Result<()> {
     let bf = match alignment {
-        None => BoxFile::create(&path),
-        Some(alignment) => BoxFile::create_with_alignment(&path, alignment),
+        None => BoxFileWriter::create(&path),
+        Some(alignment) => BoxFileWriter::create_with_alignment(&path, alignment),
     }
     .context(CannotCreateArchive { path: &path })?;
 

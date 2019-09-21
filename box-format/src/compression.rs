@@ -74,15 +74,15 @@ impl Compression {
         }
     }
 
-    pub fn compress<W: Write + Seek, V: Compress>(self, writer: W, data: V) -> Result<ByteCount> {
+    pub fn compress<W: Write + Seek, R: Read>(self, mut writer: W, reader: &mut R) -> Result<ByteCount> {
         use Compression::*;
 
         match self {
-            Stored => StoredCompressor.compress(writer, data),
-            Deflate => DeflateCompressor.compress(writer, data),
-            Zstd => ZstdCompressor.compress(writer, data),
-            Xz => XzCompressor.compress(writer, data),
-            Snappy => SnappyCompressor.compress(writer, data),
+            Stored => StoredCompressor.compress(&mut writer, reader),
+            Deflate => DeflateCompressor.compress(&mut writer, reader),
+            Zstd => ZstdCompressor.compress(&mut writer, reader),
+            Xz => XzCompressor.compress(&mut writer, reader),
+            Snappy => SnappyCompressor.compress(&mut writer, reader),
             Unknown(id) => Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
                 format!("Cannot handle compression with id {}", id),
