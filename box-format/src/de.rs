@@ -53,6 +53,7 @@ impl DeserializeOwned for AttrMap {
     where
         Self: Sized,
     {
+        let _byte_count = reader.read_u64::<LittleEndian>()?;
         let len = reader.read_u64::<LittleEndian>()?;
         let mut buf = HashMap::with_capacity(len as usize);
         for _ in 0..len {
