@@ -1,4 +1,4 @@
-use crate::{compression::Compression, path::BoxPath, AttrMap, BoxFile};
+use crate::{compression::Compression, path::BoxPath, AttrMap, BoxFileReader};
 use std::num::NonZeroU64;
 
 #[derive(Debug)]
@@ -44,7 +44,7 @@ impl Record {
     }
 
     #[inline(always)]
-    pub fn attr<S: AsRef<str>>(&self, boxfile: &BoxFile, key: S) -> Option<&Vec<u8>> {
+    pub fn attr<S: AsRef<str>>(&self, boxfile: &BoxFileReader, key: S) -> Option<&Vec<u8>> {
         let key = boxfile.attr_key_for(key.as_ref())?;
         self.attrs().get(&key)
     }
@@ -102,7 +102,7 @@ pub struct FileRecord {
 
 impl FileRecord {
     #[inline(always)]
-    pub fn attr<S: AsRef<str>>(&self, boxfile: &BoxFile, key: S) -> Option<&Vec<u8>> {
+    pub fn attr<S: AsRef<str>>(&self, boxfile: &BoxFileReader, key: S) -> Option<&Vec<u8>> {
         let key = boxfile.attr_key_for(key.as_ref())?;
         self.attrs.get(&key)
     }
