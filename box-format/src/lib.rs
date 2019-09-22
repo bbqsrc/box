@@ -10,7 +10,7 @@ mod ser;
 pub mod ffi;
 
 pub use compression::Compression;
-pub use file::{AttrMap, BoxFileReader, BoxFileWriter, BoxMetadata};
+pub use file::{reader::BoxFileReader, writer::BoxFileWriter, AttrMap, BoxMetadata};
 use header::BoxHeader;
 pub use path::BoxPath;
 pub use record::{DirectoryRecord, FileRecord, Record};

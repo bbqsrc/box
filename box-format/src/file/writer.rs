@@ -6,40 +6,17 @@ use std::io::{prelude::*, BufReader, BufWriter, Result, SeekFrom};
 use std::num::NonZeroU64;
 use std::path::{Path, PathBuf};
 
-use comde::Decompress;
 use memmap::MmapOptions;
 
 use crate::{
     compression::Compression,
-    de::DeserializeOwned,
     header::BoxHeader,
     path::BoxPath,
     record::{DirectoryRecord, FileRecord, Record},
     ser::Serialize,
 };
 
-pub type AttrMap = HashMap<u32, Vec<u8>>;
-
-#[derive(Debug, Default)]
-pub struct BoxMetadata {
-    pub(crate) records: Vec<Record>,
-    pub(crate) attr_keys: Vec<String>,
-    pub(crate) attrs: AttrMap,
-}
-
-impl BoxMetadata {
-    pub fn records(&self) -> &[Record] {
-        &*self.records
-    }
-}
-
-#[derive(Debug)]
-pub struct BoxFileReader {
-    pub(crate) file: BufReader<File>,
-    pub(crate) path: PathBuf,
-    pub(crate) header: BoxHeader,
-    pub(crate) meta: BoxMetadata,
-}
+use super::{read_header, read_trailer, BoxMetadata};
 
 #[derive(Debug)]
 pub struct BoxFileWriter {
@@ -53,18 +30,6 @@ impl Drop for BoxFileWriter {
     fn drop(&mut self) {
         let _ = self.finish_inner();
     }
-}
-
-#[inline(always)]
-fn read_header<R: Read + Seek>(file: &mut R) -> std::io::Result<BoxHeader> {
-    file.seek(SeekFrom::Start(0))?;
-    BoxHeader::deserialize_owned(file)
-}
-
-#[inline(always)]
-fn read_trailer<R: Read + Seek>(file: &mut R, ptr: NonZeroU64) -> std::io::Result<BoxMetadata> {
-    file.seek(SeekFrom::Start(ptr.get()))?;
-    BoxMetadata::deserialize_owned(file)
 }
 
 impl BoxFileWriter {
@@ -313,235 +278,5 @@ impl BoxFileWriter {
             .offset(header.data.get())
             .len(header.length as usize)
             .map(&self.file.get_ref())
-    }
-}
-
-impl BoxFileReader {
-    /// This will open an existing `.box` file for reading and writing, and error if the file is not valid.
-    pub fn open<P: AsRef<Path>>(path: P) -> std::io::Result<BoxFileReader> {
-        OpenOptions::new()
-            .write(true)
-            .read(true)
-            .open(path.as_ref())
-            .map(|mut file| {
-                // Try to load the header so we can easily rewrite it when saving.
-                // If header is invalid, we're not even loading a .box file.
-                let (header, meta) = {
-                    let mut reader = BufReader::new(&mut file);
-                    let header = read_header(&mut reader)?;
-                    let ptr = header.trailer.ok_or_else(|| {
-                        std::io::Error::new(std::io::ErrorKind::Other, "no trailer found")
-                    })?;
-                    let meta = read_trailer(&mut reader, ptr)?;
-                    (header, meta)
-                };
-
-                let f = BoxFileReader {
-                    file: BufReader::new(file),
-                    path: path.as_ref().to_path_buf().canonicalize()?,
-                    header,
-                    meta,
-                };
-
-                Ok(f)
-            })?
-    }
-
-    pub fn path(&self) -> &Path {
-        &self.path
-    }
-
-    pub fn alignment(&self) -> Option<NonZeroU64> {
-        self.header.alignment
-    }
-
-    pub fn version(&self) -> u32 {
-        self.header.version
-    }
-
-    /// Will return the metadata for the `.box` if it has been provided.
-    pub fn metadata(&self) -> &BoxMetadata {
-        &self.meta
-    }
-
-    pub fn decompress_value<V: Decompress>(&self, record: &FileRecord) -> std::io::Result<V> {
-        let mmap = unsafe { self.read_data(record)? };
-        record.compression.decompress(std::io::Cursor::new(mmap))
-    }
-
-    pub fn decompress<W: Write>(&self, record: &FileRecord, dest: W) -> std::io::Result<()> {
-        let mmap = unsafe { self.read_data(record)? };
-        record
-            .compression
-            .decompress_write(std::io::Cursor::new(mmap), dest)
-    }
-
-    pub fn attr<S: AsRef<str>>(&self, path: &BoxPath, key: S) -> Option<&Vec<u8>> {
-        let key = self.attr_key_for(key.as_ref())?;
-
-        if let Some(record) = self.meta.records.iter().find(|r| r.path() == path) {
-            record.attrs().get(&key)
-        } else {
-            None
-        }
-    }
-
-    pub unsafe fn data(&self, record: &FileRecord) -> std::io::Result<memmap::Mmap> {
-        self.read_data(record)
-    }
-
-    #[inline(always)]
-    pub(crate) fn attr_key_for(&self, key: &str) -> Option<u32> {
-        self.meta
-            .attr_keys
-            .iter()
-            .position(|r| r == key)
-            .map(|v| v as u32)
-    }
-
-    #[inline(always)]
-    unsafe fn read_data(&self, header: &FileRecord) -> std::io::Result<memmap::Mmap> {
-        MmapOptions::new()
-            .offset(header.data.get())
-            .len(header.length as usize)
-            .map(self.file.get_ref())
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::io::Cursor;
-
-    fn create_test_box<F: AsRef<Path>>(filename: F) {
-        let _ = std::fs::remove_file(filename.as_ref());
-
-        let mut cursor: Cursor<Vec<u8>> = Cursor::new(vec![]);
-        let data = b"hello\0\0\0";
-
-        let mut header = BoxHeader::default();
-        let mut trailer = BoxMetadata::default();
-        trailer.records.push(Record::File(FileRecord {
-            compression: Compression::Stored,
-            length: data.len() as u64,
-            decompressed_length: data.len() as u64,
-            data: NonZeroU64::new(std::mem::size_of::<BoxHeader>() as u64).unwrap(),
-            path: BoxPath::new("hello.txt").unwrap(),
-            attrs: HashMap::new(),
-        }));
-
-        header.trailer = NonZeroU64::new(std::mem::size_of::<BoxHeader>() as u64 + 8);
-
-        header.write(&mut cursor).unwrap();
-        cursor.write_all(data).unwrap();
-        trailer.write(&mut cursor).unwrap();
-
-        let mut f = File::create(filename.as_ref()).unwrap();
-        f.write_all(&*cursor.get_ref()).unwrap();
-    }
-
-    #[test]
-    fn create_box_file() {
-        create_test_box("./smoketest.box");
-    }
-
-    #[test]
-    fn read_garbage() {
-        let filename = "./read_garbage.box";
-        create_test_box(&filename);
-
-        let bf = BoxFileReader::open(&filename).unwrap();
-        let trailer = bf.metadata();
-        println!("{:?}", bf.header);
-        println!("{:?}", &trailer);
-        let file_data = unsafe {
-            bf.read_data(&trailer.records[0].as_file().unwrap())
-                .unwrap()
-        };
-        println!("{:?}", &*file_data);
-        assert_eq!(&*file_data, b"hello\0\0\0")
-    }
-
-    #[test]
-    fn create_garbage() {
-        let filename = "./create_garbage.box";
-        let _ = std::fs::remove_file(&filename);
-        let bf = BoxFileWriter::create(&filename).expect("Mah box");
-        bf.finish().unwrap();
-    }
-
-    fn insert_impl<F>(filename: &str, f: F)
-    where
-        F: Fn(&str) -> BoxFileWriter,
-    {
-        let _ = std::fs::remove_file(&filename);
-        let v =
-            "This, this, this, this, this is a compressable string string string string string.\n"
-                .to_string();
-
-        {
-            use std::time::SystemTime;
-            let now = SystemTime::now()
-                .duration_since(SystemTime::UNIX_EPOCH)
-                .unwrap()
-                .as_secs()
-                .to_le_bytes();
-
-            let mut bf = f(filename);
-
-            let mut dir_attrs = HashMap::new();
-            dir_attrs.insert("created".into(), now.to_vec());
-            dir_attrs.insert("unix.acl".into(), 0o755u16.to_le_bytes().to_vec());
-
-            let mut attrs = HashMap::new();
-            attrs.insert("created".into(), now.to_vec());
-            attrs.insert("unix.acl".into(), 0o644u16.to_le_bytes().to_vec());
-
-            bf.mkdir(BoxPath::new("test").unwrap(), dir_attrs).unwrap();
-
-            bf.insert(
-                Compression::Zstd,
-                BoxPath::new("test/string.txt").unwrap(),
-                &mut std::io::Cursor::new(v.clone()),
-                attrs.clone(),
-            )
-            .unwrap();
-            bf.insert(
-                Compression::Deflate,
-                BoxPath::new("test/string2.txt").unwrap(),
-                &mut std::io::Cursor::new(v.clone()),
-                attrs.clone(),
-            )
-            .unwrap();
-            println!("{:?}", &bf);
-            bf.finish().unwrap();
-        }
-
-        let bf = BoxFileReader::open(&filename).expect("Mah box");
-        println!("{:#?}", &bf);
-
-        assert_eq!(
-            v,
-            bf.decompress_value::<String>(&bf.meta.records[1].as_file().unwrap())
-                .unwrap()
-        );
-        assert_eq!(
-            v,
-            bf.decompress_value::<String>(&bf.meta.records[2].as_file().unwrap())
-                .unwrap()
-        );
-    }
-
-    #[test]
-    fn insert() {
-        insert_impl("./insert_garbage.box", |n| {
-            BoxFileWriter::create(n).unwrap()
-        });
-        insert_impl("./insert_garbage_align8.box", |n| {
-            BoxFileWriter::create_with_alignment(n, NonZeroU64::new(8).unwrap()).unwrap()
-        });
-        insert_impl("./insert_garbage_align7.box", |n| {
-            BoxFileWriter::create_with_alignment(n, NonZeroU64::new(7).unwrap()).unwrap()
-        });
     }
 }

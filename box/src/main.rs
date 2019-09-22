@@ -6,7 +6,9 @@ use std::io::{BufReader, BufWriter, Read};
 use std::num::NonZeroU64;
 use std::path::{Path, PathBuf};
 
-use box_format::{path::PATH_PLATFORM_SEP, BoxFileReader, BoxFileWriter, BoxPath, Compression, Record};
+use box_format::{
+    path::PATH_PLATFORM_SEP, BoxFileReader, BoxFileWriter, BoxPath, Compression, Record,
+};
 use byteorder::{LittleEndian, ReadBytesExt};
 use jwalk::DirEntry;
 use snafu::ResultExt;
