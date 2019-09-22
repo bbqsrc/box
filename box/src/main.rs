@@ -17,9 +17,6 @@ use structopt::StructOpt;
 type Result<T> = std::result::Result<T, Error>;
 
 #[cfg(unix)]
-use std::os::unix::fs::PermissionsExt;
-
-#[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
 #[cfg(windows)]
 use std::os::windows::fs::MetadataExt;
@@ -305,7 +302,7 @@ fn list(path: &Path, _selected_files: Vec<PathBuf>, _verbose: bool) -> Result<()
     println!(" Method         Compressed     Length         Created                Unix ACL    CRC32      Path");
     println!("-------------  -------------  -------------  ---------------------  ----------  ---------  --------");
     for record in metadata.records().iter() {
-        let acl = unix_acl(record.attr(&bf, "unix.acl"));
+        let acl = unix_acl(record.attr(&bf, "unix.mode"));
         let time = time(record.attr(&bf, "created"));
         let path = format_path(record);
 
@@ -400,7 +397,7 @@ fn collect_parent_directories<P: AsRef<Path>>(
             Ok((
                 BoxPath::new(path).context(CannotHandlePath { path: &path })?,
                 metadata(
-                    path.metadata()
+                    &path.metadata()
                         .context(CannotReadFileMetadata { path: &path })?,
                 ),
             ))
@@ -410,25 +407,55 @@ fn collect_parent_directories<P: AsRef<Path>>(
     Ok(v)
 }
 
-fn metadata(meta: std::fs::Metadata) -> HashMap<String, Vec<u8>> {
-    use std::time::SystemTime;
-
+#[cfg(unix)]
+#[inline(always)]
+fn metadata(meta: &std::fs::Metadata) -> HashMap<String, Vec<u8>> {
     let mut attrs = HashMap::new();
 
-    if let Ok(created) = meta.created() {
-        let bytes = created
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .unwrap()
-            .as_secs()
-            .to_le_bytes();
-        attrs.insert("created".into(), bytes.to_vec());
+    macro_rules! attr {
+        ($map:ident, $name:expr, $data:expr) => {
+            $map.insert(
+                $name.into(),
+                $data.to_le_bytes().to_vec()
+            )
+        }
     }
 
-    #[cfg(unix)]
-    attrs.insert(
-        "unix.acl".into(),
-        meta.permissions().mode().to_le_bytes().to_vec(),
-    );
+    attr!(attrs, "created", meta.ctime());
+    attr!(attrs, "modified", meta.mtime());
+    attr!(attrs, "accessed", meta.atime());
+    attr!(attrs, "unix.mode", meta.mode());
+    attr!(attrs, "unix.uid", meta.uid());
+    attr!(attrs, "unix.gid", meta.gid());
+
+    attrs
+}
+
+#[cfg(not(unix))]
+#[inline(always)]
+fn metadata(meta: &std::fs::Metadata) -> HashMap<String, Vec<u8>> {
+    let mut attrs = HashMap::new();
+    
+    macro_rules! attr_systime {
+        ($map:ident, $name:expr, $data:expr) => {
+            use std::time::SystemTime;
+
+            if let Ok(value) = $data {
+                let bytes = value
+                    .duration_since(SystemTime::UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs()
+                    .to_le_bytes()
+                    .to_vec();
+
+                $map.insert($name.into(), bytes);
+            }
+        }
+    }
+
+    attr_systime!(attrs, "created", meta.created());
+    attr_systime!(attrs, "modified", meta.modified());
+    attr_systime!(attrs, "accessed", meta.accessed());
 
     attrs
 }
@@ -478,12 +505,6 @@ impl<R: Read> Read for Crc32Reader<R> {
         self.inner.read(buf)
     }
 }
-
-// impl<R: Read> box_format::comde::Compress for Crc32Reader<R> {
-//     type Reader = Crc32Reader<R>;
-
-//     fn to_reader(&mut self) -> Self::Reader { self }
-// }
 
 #[inline(always)]
 fn process_files<I: Iterator<Item = PathBuf>>(
@@ -548,7 +569,7 @@ fn process_files<I: Iterator<Item = PathBuf>>(
                 if verbose {
                     println!("{} (directory)", &file_path.to_string_lossy());
                 }
-                bf.mkdir(box_path.clone(), metadata(meta))
+                bf.mkdir(box_path.clone(), metadata(&meta))
                     .with_context(|| CannotCreateDirectory {
                         path: box_path.clone(),
                     })?;
@@ -560,7 +581,7 @@ fn process_files<I: Iterator<Item = PathBuf>>(
                     std::fs::File::open(&file_path).context(CannotOpenFile { path: &file_path })?;
                 let mut file = BufReader::new(Crc32Reader::new(file));
                 let record = bf
-                    .insert(compression, box_path.clone(), &mut file, metadata(meta))
+                    .insert(compression, box_path.clone(), &mut file, metadata(&meta))
                     .context(CannotAddFile { path: &file_path })?;
                 if verbose {
                     let len = if record.decompressed_length == 0 {

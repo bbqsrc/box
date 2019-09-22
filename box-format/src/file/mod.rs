@@ -127,11 +127,11 @@ mod tests {
 
             let mut dir_attrs = HashMap::new();
             dir_attrs.insert("created".into(), now.to_vec());
-            dir_attrs.insert("unix.acl".into(), 0o755u16.to_le_bytes().to_vec());
+            dir_attrs.insert("unix.mode".into(), 0o755u16.to_le_bytes().to_vec());
 
             let mut attrs = HashMap::new();
             attrs.insert("created".into(), now.to_vec());
-            attrs.insert("unix.acl".into(), 0o644u16.to_le_bytes().to_vec());
+            attrs.insert("unix.mode".into(), 0o644u16.to_le_bytes().to_vec());
 
             bf.mkdir(BoxPath::new("test").unwrap(), dir_attrs).unwrap();
 
