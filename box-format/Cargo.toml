@@ -16,10 +16,10 @@ pathdiff = "0.1.0"
 unic-normal = "0.9.0"
 unic-ucd = "0.9.0"
 
-cthulhu = { version = "*", optional = true }
-cursed = { version = "*",  optional = true }
-libc = { version = "0.2.62", optional = true }
+# cthulhu = { version = "*", optional = true }
+# cursed = { version = "*",  optional = true }
+# libc = { version = "0.2.62", optional = true }
 
 [features]
 default = []
-ffi = ["libc", "cthulhu", "cursed"]
+# ffi = ["libc", "cthulhu", "cursed"]
