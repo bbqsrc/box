@@ -433,14 +433,13 @@ fn metadata(meta: &std::fs::Metadata) -> HashMap<String, Vec<u8>> {
 #[inline(always)]
 fn metadata(meta: &std::fs::Metadata) -> HashMap<String, Vec<u8>> {
     let mut attrs = HashMap::new();
-
+    
     macro_rules! attr_systime {
         ($map:ident, $name:expr, $data:expr) => {
-            use std::time::SystemTime;
 
             if let Ok(value) = $data {
                 let bytes = value
-                    .duration_since(SystemTime::UNIX_EPOCH)
+                    .duration_since(std::time::SystemTime::UNIX_EPOCH)
                     .unwrap()
                     .as_secs()
                     .to_le_bytes()
