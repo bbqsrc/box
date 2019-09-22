@@ -397,7 +397,8 @@ fn collect_parent_directories<P: AsRef<Path>>(
             Ok((
                 BoxPath::new(path).context(CannotHandlePath { path: &path })?,
                 metadata(
-                    &path.metadata()
+                    &path
+                        .metadata()
                         .context(CannotReadFileMetadata { path: &path })?,
                 ),
             ))
@@ -414,11 +415,8 @@ fn metadata(meta: &std::fs::Metadata) -> HashMap<String, Vec<u8>> {
 
     macro_rules! attr {
         ($map:ident, $name:expr, $data:expr) => {
-            $map.insert(
-                $name.into(),
-                $data.to_le_bytes().to_vec()
-            )
-        }
+            $map.insert($name.into(), $data.to_le_bytes().to_vec())
+        };
     }
 
     attr!(attrs, "created", meta.ctime());
@@ -435,7 +433,7 @@ fn metadata(meta: &std::fs::Metadata) -> HashMap<String, Vec<u8>> {
 #[inline(always)]
 fn metadata(meta: &std::fs::Metadata) -> HashMap<String, Vec<u8>> {
     let mut attrs = HashMap::new();
-    
+
     macro_rules! attr_systime {
         ($map:ident, $name:expr, $data:expr) => {
             use std::time::SystemTime;
@@ -450,7 +448,7 @@ fn metadata(meta: &std::fs::Metadata) -> HashMap<String, Vec<u8>> {
 
                 $map.insert($name.into(), bytes);
             }
-        }
+        };
     }
 
     attr_systime!(attrs, "created", meta.created());
