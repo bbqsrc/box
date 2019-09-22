@@ -5,21 +5,21 @@
 The `.box` file format is designed to be a modern successor to formats such as `.zip` and `.7z`,
 removing several painpoints:
 
-* Cross-platform path support, with relative paths only and platform-agnostic separators
-* UTF-8 only path names and string data
-* Extensible with attributes in key-value pairs for records and files
+* **Cross-platform path support**, with relative paths only and platform-agnostic separators
+* **UTF-8 only, unicode normalised** path names and string data
+* Extensible with **attributes in key-value pairs** for records and files
   * This mechanism is how Unix and Windows-specific file attributes are carried
-* Configurable optional byte-alignment of files (so you can memory map data easily)
+* Configurable optional **byte-alignment of files** (so you can memory map data easily)
 * Support for files and directories
   * Support for symlinks, hard links and other platform-specific specialities is coming
-* Multiple supported compression methods within a single archive, including:
+* **Multiple compression methods within a single archive**, including:
   * Stored (no compress)
   * Brotli
   * DEFLATE
   * Snappy
   * xz
   * Zstandard
-* Well-defined, open specification of file format (in progress)
+* Well-defined, **open specification** of file format (in progress)
 
 See the `fusebox` repo for an example of the `.box` file format being used with a FUSE driver, also
 written in Rust. :smile:
