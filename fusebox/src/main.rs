@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::path::PathBuf;
 use std::time::{Duration, UNIX_EPOCH};
 
@@ -271,9 +271,12 @@ fn main() {
     env_logger::init();
     let opts = Options::from_args();
     let bf = BoxFileReader::open(opts.box_file).unwrap();
-    let options = ["-o", "ro", "-o", "fsname=box"]
+    let fsname = OsString::from(format!("fsname={}", bf.path().display()));
+    let x = vec!["-o", "ro", "-o"];
+    let mut options = x
         .iter()
         .map(|o| o.as_ref())
         .collect::<Vec<&OsStr>>();
+    options.push(&fsname);
     fuse::mount(BoxFs(bf, HashMap::new()), &opts.mountpoint, &options).unwrap();
 }
