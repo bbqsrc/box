@@ -10,9 +10,9 @@ use fuse::{
 use libc::ENOENT;
 use structopt::StructOpt;
 
-use box_format::BoxFile;
+use box_format::BoxFileReader;
 
-struct BoxFs(BoxFile, HashMap<u64, Vec<u8>>);
+struct BoxFs(BoxFileReader, HashMap<u64, Vec<u8>>);
 
 const TTL: Duration = Duration::from_secs(1);
 
@@ -270,7 +270,7 @@ struct Options {
 fn main() {
     env_logger::init();
     let opts = Options::from_args();
-    let bf = BoxFile::open(opts.box_file).unwrap();
+    let bf = BoxFileReader::open(opts.box_file).unwrap();
     let options = ["-o", "ro", "-o", "fsname=box"]
         .iter()
         .map(|o| o.as_ref())

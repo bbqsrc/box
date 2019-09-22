@@ -6,7 +6,7 @@ use std::io::{BufReader, BufWriter, Read};
 use std::num::NonZeroU64;
 use std::path::{Path, PathBuf};
 
-use box_format::{path::PATH_PLATFORM_SEP, BoxFile, BoxFileWriter, BoxPath, Compression, Record};
+use box_format::{path::PATH_PLATFORM_SEP, BoxFileReader, BoxFileWriter, BoxPath, Compression, Record};
 use byteorder::{LittleEndian, ReadBytesExt};
 use jwalk::DirEntry;
 use snafu::ResultExt;
@@ -290,7 +290,7 @@ fn unix_acl(attr: Option<&Vec<u8>>) -> String {
 fn list(path: &Path, _selected_files: Vec<PathBuf>, _verbose: bool) -> Result<()> {
     use humansize::{file_size_opts as options, FileSize};
 
-    let bf = BoxFile::open(path).context(CannotOpenArchive { path })?;
+    let bf = BoxFileReader::open(path).context(CannotOpenArchive { path })?;
     let metadata = bf.metadata();
 
     let alignment = match bf.alignment() {
@@ -344,7 +344,7 @@ fn list(path: &Path, _selected_files: Vec<PathBuf>, _verbose: bool) -> Result<()
 }
 
 fn extract(path: &Path, _selected_files: Vec<PathBuf>, verbose: bool) -> Result<()> {
-    let bf = BoxFile::open(path).context(CannotOpenArchive { path })?;
+    let bf = BoxFileReader::open(path).context(CannotOpenArchive { path })?;
     let metadata = bf.metadata();
 
     for record in metadata.records().iter() {

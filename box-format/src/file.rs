@@ -6,7 +6,7 @@ use std::io::{prelude::*, BufReader, BufWriter, Result, SeekFrom};
 use std::num::NonZeroU64;
 use std::path::{Path, PathBuf};
 
-use comde::{Compress, Decompress};
+use comde::Decompress;
 use memmap::MmapOptions;
 
 use crate::{

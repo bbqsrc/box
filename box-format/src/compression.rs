@@ -7,7 +7,7 @@ use comde::{
     stored::{StoredCompressor, StoredDecompressor},
     xz::{XzCompressor, XzDecompressor},
     zstd::{ZstdCompressor, ZstdDecompressor},
-    ByteCount, Compress, Compressor, Decompress, Decompressor,
+    ByteCount, Compressor, Decompress, Decompressor,
 };
 
 pub mod constants {
@@ -74,7 +74,11 @@ impl Compression {
         }
     }
 
-    pub fn compress<W: Write + Seek, R: Read>(self, mut writer: W, reader: &mut R) -> Result<ByteCount> {
+    pub fn compress<W: Write + Seek, R: Read>(
+        self,
+        mut writer: W,
+        reader: &mut R,
+    ) -> Result<ByteCount> {
         use Compression::*;
 
         match self {
