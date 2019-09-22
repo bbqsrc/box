@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::default::Default;
 use std::io::{prelude::*, SeekFrom};
 use std::num::NonZeroU64;
 
@@ -9,7 +8,6 @@ pub mod writer;
 use crate::{
     de::DeserializeOwned,
     header::BoxHeader,
-    //     path::BoxPath,
     record::Record,
 };
 
