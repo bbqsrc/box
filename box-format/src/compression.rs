@@ -2,6 +2,7 @@ use std::fmt;
 use std::io::{Read, Result, Seek, Write};
 
 use comde::{
+    brotli::{BrotliCompressor, BrotliDecompressor},
     deflate::{DeflateCompressor, DeflateDecompressor},
     snappy::{SnappyCompressor, SnappyDecompressor},
     stored::{StoredCompressor, StoredDecompressor},
@@ -16,6 +17,7 @@ pub mod constants {
     pub const COMPRESSION_ZSTD: u8 = 0x20;
     pub const COMPRESSION_XZ: u8 = 0x30;
     pub const COMPRESSION_SNAPPY: u8 = 0x40;
+    pub const COMPRESSION_BROTLI: u8 = 0x50;
 }
 
 use self::constants::*;
@@ -27,13 +29,14 @@ pub enum Compression {
     Zstd,
     Xz,
     Snappy,
+    Brotli,
     Unknown(u8),
 }
 
 impl Compression {
     // FIXME(killercup): Replace with strum-macros when new release is available
     pub fn available_variants() -> &'static [&'static str] {
-        &["stored", "deflate", "zstd", "xz", "snappy"]
+        &["stored", "brotli", "deflate", "snappy", "xz", "zstd"]
     }
 }
 
@@ -47,6 +50,7 @@ impl fmt::Display for Compression {
             Zstd => "Zstandard",
             Xz => "xz",
             Snappy => "Snappy",
+            Brotli => "Brotli",
             Unknown(id) => return write!(f, "Unknown(id: {:x})", id),
         };
 
@@ -70,6 +74,7 @@ impl Compression {
             Zstd => COMPRESSION_ZSTD,
             Xz => COMPRESSION_XZ,
             Snappy => COMPRESSION_SNAPPY,
+            Brotli => COMPRESSION_BROTLI,
             Unknown(id) => id,
         }
     }
@@ -87,6 +92,7 @@ impl Compression {
             Zstd => ZstdCompressor.compress(&mut writer, reader),
             Xz => XzCompressor.compress(&mut writer, reader),
             Snappy => SnappyCompressor.compress(&mut writer, reader),
+            Brotli => BrotliCompressor.compress(&mut writer, reader),
             Unknown(id) => Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
                 format!("Cannot handle compression with id {}", id),
@@ -103,6 +109,7 @@ impl Compression {
             Zstd => ZstdDecompressor.from_reader(reader),
             Xz => XzDecompressor.from_reader(reader),
             Snappy => SnappyDecompressor.from_reader(reader),
+            Brotli => BrotliDecompressor.from_reader(reader),
             Unknown(id) => Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
                 format!("Cannot handle decompression with id {}", id),
@@ -119,6 +126,7 @@ impl Compression {
             Zstd => ZstdDecompressor.copy(reader, writer),
             Xz => XzDecompressor.copy(reader, writer),
             Snappy => SnappyDecompressor.copy(reader, writer),
+            Brotli => BrotliDecompressor.copy(reader, writer),
             Unknown(id) => Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
                 format!("Cannot handle decompression with id {}", id),

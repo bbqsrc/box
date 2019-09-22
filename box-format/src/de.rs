@@ -159,6 +159,7 @@ impl DeserializeOwned for Compression {
 
         Ok(match id {
             COMPRESSION_STORED => Stored,
+            COMPRESSION_BROTLI => Brotli,
             COMPRESSION_DEFLATE => Deflate,
             COMPRESSION_ZSTD => Zstd,
             COMPRESSION_XZ => Xz,

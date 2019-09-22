@@ -30,6 +30,7 @@ mod winapi {
 fn parse_compression(src: &str) -> std::result::Result<Compression, Error> {
     let compression = match src {
         "stored" => Compression::Stored,
+        "brotli" => Compression::Brotli,
         "deflate" => Compression::Deflate,
         "zstd" | "zstandard" => Compression::Zstd,
         "xz" => Compression::Xz,
