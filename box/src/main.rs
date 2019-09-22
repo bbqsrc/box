@@ -377,9 +377,9 @@ fn extract(path: &Path, _selected_files: Vec<PathBuf>, verbose: bool) -> Result<
     Ok(())
 }
 
-fn collect_parent_directories<P: AsRef<Path>>(
-    path: P,
-) -> Result<Vec<(BoxPath, HashMap<String, Vec<u8>>)>> {
+type ParentDirs = (BoxPath, HashMap<String, Vec<u8>>);
+
+fn collect_parent_directories<P: AsRef<Path>>(path: P) -> Result<Vec<ParentDirs>> {
     let box_path = BoxPath::new(&path).context(CannotHandlePath {
         path: path.as_ref(),
     })?;
@@ -433,10 +433,9 @@ fn metadata(meta: &std::fs::Metadata) -> HashMap<String, Vec<u8>> {
 #[inline(always)]
 fn metadata(meta: &std::fs::Metadata) -> HashMap<String, Vec<u8>> {
     let mut attrs = HashMap::new();
-    
+
     macro_rules! attr_systime {
         ($map:ident, $name:expr, $data:expr) => {
-
             if let Ok(value) = $data {
                 let bytes = value
                     .duration_since(std::time::SystemTime::UNIX_EPOCH)
@@ -463,7 +462,7 @@ fn is_hidden(entry: &DirEntry) -> bool {
     entry
         .file_name
         .to_str()
-        .map(|s| s.starts_with("."))
+        .map(|s| s.starts_with('.'))
         .unwrap_or(false)
 }
 
@@ -503,6 +502,7 @@ impl<R: Read> Read for Crc32Reader<R> {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 #[inline(always)]
 fn process_files<I: Iterator<Item = PathBuf>>(
     iter: I,
@@ -572,34 +572,32 @@ fn process_files<I: Iterator<Item = PathBuf>>(
                     })?;
                 known_dirs.insert(box_path);
             }
-        } else {
-            if !known_files.contains(&box_path) {
-                let file =
-                    std::fs::File::open(&file_path).context(CannotOpenFile { path: &file_path })?;
-                let mut file = BufReader::new(Crc32Reader::new(file));
-                let record = bf
-                    .insert(compression, box_path.clone(), &mut file, metadata(&meta))
-                    .context(CannotAddFile { path: &file_path })?;
-                if verbose {
-                    let len = if record.decompressed_length == 0 {
-                        100.0f64
-                    } else {
-                        100.0 - (record.length as f64 / record.decompressed_length as f64 * 100.0)
-                    };
-                    println!(
-                        "{} (compressed {:.*}%)",
-                        &file_path.to_string_lossy(),
-                        2,
-                        len
-                    );
-                }
-
-                let hash = file.into_inner().finalize().to_le_bytes().to_vec();
-                bf.set_attr(&box_path, "crc32", hash)
-                    .context(CannotAddChecksum { path: &file_path })?;
-
-                known_files.insert(box_path);
+        } else if !known_files.contains(&box_path) {
+            let file =
+                std::fs::File::open(&file_path).context(CannotOpenFile { path: &file_path })?;
+            let mut file = BufReader::new(Crc32Reader::new(file));
+            let record = bf
+                .insert(compression, box_path.clone(), &mut file, metadata(&meta))
+                .context(CannotAddFile { path: &file_path })?;
+            if verbose {
+                let len = if record.decompressed_length == 0 {
+                    100.0f64
+                } else {
+                    100.0 - (record.length as f64 / record.decompressed_length as f64 * 100.0)
+                };
+                println!(
+                    "{} (compressed {:.*}%)",
+                    &file_path.to_string_lossy(),
+                    2,
+                    len
+                );
             }
+
+            let hash = file.into_inner().finalize().to_le_bytes().to_vec();
+            bf.set_attr(&box_path, "crc32", hash)
+                .context(CannotAddChecksum { path: &file_path })?;
+
+            known_files.insert(box_path);
         }
     }
 

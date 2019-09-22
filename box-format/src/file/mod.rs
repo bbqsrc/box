@@ -5,11 +5,7 @@ use std::num::NonZeroU64;
 pub mod reader;
 pub mod writer;
 
-use crate::{
-    de::DeserializeOwned,
-    header::BoxHeader,
-    record::Record,
-};
+use crate::{de::DeserializeOwned, header::BoxHeader, record::Record};
 
 pub type AttrMap = HashMap<u32, Vec<u8>>;
 
