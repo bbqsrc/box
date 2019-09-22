@@ -1,15 +1,13 @@
 // Copyright (c) 2019  Brendan Molloy <brendan@bbqsrc.net>
 // Licensed under the EUPL 1.2 or later. See LICENSE file.
 
-use std::collections::HashMap;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::io::{BufReader, BufWriter, Read};
 use std::num::NonZeroU64;
 use std::path::{Path, PathBuf};
-use std::io::{BufReader, BufWriter};
 
 use box_format::{path::PATH_PLATFORM_SEP, BoxFile, BoxFileWriter, BoxPath, Compression, Record};
 use byteorder::{LittleEndian, ReadBytesExt};
-use crc32fast::Hasher as Crc32Hasher;
 use jwalk::DirEntry;
 use snafu::ResultExt;
 use structopt::StructOpt;
@@ -453,27 +451,16 @@ fn is_hidden(entry: &DirEntry) -> bool {
     }
 }
 
-#[inline(always)]
-fn add_crc32(bf: &mut BoxFileWriter, box_path: &BoxPath) -> std::io::Result<()> {
-    let mut hasher = Crc32Hasher::new();
-    let record = bf.metadata().records().last().unwrap().as_file().unwrap();
-    hasher.update(&*unsafe { bf.data(record) }.unwrap());
-    let hash = hasher.finalize().to_le_bytes().to_vec();
-    bf.set_attr(box_path, "crc32", hash)
-}
-
-use std::io::Read;
-
 struct Crc32Reader<R: Read> {
     inner: R,
-    hasher: crc32fast::Hasher
+    hasher: crc32fast::Hasher,
 }
 
 impl<R: Read> Crc32Reader<R> {
     pub fn new(inner: R) -> Crc32Reader<R> {
         Crc32Reader {
             inner,
-            hasher: crc32fast::Hasher::new()
+            hasher: crc32fast::Hasher::new(),
         }
     }
 
@@ -573,8 +560,8 @@ fn process_files<I: Iterator<Item = PathBuf>>(
                     .insert(compression, box_path.clone(), &mut file, metadata(meta))
                     .context(CannotAddFile { path: &file_path })?;
                 if verbose {
-                    let len = if record.decompressed_length == 0f64 {
-                        0f64
+                    let len = if record.decompressed_length == 0 {
+                        100.0f64
                     } else {
                         100.0 - (record.length as f64 / record.decompressed_length as f64 * 100.0)
                     };
@@ -587,7 +574,8 @@ fn process_files<I: Iterator<Item = PathBuf>>(
                 }
 
                 let hash = file.into_inner().finalize().to_le_bytes().to_vec();
-                bf.set_attr(&box_path, "crc32", hash).context(CannotAddChecksum { path: &file_path })?;
+                bf.set_attr(&box_path, "crc32", hash)
+                    .context(CannotAddChecksum { path: &file_path })?;
 
                 known_files.insert(box_path);
             }
