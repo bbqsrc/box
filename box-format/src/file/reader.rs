@@ -49,35 +49,42 @@ impl BoxFileReader {
             })?
     }
 
+    #[inline(always)]
     pub fn path(&self) -> &Path {
         &self.path
     }
 
+    #[inline(always)]
     pub fn alignment(&self) -> Option<NonZeroU64> {
         self.header.alignment
     }
 
+    #[inline(always)]
     pub fn version(&self) -> u32 {
         self.header.version
     }
 
     /// Will return the metadata for the `.box` if it has been provided.
+    #[inline(always)]
     pub fn metadata(&self) -> &BoxMetadata {
         &self.meta
     }
 
+    #[inline(always)]
     pub fn decompress_value<V: Decompress>(&self, record: &FileRecord) -> std::io::Result<V> {
-        let mmap = unsafe { self.read_data(record)? };
+        let mmap = unsafe { self.data(record)? };
         record.compression.decompress(std::io::Cursor::new(mmap))
     }
 
+    #[inline(always)]
     pub fn decompress<W: Write>(&self, record: &FileRecord, dest: W) -> std::io::Result<()> {
-        let mmap = unsafe { self.read_data(record)? };
+        let mmap = unsafe { self.data(record)? };
         record
             .compression
             .decompress_write(std::io::Cursor::new(mmap), dest)
     }
 
+    #[inline(always)]
     pub fn attr<S: AsRef<str>>(&self, path: &BoxPath, key: S) -> Option<&Vec<u8>> {
         let key = self.attr_key_for(key.as_ref())?;
 
@@ -88,8 +95,12 @@ impl BoxFileReader {
         }
     }
 
+    #[inline(always)]
     pub unsafe fn data(&self, record: &FileRecord) -> std::io::Result<memmap::Mmap> {
-        self.read_data(record)
+        MmapOptions::new()
+            .offset(record.data.get())
+            .len(record.length as usize)
+            .map(self.file.get_ref())
     }
 
     #[inline(always)]
@@ -99,13 +110,5 @@ impl BoxFileReader {
             .iter()
             .position(|r| r == key)
             .map(|v| v as u32)
-    }
-
-    #[inline(always)]
-    unsafe fn read_data(&self, header: &FileRecord) -> std::io::Result<memmap::Mmap> {
-        MmapOptions::new()
-            .offset(header.data.get())
-            .len(header.length as usize)
-            .map(self.file.get_ref())
     }
 }

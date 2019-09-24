@@ -27,8 +27,8 @@ impl Record {
     #[inline(always)]
     pub fn path(&self) -> &BoxPath {
         match self {
-            Record::File(file) => &file.path,
-            Record::Directory(dir) => &dir.path,
+            Record::File(file) => file.path(),
+            Record::Directory(dir) => dir.path(),
         }
     }
 
@@ -77,6 +77,19 @@ pub struct DirectoryRecord {
     pub attrs: AttrMap,
 }
 
+impl DirectoryRecord {
+    #[inline(always)]
+    pub fn path(&self) -> &BoxPath {
+        &self.path
+    }
+
+    #[inline(always)]
+    pub fn attr<S: AsRef<str>>(&self, boxfile: &BoxFileReader, key: S) -> Option<&Vec<u8>> {
+        let key = boxfile.attr_key_for(key.as_ref())?;
+        self.attrs.get(&key)
+    }
+}
+
 #[derive(Debug)]
 pub struct FileRecord {
     /// a bytestring representing the type of compression being used, always 8 bytes.
@@ -101,6 +114,16 @@ pub struct FileRecord {
 }
 
 impl FileRecord {
+    #[inline(always)]
+    pub fn compression(&self) -> Compression {
+        self.compression
+    }
+
+    #[inline(always)]
+    pub fn path(&self) -> &BoxPath {
+        &self.path
+    }
+
     #[inline(always)]
     pub fn attr<S: AsRef<str>>(&self, boxfile: &BoxFileReader, key: S) -> Option<&Vec<u8>> {
         let key = boxfile.attr_key_for(key.as_ref())?;

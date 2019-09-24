@@ -1,6 +1,7 @@
 use std::io::{prelude::*, SeekFrom};
 
 use byteorder::{LittleEndian, WriteBytesExt};
+use vlq::Vlq;
 
 use crate::{
     AttrMap, BoxHeader, BoxMetadata, BoxPath, Compression, DirectoryRecord, FileRecord, Record,
@@ -12,7 +13,9 @@ pub(crate) trait Serialize {
 
 impl<T: Serialize> Serialize for Vec<T> {
     fn write<W: Write + Seek>(&self, writer: &mut W) -> std::io::Result<()> {
-        writer.write_u64::<LittleEndian>(self.len() as u64)?;
+        let vlq_len = Vlq::from(self.len());
+        writer.write(&*vlq_len)?;
+
         for item in self.iter() {
             item.write(writer)?;
         }
@@ -22,14 +25,18 @@ impl<T: Serialize> Serialize for Vec<T> {
 
 impl Serialize for String {
     fn write<W: Write + Seek>(&self, writer: &mut W) -> std::io::Result<()> {
-        writer.write_u64::<LittleEndian>(self.len() as u64)?;
+        let vlq_len = Vlq::from(self.len());
+        writer.write(&*vlq_len)?;
+
         writer.write_all(self.as_bytes())
     }
 }
 
 impl Serialize for Vec<u8> {
     fn write<W: Write + Seek>(&self, writer: &mut W) -> std::io::Result<()> {
-        writer.write_u64::<LittleEndian>(self.len() as u64)?;
+        let vlq_len = Vlq::from(self.len());
+        writer.write(&*vlq_len)?;
+
         writer.write_all(&*self)
     }
 }
@@ -42,9 +49,13 @@ impl Serialize for AttrMap {
         let size_index = writer.seek(SeekFrom::Current(0))?;
         writer.write_u64::<LittleEndian>(std::u64::MAX)?;
 
-        writer.write_u64::<LittleEndian>(self.len() as u64)?;
+        let vlq_len = Vlq::from(self.len());
+        writer.write(&*vlq_len)?;
+
         for (key, value) in self.iter() {
-            writer.write_u32::<LittleEndian>(*key)?;
+            let vlq_key = Vlq::from(*key);
+            writer.write(&*vlq_key)?;
+            
             value.write(writer)?;
         }
 

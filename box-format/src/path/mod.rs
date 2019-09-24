@@ -27,9 +27,9 @@ pub const PATH_BOX_SEP: &str = "\x1f";
 #[repr(transparent)]
 pub struct BoxPath(pub(crate) String);
 
-impl<'a> PartialEq<&'a str> for BoxPath {
-    fn eq(&self, other: &&'a str) -> bool {
-        self.0 == *other
+impl PartialEq<str> for BoxPath {
+    fn eq(&self, other: &str) -> bool {
+        self.0 == other
     }
 }
 
@@ -126,9 +126,9 @@ mod tests {
     #[test]
     fn sanitisation() {
         let box_path = BoxPath::new("/something/../somethingelse/./foo.txt").unwrap();
-        assert_eq!(box_path, "somethingelse\x1ffoo.txt");
+        assert_eq!(box_path, *"somethingelse\x1ffoo.txt");
         let box_path = BoxPath::new("../something/../somethingelse/./foo.txt/.").unwrap();
-        assert_eq!(box_path, "somethingelse\x1ffoo.txt");
+        assert_eq!(box_path, *"somethingelse\x1ffoo.txt");
 
         // This one will do different things on Windows and Unix, because Unix loves a good backslash
         let box_path = BoxPath::new(r"..\something\..\somethingelse\.\foo.txt\.");

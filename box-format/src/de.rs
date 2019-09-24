@@ -3,6 +3,7 @@ use std::io::prelude::*;
 use std::num::NonZeroU64;
 
 use byteorder::{LittleEndian, ReadBytesExt};
+use vlq::ReadVlqExt;
 
 use crate::{
     AttrMap, BoxHeader, BoxMetadata, BoxPath, Compression, DirectoryRecord, FileRecord, Record,
@@ -21,7 +22,7 @@ impl<T: DeserializeOwned> DeserializeOwned for Vec<T> {
     where
         Self: Sized,
     {
-        let len = reader.read_u64::<LittleEndian>()?;
+        let len: u64 = reader.read_vlq()?;
         let mut buf = Vec::with_capacity(len as usize);
         for _ in 0..len {
             buf.push(T::deserialize_owned(reader)?);
@@ -39,25 +40,16 @@ impl DeserializeOwned for BoxPath {
     }
 }
 
-impl DeserializeOwned for u32 {
-    fn deserialize_owned<R: Read>(reader: &mut R) -> std::io::Result<Self>
-    where
-        Self: Sized,
-    {
-        reader.read_u32::<LittleEndian>()
-    }
-}
-
 impl DeserializeOwned for AttrMap {
     fn deserialize_owned<R: Read>(reader: &mut R) -> std::io::Result<Self>
     where
         Self: Sized,
     {
         let _byte_count = reader.read_u64::<LittleEndian>()?;
-        let len = reader.read_u64::<LittleEndian>()?;
+        let len: u64 = reader.read_vlq()?;
         let mut buf = HashMap::with_capacity(len as usize);
         for _ in 0..len {
-            let key = u32::deserialize_owned(reader)?;
+            let key: u32 = reader.read_vlq()?;
             let value = Vec::deserialize_owned(reader)?;
             buf.insert(key, value);
         }
@@ -174,7 +166,7 @@ impl DeserializeOwned for String {
     where
         Self: Sized,
     {
-        let len = reader.read_u64::<LittleEndian>()?;
+        let len: u64 = reader.read_vlq()?;
         let mut string = String::with_capacity(len as usize);
         reader.take(len).read_to_string(&mut string)?;
         Ok(string)
@@ -186,7 +178,7 @@ impl DeserializeOwned for Vec<u8> {
     where
         Self: Sized,
     {
-        let len = reader.read_u64::<LittleEndian>()?;
+        let len: u64 = reader.read_vlq()?;
         let mut buf = Vec::with_capacity(len as usize);
         reader.take(len).read_to_end(&mut buf)?;
         Ok(buf)

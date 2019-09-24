@@ -15,6 +15,7 @@ comde = "0.1.0"
 pathdiff = "0.1.0"
 unic-normal = "0.9.0"
 unic-ucd = "0.9.0"
+vlq = { package = "vlq-rust", version = "0.1.1" }
 
 # cthulhu = { version = "*", optional = true }
 # cursed = { version = "*",  optional = true }
