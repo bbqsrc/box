@@ -14,7 +14,7 @@ pub(crate) trait Serialize {
 impl<T: Serialize> Serialize for Vec<T> {
     fn write<W: Write + Seek>(&self, writer: &mut W) -> std::io::Result<()> {
         let vlq_len = Vlq::from(self.len());
-        writer.write(&*vlq_len)?;
+        writer.write_all(&*vlq_len)?;
 
         for item in self.iter() {
             item.write(writer)?;
@@ -26,7 +26,7 @@ impl<T: Serialize> Serialize for Vec<T> {
 impl Serialize for String {
     fn write<W: Write + Seek>(&self, writer: &mut W) -> std::io::Result<()> {
         let vlq_len = Vlq::from(self.len());
-        writer.write(&*vlq_len)?;
+        writer.write_all(&*vlq_len)?;
 
         writer.write_all(self.as_bytes())
     }
@@ -35,7 +35,7 @@ impl Serialize for String {
 impl Serialize for Vec<u8> {
     fn write<W: Write + Seek>(&self, writer: &mut W) -> std::io::Result<()> {
         let vlq_len = Vlq::from(self.len());
-        writer.write(&*vlq_len)?;
+        writer.write_all(&*vlq_len)?;
 
         writer.write_all(&*self)
     }
@@ -50,11 +50,11 @@ impl Serialize for AttrMap {
         writer.write_u64::<LittleEndian>(std::u64::MAX)?;
 
         let vlq_len = Vlq::from(self.len());
-        writer.write(&*vlq_len)?;
+        writer.write_all(&*vlq_len)?;
 
         for (key, value) in self.iter() {
             let vlq_key = Vlq::from(*key);
-            writer.write(&*vlq_key)?;
+            writer.write_all(&*vlq_key)?;
             
             value.write(writer)?;
         }
