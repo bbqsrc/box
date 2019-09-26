@@ -11,8 +11,8 @@ removing several painpoints:
 
 * **Cross-platform path support**, with relative paths only and platform-agnostic separators
 * **UTF-8 only, unicode normalised** path names and string data
-* Extensible with **attributes in key-value pairs** for records and files
-  * This mechanism is how Unix and Windows-specific file attributes are carried
+* Extensible with **space-efficient attributes in key-value pairs** for records and whole archives
+  * This mechanism is how Unix and Windows-specific file attributes are carried.
 * Configurable optional **byte-alignment of files** (so you can memory map data easily)
 * Support for files and directories
   * Support for symlinks, hard links and other platform-specific specialities is coming
