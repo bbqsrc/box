@@ -287,11 +287,16 @@ fn unix_acl(attr: Option<&Vec<u8>>) -> String {
         .unwrap_or_else(|| "-".into())
 }
 
-fn list(path: &Path, _selected_files: Vec<PathBuf>, _verbose: bool) -> Result<()> {
+fn list(path: &Path, _selected_files: Vec<PathBuf>, verbose: bool) -> Result<()> {
     use humansize::{file_size_opts as options, FileSize};
 
     let bf = BoxFileReader::open(path).context(CannotOpenArchive { path })?;
     let metadata = bf.metadata();
+
+    if verbose {
+        println!("{:#?}", metadata);
+        return Ok(());
+    }
 
     let alignment = match bf.alignment() {
         Some(v) => format!("{} bytes", v.get()),
@@ -299,7 +304,7 @@ fn list(path: &Path, _selected_files: Vec<PathBuf>, _verbose: bool) -> Result<()
     };
     println!("Box archive: {} (alignment: {})", path.display(), alignment);
     println!("-------------  -------------  -------------  ---------------------  ----------  ---------  --------");
-    println!(" Method         Compressed     Length         Created                Unix ACL    CRC32      Path");
+    println!(" Method         Compressed     Length         Created                Attrs       CRC32      Path");
     println!("-------------  -------------  -------------  ---------------------  ----------  ---------  --------");
     for record in metadata.records().iter() {
         let acl = unix_acl(record.attr(&bf, "unix.mode"));
