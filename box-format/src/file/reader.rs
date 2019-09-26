@@ -22,7 +22,6 @@ impl BoxFileReader {
     /// This will open an existing `.box` file for reading and writing, and error if the file is not valid.
     pub fn open<P: AsRef<Path>>(path: P) -> std::io::Result<BoxFileReader> {
         OpenOptions::new()
-            .write(true)
             .read(true)
             .open(path.as_ref())
             .map(|mut file| {
@@ -93,6 +92,16 @@ impl BoxFileReader {
         } else {
             None
         }
+    }
+
+    #[inline(always)]
+    pub fn read_bytes(&self, record: &FileRecord) -> std::io::Result<std::io::Take<File>> {
+         let mut file = OpenOptions::new()
+            .read(true)
+            .open(&self.path)?;
+
+        file.seek(std::io::SeekFrom::Start(record.data.get()))?;
+        Ok(file.take(record.length))
     }
 
     #[inline(always)]
