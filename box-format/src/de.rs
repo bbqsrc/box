@@ -62,9 +62,9 @@ impl DeserializeOwned for FileRecord {
         let compression = Compression::deserialize_owned(reader)?;
         let length = reader.read_u64::<LittleEndian>()?;
         let decompressed_length = reader.read_u64::<LittleEndian>()?;
+        let data = reader.read_u64::<LittleEndian>()?;
         let path = BoxPath::deserialize_owned(reader)?;
         let attrs = HashMap::deserialize_owned(reader)?;
-        let data = reader.read_u64::<LittleEndian>()?;
 
         Ok(FileRecord {
             compression,

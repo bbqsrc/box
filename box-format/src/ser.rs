@@ -70,15 +70,14 @@ impl Serialize for FileRecord {
     fn write<W: Write + Seek>(&self, writer: &mut W) -> std::io::Result<()> {
         // Record id - 0 for file
         writer.write_u8(0x0)?;
-
+        
         writer.write_u8(self.compression.id())?;
         writer.write_u64::<LittleEndian>(self.length)?;
         writer.write_u64::<LittleEndian>(self.decompressed_length)?;
+        writer.write_u64::<LittleEndian>(self.data.get())?;
 
         self.path.write(writer)?;
-        self.attrs.write(writer)?;
-
-        writer.write_u64::<LittleEndian>(self.data.get())
+        self.attrs.write(writer)
     }
 }
 
