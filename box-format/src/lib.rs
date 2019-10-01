@@ -6,8 +6,8 @@ pub mod path;
 mod record;
 mod ser;
 
-// #[cfg(feature = "ffi")]
-// pub mod ffi;
+#[cfg(feature = "ffi")]
+pub mod ffi;
 
 pub use compression::Compression;
 pub use file::{reader::BoxFileReader, writer::BoxFileWriter, AttrMap, BoxMetadata};

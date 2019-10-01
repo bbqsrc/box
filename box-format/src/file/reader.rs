@@ -8,7 +8,11 @@ use comde::Decompress;
 use memmap::MmapOptions;
 
 use super::{read_header, read_trailer, BoxMetadata};
-use crate::{header::BoxHeader, path::BoxPath, record::FileRecord};
+use crate::{
+    header::BoxHeader,
+    path::BoxPath,
+    record::{FileRecord, Record},
+};
 
 #[derive(Debug)]
 pub struct BoxFileReader {
@@ -84,6 +88,22 @@ impl BoxFileReader {
     }
 
     #[inline(always)]
+    pub fn extract<P: AsRef<Path>>(&self, record: &Record, dest: P) -> std::io::Result<()> {
+        let path = dest.as_ref().canonicalize()?;
+        self.extract_inner(record, &path)
+    }
+
+    #[inline(always)]
+    pub fn extract_all<P: AsRef<Path>>(&self, dest: P) -> std::io::Result<()> {
+        let path = dest.as_ref().canonicalize()?;
+        self.metadata()
+            .records()
+            .iter()
+            .map(|x| self.extract_inner(x, &path))
+            .collect()
+    }
+
+    #[inline(always)]
     pub fn attr<S: AsRef<str>>(&self, path: &BoxPath, key: S) -> Option<&Vec<u8>> {
         let key = self.attr_key_for(key.as_ref())?;
 
@@ -96,9 +116,7 @@ impl BoxFileReader {
 
     #[inline(always)]
     pub fn read_bytes(&self, record: &FileRecord) -> std::io::Result<std::io::Take<File>> {
-         let mut file = OpenOptions::new()
-            .read(true)
-            .open(&self.path)?;
+        let mut file = OpenOptions::new().read(true).open(&self.path)?;
 
         file.seek(std::io::SeekFrom::Start(record.data.get()))?;
         Ok(file.take(record.length))
@@ -119,5 +137,17 @@ impl BoxFileReader {
             .iter()
             .position(|r| r == key)
             .map(|v| v as u32)
+    }
+
+    #[inline(always)]
+    fn extract_inner(&self, record: &Record, path: &Path) -> std::io::Result<()> {
+        match record {
+            Record::File(file) => {
+                let out_file = std::fs::File::create(path.join(file.path().to_path_buf())).unwrap();
+                let out_file = std::io::BufWriter::new(out_file);
+                self.decompress(&file, out_file)
+            }
+            Record::Directory(dir) => std::fs::create_dir_all(path.join(&dir.path.to_path_buf())),
+        }
     }
 }

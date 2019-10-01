@@ -6,7 +6,7 @@ edition = "2018"
 license = "Apache-2.0 OR MIT"
 
 [lib]
-crate-type = ["cdylib", "rlib"]
+crate-type = ["cdylib", "rlib", "staticlib"]
 
 [dependencies]
 byteorder = "1.3.2"
@@ -17,10 +17,10 @@ unic-normal = "0.9.0"
 unic-ucd = "0.9.0"
 vlq = { package = "vlq-rust", version = "0.2" }
 
-# cthulhu = { version = "*", optional = true }
-# cursed = { version = "*",  optional = true }
-# libc = { version = "0.2.62", optional = true }
+cthulhu = { path = "../../cthulhu/cthulhu", optional = true }
+cursed = { path = "../../cthulhu/cursed",  optional = true }
+libc = { version = "0.2.62", optional = true }
 
 [features]
 default = []
-# ffi = ["libc", "cthulhu", "cursed"]
+ffi = ["libc", "cthulhu", "cursed"]

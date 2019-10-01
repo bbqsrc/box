@@ -105,7 +105,12 @@ mod tests {
         let filename = "./read_bytes.box";
         create_test_box(&filename);
         let bf = BoxFileReader::open(&filename).unwrap();
-        let record = bf.metadata().records().first().map(|f| f.as_file().unwrap()).unwrap();
+        let record = bf
+            .metadata()
+            .records()
+            .first()
+            .map(|f| f.as_file().unwrap())
+            .unwrap();
         let mut reader = bf.read_bytes(&record).unwrap();
         let mut vec = vec![];
         reader.read_to_end(&mut vec).unwrap();
