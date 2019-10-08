@@ -1,13 +1,18 @@
 use std::fmt;
 use std::io::{Read, Result, Seek, Write};
 
+#[cfg(feature = "brotli")]
+use comde::brotli::{BrotliCompressor, BrotliDecompressor};
+#[cfg(feature = "deflate")]
+use comde::deflate::{DeflateCompressor, DeflateDecompressor};
+#[cfg(feature = "snappy")]
+use comde::snappy::{SnappyCompressor, SnappyDecompressor};
+#[cfg(feature = "xz")]
+use comde::xz::{XzCompressor, XzDecompressor};
+#[cfg(feature = "zstd")]
+use comde::zstd::{ZstdCompressor, ZstdDecompressor};
 use comde::{
-    brotli::{BrotliCompressor, BrotliDecompressor},
-    deflate::{DeflateCompressor, DeflateDecompressor},
-    snappy::{SnappyCompressor, SnappyDecompressor},
     stored::{StoredCompressor, StoredDecompressor},
-    xz::{XzCompressor, XzDecompressor},
-    zstd::{ZstdCompressor, ZstdDecompressor},
     ByteCount, Compressor, Decompress, Decompressor,
 };
 
@@ -88,15 +93,26 @@ impl Compression {
 
         match self {
             Stored => StoredCompressor.compress(&mut writer, reader),
+            #[cfg(feature = "deflate")]
             Deflate => DeflateCompressor.compress(&mut writer, reader),
+            #[cfg(feature = "zstd")]
             Zstd => ZstdCompressor.compress(&mut writer, reader),
+            #[cfg(feature = "xz")]
             Xz => XzCompressor.compress(&mut writer, reader),
+            #[cfg(feature = "snappy")]
             Snappy => SnappyCompressor.compress(&mut writer, reader),
+            #[cfg(feature = "brotli")]
             Brotli => BrotliCompressor.compress(&mut writer, reader),
             Unknown(id) => Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
                 format!("Cannot handle compression with id {}", id),
             )),
+            missing => {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!("Compiled without support for {:?}", missing),
+                ))
+            }
         }
     }
 
@@ -105,15 +121,26 @@ impl Compression {
 
         match self {
             Stored => StoredDecompressor.from_reader(reader),
+            #[cfg(feature = "deflate")]
             Deflate => DeflateDecompressor.from_reader(reader),
+            #[cfg(feature = "zstd")]
             Zstd => ZstdDecompressor.from_reader(reader),
+            #[cfg(feature = "xz")]
             Xz => XzDecompressor.from_reader(reader),
+            #[cfg(feature = "snappy")]
             Snappy => SnappyDecompressor.from_reader(reader),
+            #[cfg(feature = "brotli")]
             Brotli => BrotliDecompressor.from_reader(reader),
             Unknown(id) => Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
                 format!("Cannot handle decompression with id {}", id),
             )),
+            missing => {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!("Compiled without support for {:?}", missing),
+                ))
+            }
         }
     }
 
@@ -122,15 +149,26 @@ impl Compression {
 
         match self {
             Stored => StoredDecompressor.copy(reader, writer),
+            #[cfg(feature = "deflate")]
             Deflate => DeflateDecompressor.copy(reader, writer),
+            #[cfg(feature = "zstd")]
             Zstd => ZstdDecompressor.copy(reader, writer),
+            #[cfg(feature = "xz")]
             Xz => XzDecompressor.copy(reader, writer),
+            #[cfg(feature = "snappy")]
             Snappy => SnappyDecompressor.copy(reader, writer),
+            #[cfg(feature = "brotli")]
             Brotli => BrotliDecompressor.copy(reader, writer),
             Unknown(id) => Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
                 format!("Cannot handle decompression with id {}", id),
             )),
+            missing => {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!("Compiled without support for {:?}", missing),
+                ))
+            }
         }?;
 
         Ok(())
