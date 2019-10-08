@@ -17,8 +17,8 @@ unic-normal = "0.9.0"
 unic-ucd = "0.9.0"
 vlq = { package = "vlq-rust", version = "0.2" }
 
-cthulhu = { path = "../../cthulhu/cthulhu", optional = true }
-cursed = { path = "../../cthulhu/cursed",  optional = true }
+cthulhu = { git = "https://github.com/bbqsrc/cthulhu", optional = true }
+cursed = { git = "https://github.com/bbqsrc/cthulhu", optional = true }
 libc = { version = "0.2.62", optional = true }
 
 [features]
