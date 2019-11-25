@@ -1,7 +1,9 @@
 use std::{
+    fs,
     fmt,
     path::{Path, PathBuf},
 };
+use relative_path::RelativePath;
 
 mod error;
 
@@ -26,12 +28,6 @@ pub const PATH_BOX_SEP: &str = "\x1f";
 #[derive(Debug, Clone, PartialOrd, Ord, PartialEq, Eq, Hash)]
 #[repr(transparent)]
 pub struct BoxPath(pub(crate) String);
-
-impl PartialEq<str> for BoxPath {
-    fn eq(&self, other: &str) -> bool {
-        self.0 == other
-    }
-}
 
 pub fn sanitize<P: AsRef<Path>>(path: P) -> Option<Vec<String>> {
     use std::path::Component;
@@ -94,14 +90,8 @@ impl BoxPath {
             .any(|(a, b)| a != b)
     }
 
-    pub fn join(&self, tail: &str) -> std::result::Result<BoxPath, IntoBoxPathError> {
-        let out = sanitize(&tail).ok_or(IntoBoxPathError::UnrepresentableStr)?;
-        Ok(BoxPath(format!(
-            "{}{}{}",
-            self.0,
-            PATH_BOX_SEP,
-            out.join(PATH_BOX_SEP)
-        )))
+    pub fn join<P: AsRef<Path>>(&self, tail: P) -> std::result::Result<BoxPath, IntoBoxPathError> {
+        Self::new(&self.to_path_buf().join(tail))
     }
 }
 

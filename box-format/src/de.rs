@@ -7,6 +7,7 @@ use vlq::ReadVlqExt;
 
 use crate::{
     AttrMap, BoxHeader, BoxMetadata, BoxPath, Compression, DirectoryRecord, FileRecord, Record,
+    LinkRecord,
 };
 
 use crate::compression::constants::*;
@@ -49,7 +50,7 @@ impl DeserializeOwned for AttrMap {
         let len: u64 = reader.read_vlq()?;
         let mut buf = HashMap::with_capacity(len as usize);
         for _ in 0..len {
-            let key: u32 = reader.read_vlq()?;
+            let key: usize = reader.read_vlq()?;
             let value = Vec::deserialize_owned(reader)?;
             buf.insert(key, value);
         }
@@ -86,6 +87,20 @@ impl DeserializeOwned for DirectoryRecord {
     }
 }
 
+impl DeserializeOwned for LinkRecord {
+    fn deserialize_owned<R: Read>(reader: &mut R) -> std::io::Result<Self> {
+        let path = BoxPath::deserialize_owned(reader)?;
+        let target = BoxPath::deserialize_owned(reader)?;
+        let attrs = HashMap::deserialize_owned(reader)?;
+
+        Ok(LinkRecord {
+            path,
+            target,
+            attrs,
+        })
+    }
+}
+
 impl DeserializeOwned for Record {
     fn deserialize_owned<R: Read>(reader: &mut R) -> std::io::Result<Self> {
         let ty = reader.read_u8()?;
@@ -94,6 +109,7 @@ impl DeserializeOwned for Record {
             1 => Ok(Record::Directory(DirectoryRecord::deserialize_owned(
                 reader,
             )?)),
+            2 => Ok(Record::Link(LinkRecord::deserialize_owned(reader)?)),
             _ => Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
                 format!("invalid or unsupported field type: {}", ty),

@@ -5,6 +5,7 @@ use vlq::WriteVlqExt;
 
 use crate::{
     AttrMap, BoxHeader, BoxMetadata, BoxPath, Compression, DirectoryRecord, FileRecord, Record,
+    LinkRecord,
 };
 
 pub(crate) trait Serialize {
@@ -83,10 +84,21 @@ impl Serialize for FileRecord {
 
 impl Serialize for DirectoryRecord {
     fn write<W: Write + Seek>(&self, writer: &mut W) -> std::io::Result<()> {
-        // Record id - 0 for directory
+        // Record id - 1 for directory
         writer.write_u8(0x1)?;
 
         self.path.write(writer)?;
+        self.attrs.write(writer)
+    }
+}
+
+impl Serialize for LinkRecord {
+    fn write<W: Write + Seek>(&self, writer: &mut W) -> std::io::Result<()> {
+        // Record id - 2 for symlink
+        writer.write_u8(0x2)?;
+
+        self.path.write(writer)?;
+        self.target.write(writer)?;
         self.attrs.write(writer)
     }
 }
@@ -96,6 +108,7 @@ impl Serialize for Record {
         match self {
             Record::File(file) => file.write(writer),
             Record::Directory(directory) => directory.write(writer),
+            Record::Link(link) => link.write(writer),
         }
     }
 }

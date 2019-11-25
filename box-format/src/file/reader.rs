@@ -11,7 +11,7 @@ use super::{read_header, read_trailer, BoxMetadata};
 use crate::{
     header::BoxHeader,
     path::BoxPath,
-    record::{FileRecord, Record},
+    record::{FileRecord, LinkRecord, Record},
 };
 
 #[derive(Debug)]
@@ -75,13 +75,13 @@ impl BoxFileReader {
 
     #[inline(always)]
     pub fn decompress_value<V: Decompress>(&self, record: &FileRecord) -> std::io::Result<V> {
-        let mmap = unsafe { self.data(record)? };
+        let mmap = unsafe { self.memory_map(record)? };
         record.compression.decompress(std::io::Cursor::new(mmap))
     }
 
     #[inline(always)]
     pub fn decompress<W: Write>(&self, record: &FileRecord, dest: W) -> std::io::Result<()> {
-        let mmap = unsafe { self.data(record)? };
+        let mmap = unsafe { self.memory_map(record)? };
         record
             .compression
             .decompress_write(std::io::Cursor::new(mmap), dest)
@@ -105,13 +105,26 @@ impl BoxFileReader {
 
     #[inline(always)]
     pub fn attr<S: AsRef<str>>(&self, path: &BoxPath, key: S) -> Option<&Vec<u8>> {
-        let key = self.attr_key_for(key.as_ref())?;
+        let key = self.meta.attr_key(key.as_ref())?;
 
         if let Some(record) = self.meta.records.iter().find(|r| r.path() == path) {
             record.attrs().get(&key)
         } else {
             None
         }
+    }
+
+    #[inline(always)]
+    pub fn resolve_link(&self, record: &LinkRecord) -> Option<&Record> {
+        let path = &record.target;
+        self.meta.records.iter().find(|r| r.path() == path)
+    }
+
+    #[inline(always)]
+    pub fn file_attr<S: AsRef<str>>(&self, key: S) -> Option<&Vec<u8>> {
+        let key = self.metadata().attr_key(key.as_ref())?;
+
+        self.meta.attrs.get(&key)
     }
 
     #[inline(always)]
@@ -123,20 +136,11 @@ impl BoxFileReader {
     }
 
     #[inline(always)]
-    pub unsafe fn data(&self, record: &FileRecord) -> std::io::Result<memmap::Mmap> {
+    pub unsafe fn memory_map(&self, record: &FileRecord) -> std::io::Result<memmap::Mmap> {
         MmapOptions::new()
             .offset(record.data.get())
             .len(record.length as usize)
             .map(self.file.get_ref())
-    }
-
-    #[inline(always)]
-    pub(crate) fn attr_key_for(&self, key: &str) -> Option<u32> {
-        self.meta
-            .attr_keys
-            .iter()
-            .position(|r| r == key)
-            .map(|v| v as u32)
     }
 
     #[inline(always)]
@@ -148,6 +152,22 @@ impl BoxFileReader {
                 self.decompress(&file, out_file)
             }
             Record::Directory(dir) => std::fs::create_dir_all(path.join(&dir.path.to_path_buf())),
+            #[cfg(unix)]
+            Record::Link(link) => std::os::unix::fs::symlink(
+                &link.path.to_path_buf(),
+                &link.target.to_path_buf(),
+            ),
+            #[cfg(windows)]
+            Record::Link(link) => {
+                let source = link.path.to_path_buf();
+                let destination = link.target.to_path_buf();
+
+                if destination.is_dir() {
+                    std::os::windows::fs::symlink_dir(&source, &destination)
+                } else {
+                    std::os::windows::fs::symlink_file(&source, &destination)
+                }
+            }
         }
     }
 }

@@ -5,6 +5,7 @@ use std::num::NonZeroU64;
 pub enum Record {
     File(FileRecord),
     Directory(DirectoryRecord),
+    Link(LinkRecord),
 }
 
 impl Record {
@@ -25,10 +26,19 @@ impl Record {
     }
 
     #[inline(always)]
+    pub fn as_symlink(&self) -> Option<&LinkRecord> {
+        match self {
+            Record::Link(link) => Some(link),
+            _ => None,
+        }
+    }
+
+    #[inline(always)]
     pub fn path(&self) -> &BoxPath {
         match self {
             Record::File(file) => file.path(),
             Record::Directory(dir) => dir.path(),
+            Record::Link(link) => link.path(),
         }
     }
 
@@ -45,7 +55,7 @@ impl Record {
 
     #[inline(always)]
     pub fn attr<S: AsRef<str>>(&self, boxfile: &BoxFileReader, key: S) -> Option<&Vec<u8>> {
-        let key = boxfile.attr_key_for(key.as_ref())?;
+        let key = boxfile.metadata().attr_key(key.as_ref())?;
         self.attrs().get(&key)
     }
 
@@ -54,6 +64,7 @@ impl Record {
         match self {
             Record::Directory(dir) => &dir.attrs,
             Record::File(file) => &file.attrs,
+            Record::Link(link) => &link.attrs,
         }
     }
 
@@ -62,7 +73,37 @@ impl Record {
         match self {
             Record::Directory(dir) => &mut dir.attrs,
             Record::File(file) => &mut file.attrs,
+            Record::Link(link) => &mut link.attrs,
         }
+    }
+}
+
+#[derive(Debug)]
+pub struct LinkRecord {
+    /// The path to the symbolic link itself, which points to the target. A path is always relative (no leading separator),
+    /// always delimited by a `UNIT SEPARATOR U+001F` (`"\x1f"`), and may not contain
+    /// any `.` or `..` path chunks.
+    pub path: BoxPath,
+
+    /// The target path of the symbolic link, which is the place the link points to. A path is always relative (no leading separator),
+    /// always delimited by a `UNIT SEPARATOR U+001F` (`"\x1f"`), and may not contain
+    /// any `.` or `..` path chunks.
+    pub target: BoxPath,
+
+    /// Optional attributes for the given paths, such as Windows or Unix ACLs, last accessed time, etc.
+    pub attrs: AttrMap,
+}
+
+impl LinkRecord {
+    #[inline(always)]
+    pub fn path(&self) -> &BoxPath {
+        &self.path
+    }
+
+    #[inline(always)]
+    pub fn attr<S: AsRef<str>>(&self, boxfile: &BoxFileReader, key: S) -> Option<&Vec<u8>> {
+        let key = boxfile.metadata().attr_key(key.as_ref())?;
+        self.attrs.get(&key)
     }
 }
 
@@ -85,7 +126,7 @@ impl DirectoryRecord {
 
     #[inline(always)]
     pub fn attr<S: AsRef<str>>(&self, boxfile: &BoxFileReader, key: S) -> Option<&Vec<u8>> {
-        let key = boxfile.attr_key_for(key.as_ref())?;
+        let key = boxfile.metadata().attr_key(key.as_ref())?;
         self.attrs.get(&key)
     }
 }
@@ -126,7 +167,7 @@ impl FileRecord {
 
     #[inline(always)]
     pub fn attr<S: AsRef<str>>(&self, boxfile: &BoxFileReader, key: S) -> Option<&Vec<u8>> {
-        let key = boxfile.attr_key_for(key.as_ref())?;
+        let key = boxfile.metadata().attr_key(key.as_ref())?;
         self.attrs.get(&key)
     }
 }

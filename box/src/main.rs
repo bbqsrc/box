@@ -2,7 +2,7 @@
 // Licensed under the EUPL 1.2 or later. See LICENSE file.
 
 use std::collections::{HashMap, HashSet};
-use std::io::{BufReader, BufWriter, Read};
+use std::io::{BufReader, Read};
 use std::num::NonZeroU64;
 use std::path::{Path, PathBuf};
 
@@ -236,11 +236,13 @@ macro_rules! add {
 }
 
 #[inline(always)]
-fn format_path(record: &Record) -> String {
-    let mut path = record.path().to_string();
-    if record.as_directory().is_some() {
+fn format_path(box_path: &BoxPath, is_dir: bool) -> String {
+    let mut path: String = "[".into();
+    path.push_str(&box_path.to_string());
+    if is_dir {
         path.push_str(PATH_PLATFORM_SEP);
     }
+    path.push_str("]");
     path
 }
 
@@ -309,13 +311,26 @@ fn list(path: &Path, _selected_files: Vec<PathBuf>, verbose: bool) -> Result<()>
     for record in metadata.records().iter() {
         let acl = unix_acl(record.attr(&bf, "unix.mode"));
         let time = time(record.attr(&bf, "created"));
-        let path = format_path(record);
+        let path = format_path(record.path(), record.as_directory().is_some());
 
         match record {
             Record::Directory(_) => {
                 println!(
                     " {:12}  {:>12}   {:>12}   {:<20}   {:<9}   {:>8}   {}",
                     "<directory>", "-", "-", time, acl, "-", path,
+                );
+            }
+            Record::Link(link_record) => {
+                let target = format_path(
+                    &link_record.target,
+                    bf.resolve_link(&link_record)
+                        .map(|x| x.as_directory().is_some())
+                        .unwrap_or(false),
+                );
+
+                println!(
+                    " {:12}  {:>12}   {:>12}   {:<20}   {:<9}   {:>8}   {} -> {}",
+                    "<link>", "-", "-", time, acl, "-", path, target,
                 );
             }
             Record::File(record) => {
@@ -350,36 +365,44 @@ fn list(path: &Path, _selected_files: Vec<PathBuf>, verbose: bool) -> Result<()>
 
 fn extract(path: &Path, _selected_files: Vec<PathBuf>, verbose: bool) -> Result<()> {
     let bf = BoxFileReader::open(path).context(CannotOpenArchive { path })?;
-    let metadata = bf.metadata();
+    Ok(bf.extract_all(path).unwrap())
+    // let metadata = bf.metadata();
 
-    for record in metadata.records().iter() {
-        let formatted_path = format_path(record);
-        if verbose {
-            println!("{}", formatted_path);
-        }
+    // for record in metadata.records().iter() {
+    //     let formatted_path = format_path(record);
+    //     if verbose {
+    //         println!("{}", formatted_path);
+    //     }
 
-        match record {
-            Record::File(file) => {
-                let out_file =
-                    std::fs::File::create(&formatted_path).context(CannotCreateFile { path })?;
-                let out_file = BufWriter::new(out_file);
-                bf.decompress(&file, out_file)
-                    .with_context(|| CannotDecompressFile {
-                        archive_path: file.path.clone(),
-                        target_path: path,
-                    })?;
-            }
-            Record::Directory(dir) => {
-                std::fs::create_dir_all(&dir.path.to_path_buf()).context(
-                    CannotCreateDirectory {
-                        path: dir.path.clone(),
-                    },
-                )?;
-            }
-        }
-    }
+    //     match record {
+    //         Record::File(file) => {
+    //             let out_file =
+    //                 std::fs::File::create(&formatted_path).context(CannotCreateFile { path })?;
+    //             let out_file = BufWriter::new(out_file);
+    //             bf.decompress(&file, out_file)
+    //                 .with_context(|| CannotDecompressFile {
+    //                     archive_path: file.path.clone(),
+    //                     target_path: path,
+    //                 })?;
+    //         }
+    //         Record::Directory(dir) => {
+    //             std::fs::create_dir_all(&dir.path.to_path_buf()).context(
+    //                 CannotCreateDirectory {
+    //                     path: dir.path.clone(),
+    //                 },
+    //             )?;
+    //         }
+    //         Record::Link(link) => {
+    //             std::fs::create_dir_all(&dir.path.to_path_buf()).context(
+    //                 CannotCreateDirectory {
+    //                     path: dir.path.clone(),
+    //                 },
+    //             )?;
+    //         }
+    //     }
+    // }
 
-    Ok(())
+    // Ok(())
 }
 
 type ParentDirs = (BoxPath, HashMap<String, Vec<u8>>);
@@ -542,8 +565,16 @@ fn process_files<I: Iterator<Item = PathBuf>>(
             .metadata
             .expect("read file metadata")
             .context(CannotProcessFile)?;
+        println!("Path: {:?}", entry.parent_spec.path);
         let file_path = entry.parent_spec.path.join(&entry.file_name);
-        let canonical_path = file_path.canonicalize().context(CannotProcessFile)?;
+        println!("File Path: {:?}", &file_path);
+        let canonical_dir = std::env::current_dir()
+            .unwrap()
+            .join(&entry.parent_spec.path)
+            .canonicalize()
+            .context(CannotProcessFile)?;
+        let canonical_path = canonical_dir.join(&entry.file_name);
+        println!("File Path: {:?}", &file_path);
 
         if bf.path() == canonical_path {
             continue;
@@ -566,10 +597,60 @@ fn process_files<I: Iterator<Item = PathBuf>>(
             }
         }
 
-        if file_type.is_dir() {
+        if file_type.is_symlink() {
+            let target_path = std::fs::read_link(&file_path).context(CannotProcessFile)?;
+            println!("XXX {:?}", &target_path);
+
+            // Get relative path from current ref
+            let target_path = entry.parent_spec.path.join(&target_path);
+            println!("{:?}", &target_path);
+
+            // Ensure it's not also a symlink
+            let _ = std::fs::canonicalize(&target_path).unwrap();
+            println!("{:?} {:?}", &target_path, &canonical_path);
+
+            // let target_path = pathdiff::diff_paths(&target_path, &canonical_path).unwrap();
+            // println!("YYY {:?}", &target_path);
+            // println!("PPP {:?}", entry.parent_spec.path);
+
+            let target_path =
+                BoxPath::new(&target_path).context(CannotHandlePath { path: &target_path })?;
+            // println!("ZZZ {:?}", &archive_base_path);
+            // let target_path = pathdiff::diff_paths(canonical_path.join(&target_path), &archive_base_path).unwrap();
+
+            println!("XXX {:?}", &target_path);
+            // let target_box_path = match BoxPath::new(&target_path) {
+            //     Ok(v) => v,
+            //     Err(e) => { eprintln!("{:?}", e); panic!(); }
+            // };
+
+            if file_type.is_dir() {
+                if !known_dirs.contains(&box_path) {
+                    if verbose {
+                        println!("{} -> {} (link)", &file_path.display(), &target_path);
+                    }
+                    bf.link(box_path.clone(), target_path, metadata(&meta))
+                        .with_context(|| CannotCreateLink {
+                            path: box_path.clone(),
+                        })?;
+                    known_dirs.insert(box_path);
+                }
+            } else {
+                if !known_files.contains(&box_path) {
+                    if verbose {
+                        println!("{} -> {} (link)", &file_path.display(), &target_path);
+                    }
+                    bf.link(box_path.clone(), target_path, metadata(&meta))
+                        .with_context(|| CannotCreateLink {
+                            path: box_path.clone(),
+                        })?;
+                    known_files.insert(box_path);
+                }
+            }
+        } else if file_type.is_dir() {
             if !known_dirs.contains(&box_path) {
                 if verbose {
-                    println!("{} (directory)", &file_path.to_string_lossy());
+                    println!("{} (directory)", &file_path.display());
                 }
                 bf.mkdir(box_path.clone(), metadata(&meta))
                     .with_context(|| CannotCreateDirectory {
@@ -590,12 +671,7 @@ fn process_files<I: Iterator<Item = PathBuf>>(
                 } else {
                     100.0 - (record.length as f64 / record.decompressed_length as f64 * 100.0)
                 };
-                println!(
-                    "{} (compressed {:.*}%)",
-                    &file_path.to_string_lossy(),
-                    2,
-                    len
-                );
+                println!("{} (compressed {:.*}%)", &file_path.display(), 2, len);
             }
 
             let hash = file.into_inner().finalize().to_le_bytes().to_vec();
@@ -699,15 +775,21 @@ enum Error {
         source: std::io::Error,
         backtrace: snafu::Backtrace,
     },
+    #[snafu(display("Cannot open file `{}`", path.display()))]
+    CannotOpenFile {
+        path: PathBuf,
+        source: std::io::Error,
+        backtrace: snafu::Backtrace,
+    },
     #[snafu(display("Cannot create directory `{}`", path))]
     CannotCreateDirectory {
         path: BoxPath,
         source: std::io::Error,
         backtrace: snafu::Backtrace,
     },
-    #[snafu(display("Cannot open file `{}`", path.display()))]
-    CannotOpenFile {
-        path: PathBuf,
+    #[snafu(display("Cannot create link `{}`", path))]
+    CannotCreateLink {
+        path: BoxPath,
         source: std::io::Error,
         backtrace: snafu::Backtrace,
     },
@@ -770,4 +852,83 @@ enum Error {
         path: PathBuf,
         backtrace: snafu::Backtrace,
     },
+}
+mod pathdiff {
+    use std::path::{Component, Path, PathBuf};
+
+    // Copyright 2012-2015 The Rust Project Developers. See the COPYRIGHT
+    // file at the top-level directory of this distribution and at
+    // http://rust-lang.org/COPYRIGHT.
+    //
+    // Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
+    // http://www.apache.org/licenses/LICENSE-2.0> or the MIT license
+    // <LICENSE-MIT or http://opensource.org/licenses/MIT>, at your
+    // option. This file may not be copied, modified, or distributed
+    // except according to those terms.
+
+    // Adapted from rustc's path_relative_from
+    // https://github.com/rust-lang/rust/blob/e1d0de82cc40b666b88d4a6d2c9dcbc81d7ed27f/src/librustc_back/rpath.rs#L116-L158
+
+    /// Construct a relative path from a provided base directory path to the provided path.
+    ///
+    /// ```rust
+    /// use pathdiff::diff_paths;
+    /// use std::path::*;
+    ///
+    /// let baz = "/foo/bar/baz";
+    /// let bar = "/foo/bar";
+    /// let quux = "/foo/bar/quux";
+    /// assert_eq!(diff_paths(bar, baz), Some("../".into()));
+    /// assert_eq!(diff_paths(baz, bar), Some("baz".into()));
+    /// assert_eq!(diff_paths(quux, baz), Some("../quux".into()));
+    /// assert_eq!(diff_paths(baz, quux), Some("../baz".into()));
+    /// assert_eq!(diff_paths(bar, quux), Some("../".into()));
+    ///
+    /// assert_eq!(diff_paths(&baz, &bar.to_string()), Some("baz".into()));
+    /// assert_eq!(diff_paths(Path::new(baz), Path::new(bar).to_path_buf()), Some("baz".into()));
+    /// ```
+    pub fn diff_paths<P, B>(path: P, base: B) -> Option<PathBuf>
+    where
+        P: AsRef<Path>,
+        B: AsRef<Path>,
+    {
+        let path = path.as_ref();
+        let base = base.as_ref();
+
+        if path.is_absolute() != base.is_absolute() {
+            if path.is_absolute() {
+                Some(PathBuf::from(path))
+            } else {
+                None
+            }
+        } else {
+            let mut ita = path.components();
+            let mut itb = base.components();
+            let mut comps: Vec<Component> = vec![];
+            loop {
+                match (ita.next(), itb.next()) {
+                    (None, None) => break,
+                    (Some(a), None) => {
+                        comps.push(a);
+                        comps.extend(ita.by_ref());
+                        break;
+                    }
+                    (None, _) => comps.push(Component::ParentDir),
+                    (Some(a), Some(b)) if comps.is_empty() && a == b => (),
+                    (Some(a), Some(b)) if b == Component::CurDir => comps.push(a),
+                    (Some(_), Some(b)) if b == Component::ParentDir => return None,
+                    (Some(a), Some(_)) => {
+                        comps.push(Component::ParentDir);
+                        for _ in itb {
+                            comps.push(Component::ParentDir);
+                        }
+                        comps.push(a);
+                        comps.extend(ita.by_ref());
+                        break;
+                    }
+                }
+            }
+            Some(comps.iter().map(|c| c.as_os_str()).collect())
+        }
+    }
 }

@@ -11,8 +11,8 @@ use memmap::MmapOptions;
 use crate::{
     compression::Compression,
     header::BoxHeader,
-    path::BoxPath,
-    record::{DirectoryRecord, FileRecord, Record},
+    path::{BoxPath},
+    record::{DirectoryRecord, FileRecord, LinkRecord, Record},
     ser::Serialize,
 };
 
@@ -181,7 +181,7 @@ impl BoxFileWriter {
         let attrs = attrs
             .into_iter()
             .map(|(k, v)| {
-                let k = self.attr_key_for_mut(&k);
+                let k = self.meta.attr_key_or_create(&k);
                 (k, v)
             })
             .collect::<HashMap<_, _>>();
@@ -189,6 +189,21 @@ impl BoxFileWriter {
         self.meta
             .records
             .push(Record::Directory(DirectoryRecord { path, attrs }));
+        Ok(())
+    }
+
+    pub fn link(&mut self, path: BoxPath, target: BoxPath, attrs: HashMap<String, Vec<u8>>) -> std::io::Result<()> {
+        let attrs = attrs
+            .into_iter()
+            .map(|(k, v)| {
+                let k = self.meta.attr_key_or_create(&k);
+                (k, v)
+            })
+            .collect::<HashMap<_, _>>();
+
+        self.meta
+            .records
+            .push(Record::Link(LinkRecord { path, target, attrs }));
         Ok(())
     }
 
@@ -204,7 +219,7 @@ impl BoxFileWriter {
         let attrs = attrs
             .into_iter()
             .map(|(k, v)| {
-                let k = self.attr_key_for_mut(&k);
+                let k = self.meta.attr_key_or_create(&k);
                 (k, v)
             })
             .collect::<HashMap<_, _>>();
@@ -246,28 +261,29 @@ impl BoxFileWriter {
         compression.compress(&mut self.file, reader)
     }
 
-    #[inline(always)]
-    pub(crate) fn attr_key_for_mut(&mut self, key: &str) -> u32 {
-        match self.meta.attr_keys.iter().position(|r| r == key) {
-            Some(v) => v as u32,
-            None => {
-                self.meta.attr_keys.push(key.to_string());
-                (self.meta.attr_keys.len() - 1) as u32
-            }
-        }
-    }
-
     pub fn set_attr<S: AsRef<str>>(
         &mut self,
         path: &BoxPath,
         key: S,
         value: Vec<u8>,
     ) -> Result<()> {
-        let key = self.attr_key_for_mut(key.as_ref());
+        let key = self.meta.attr_key_or_create(key.as_ref());
 
         if let Some(record) = self.meta.records.iter_mut().find(|r| r.path() == path) {
             record.attrs_mut().insert(key, value);
         }
+
+        Ok(())
+    }
+
+    pub fn set_file_attr<S: AsRef<str>>(
+        &mut self,
+        key: S,
+        value: Vec<u8>,
+    ) -> Result<()> {
+        let key = self.meta.attr_key_or_create(key.as_ref());
+
+        self.meta.attrs.insert(key, value);
 
         Ok(())
     }

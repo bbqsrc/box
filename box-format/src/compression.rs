@@ -107,12 +107,11 @@ impl Compression {
                 std::io::ErrorKind::InvalidInput,
                 format!("Cannot handle compression with id {}", id),
             )),
-            missing => {
-                Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
-                    format!("Compiled without support for {:?}", missing),
-                ))
-            }
+            #[allow(unreachable_patterns)]
+            missing => Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("Compiled without support for {:?}", missing),
+            )),
         }
     }
 
@@ -135,12 +134,11 @@ impl Compression {
                 std::io::ErrorKind::InvalidInput,
                 format!("Cannot handle decompression with id {}", id),
             )),
-            missing => {
-                Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
-                    format!("Compiled without support for {:?}", missing),
-                ))
-            }
+            #[allow(unreachable_patterns)]
+            missing => Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("Compiled without support for {:?}", missing),
+            )),
         }
     }
 
@@ -163,12 +161,11 @@ impl Compression {
                 std::io::ErrorKind::InvalidInput,
                 format!("Cannot handle decompression with id {}", id),
             )),
-            missing => {
-                Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
-                    format!("Compiled without support for {:?}", missing),
-                ))
-            }
+            #[allow(unreachable_patterns)]
+            missing => Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("Compiled without support for {:?}", missing),
+            )),
         }?;
 
         Ok(())

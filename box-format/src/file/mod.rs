@@ -7,7 +7,7 @@ pub mod writer;
 
 use crate::{de::DeserializeOwned, header::BoxHeader, record::Record};
 
-pub type AttrMap = HashMap<u32, Vec<u8>>;
+pub type AttrMap = HashMap<usize, Vec<u8>>;
 
 #[derive(Debug, Default)]
 pub struct BoxMetadata {
@@ -19,6 +19,25 @@ pub struct BoxMetadata {
 impl BoxMetadata {
     pub fn records(&self) -> &[Record] {
         &*self.records
+    }
+
+    #[inline(always)]
+    pub fn attr_key(&self, key: &str) -> Option<usize> {
+        self.attr_keys
+            .iter()
+            .position(|r| r == key)
+    }
+
+    #[inline(always)]
+    pub fn attr_key_or_create(&mut self, key: &str) -> usize{
+        match self.attr_keys.iter().position(|r| r == key) {
+            Some(v) => v,
+            None => {
+                let len = self.attr_keys.len();
+                self.attr_keys.push(key.to_string());
+                len
+            }
+        }
     }
 }
 
@@ -87,7 +106,7 @@ mod tests {
         let trailer = bf.metadata();
         println!("{:?}", bf.header);
         println!("{:?}", &trailer);
-        let file_data = unsafe { bf.data(&trailer.records[0].as_file().unwrap()).unwrap() };
+        let file_data = unsafe { bf.memory_map(&trailer.records[0].as_file().unwrap()).unwrap() };
         println!("{:?}", &*file_data);
         assert_eq!(&*file_data, b"hello\0\0\0")
     }
@@ -190,5 +209,11 @@ mod tests {
         insert_impl("./insert_garbage_align7.box", |n| {
             BoxFileWriter::create_with_alignment(n, NonZeroU64::new(7).unwrap()).unwrap()
         });
+    }
+
+    #[test]
+    fn file_attrs() {
+        let bf = BoxFileWriter::create("./file_attrs.box").expect("Mah box");
+        bf.finish().unwrap();
     }
 }
