@@ -122,7 +122,7 @@ impl DeserializeOwned for BoxHeader {
     fn deserialize_owned<R: Read>(reader: &mut R) -> std::io::Result<Self> {
         let magic_bytes = reader.read_u32::<LittleEndian>()?.to_le_bytes();
 
-        if &magic_bytes != b"BOX\0" {
+        if &magic_bytes != crate::header::MAGIC_BYTES {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
                 "Magic bytes invalid",
