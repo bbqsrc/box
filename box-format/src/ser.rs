@@ -1,11 +1,11 @@
 use std::io::{prelude::*, SeekFrom};
 
 use byteorder::{LittleEndian, WriteBytesExt};
-use vlq::WriteVlqExt;
+use vlq::fast::WriteVlqExt;
 
 use crate::{
-    AttrMap, BoxHeader, BoxMetadata, BoxPath, Compression, DirectoryRecord, FileRecord, Record,
-    LinkRecord,
+    file::Inode, AttrMap, BoxHeader, BoxMetadata, BoxPath, Compression, DirectoryRecord,
+    FileRecord, LinkRecord, Record,
 };
 
 pub(crate) trait Serialize {
@@ -14,7 +14,7 @@ pub(crate) trait Serialize {
 
 impl<T: Serialize> Serialize for Vec<T> {
     fn write<W: Write + Seek>(&self, writer: &mut W) -> std::io::Result<()> {
-        writer.write_vlq(self.len())?;
+        writer.write_fast_vlq(self.len() as u64)?;
 
         for item in self.iter() {
             item.write(writer)?;
@@ -25,14 +25,14 @@ impl<T: Serialize> Serialize for Vec<T> {
 
 impl Serialize for String {
     fn write<W: Write + Seek>(&self, writer: &mut W) -> std::io::Result<()> {
-        writer.write_vlq(self.len())?;
+        writer.write_fast_vlq(self.len() as u64)?;
         writer.write_all(self.as_bytes())
     }
 }
 
 impl Serialize for Vec<u8> {
     fn write<W: Write + Seek>(&self, writer: &mut W) -> std::io::Result<()> {
-        writer.write_vlq(self.len())?;
+        writer.write_fast_vlq(self.len() as u64)?;
         writer.write_all(&*self)
     }
 }
@@ -44,10 +44,10 @@ impl Serialize for AttrMap {
         // Write it as u64::MAX, then seek back
         let size_index = writer.seek(SeekFrom::Current(0))?;
         writer.write_u64::<LittleEndian>(std::u64::MAX)?;
-        writer.write_vlq(self.len())?;
+        writer.write_fast_vlq(self.len() as u64)?;
 
         for (key, value) in self.iter() {
-            writer.write_vlq(*key)?;
+            writer.write_fast_vlq(*key as u64)?;
             value.write(writer)?;
         }
 
@@ -67,6 +67,12 @@ impl Serialize for BoxPath {
     }
 }
 
+impl Serialize for Inode {
+    fn write<W: Write + Seek>(&self, writer: &mut W) -> std::io::Result<()> {
+        writer.write_fast_vlq(self.get())
+    }
+}
+
 impl Serialize for FileRecord {
     fn write<W: Write + Seek>(&self, writer: &mut W) -> std::io::Result<()> {
         // Record id - 0 for file
@@ -77,7 +83,7 @@ impl Serialize for FileRecord {
         writer.write_u64::<LittleEndian>(self.decompressed_length)?;
         writer.write_u64::<LittleEndian>(self.data.get())?;
 
-        self.path.write(writer)?;
+        self.name.write(writer)?;
         self.attrs.write(writer)
     }
 }
@@ -87,7 +93,8 @@ impl Serialize for DirectoryRecord {
         // Record id - 1 for directory
         writer.write_u8(0x1)?;
 
-        self.path.write(writer)?;
+        self.name.write(writer)?;
+        self.inodes.write(writer)?;
         self.attrs.write(writer)
     }
 }
@@ -97,7 +104,7 @@ impl Serialize for LinkRecord {
         // Record id - 2 for symlink
         writer.write_u8(0x2)?;
 
-        self.path.write(writer)?;
+        self.name.write(writer)?;
         self.target.write(writer)?;
         self.attrs.write(writer)
     }
@@ -117,14 +124,15 @@ impl Serialize for BoxHeader {
     fn write<W: Write + Seek>(&self, writer: &mut W) -> std::io::Result<()> {
         writer.write_all(&self.magic_bytes)?;
         writer.write_u32::<LittleEndian>(self.version)?;
-        writer.write_u64::<LittleEndian>(self.alignment.map(|x| x.get()).unwrap_or(0))?;
+        writer.write_u64::<LittleEndian>(self.alignment)?;
         writer.write_u64::<LittleEndian>(self.trailer.map(|x| x.get()).unwrap_or(0))
     }
 }
 
 impl Serialize for BoxMetadata {
     fn write<W: Write + Seek>(&self, writer: &mut W) -> std::io::Result<()> {
-        self.records.write(writer)?;
+        self.root.write(writer)?;
+        self.inodes.write(writer)?;
         self.attr_keys.write(writer)?;
         self.attrs.write(writer)
     }

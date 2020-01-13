@@ -2,34 +2,76 @@ use std::collections::HashMap;
 use std::io::{prelude::*, SeekFrom};
 use std::num::NonZeroU64;
 
-pub mod reader;
-pub mod writer;
+#[repr(transparent)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd)]
+pub struct Inode(NonZeroU64);
 
-use crate::{de::DeserializeOwned, header::BoxHeader, record::Record};
+impl Inode {
+    pub fn new(value: u64) -> std::io::Result<Inode> {
+        match NonZeroU64::new(value) {
+            Some(v) => Ok(Inode(v)),
+            None => Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "inode must not be zero",
+            )),
+        }
+    }
+
+    pub fn get(&self) -> u64 {
+        self.0.get()
+    }
+}
+
+use crate::{header::BoxHeader, record::Record};
+
+#[cfg(feature = "reader")]
+pub mod reader;
+#[cfg(feature = "writer")]
+pub mod writer;
 
 pub type AttrMap = HashMap<usize, Vec<u8>>;
 
 #[derive(Debug, Default)]
 pub struct BoxMetadata {
-    pub(crate) records: Vec<Record>,
+    /// Root "directory" keyed by inodes
+    pub(crate) root: Vec<Inode>,
+
+    /// Keyed by inode index (offset by -1). This means if an `Inode` has the value 1, its index in this vector is 0.
+    /// This is to provide compatibility with platforms such as Linux, and allow for error checking a box file.
+    pub(crate) inodes: Vec<Record>,
+
+    /// The index of the attribute key is its interned identifier throughout this file.
     pub(crate) attr_keys: Vec<String>,
+
+    /// The global attributes that apply to this entire box file.
     pub(crate) attrs: AttrMap,
+    // pub(crate) index: fst::Map,
 }
 
 impl BoxMetadata {
-    pub fn records(&self) -> &[Record] {
-        &*self.records
+    #[inline(always)]
+    pub fn record(&self, inode: Inode) -> Option<&Record> {
+        self.inodes.get(inode.get() as usize - 1)
+    }
+
+    #[inline(always)]
+    pub fn record_mut(&mut self, inode: Inode) -> Option<&mut Record> {
+        self.inodes.get_mut(inode.get() as usize - 1)
+    }
+
+    #[inline(always)]
+    pub fn insert_record(&mut self, record: Record) -> Inode {
+        self.inodes.push(record);
+        Inode::new(self.inodes.len() as u64).unwrap()
     }
 
     #[inline(always)]
     pub fn attr_key(&self, key: &str) -> Option<usize> {
-        self.attr_keys
-            .iter()
-            .position(|r| r == key)
+        self.attr_keys.iter().position(|r| r == key)
     }
 
     #[inline(always)]
-    pub fn attr_key_or_create(&mut self, key: &str) -> usize{
+    pub fn attr_key_or_create(&mut self, key: &str) -> usize {
         match self.attr_keys.iter().position(|r| r == key) {
             Some(v) => v,
             None => {
@@ -39,21 +81,6 @@ impl BoxMetadata {
             }
         }
     }
-}
-
-#[inline(always)]
-pub(self) fn read_header<R: Read + Seek>(file: &mut R) -> std::io::Result<BoxHeader> {
-    file.seek(SeekFrom::Start(0))?;
-    BoxHeader::deserialize_owned(file)
-}
-
-#[inline(always)]
-pub(self) fn read_trailer<R: Read + Seek>(
-    file: &mut R,
-    ptr: NonZeroU64,
-) -> std::io::Result<BoxMetadata> {
-    file.seek(SeekFrom::Start(ptr.get()))?;
-    BoxMetadata::deserialize_owned(file)
 }
 
 #[cfg(test)]
@@ -70,26 +97,16 @@ mod tests {
 
         let mut cursor: Cursor<Vec<u8>> = Cursor::new(vec![]);
         let data = b"hello\0\0\0";
-
-        let mut header = BoxHeader::default();
-        let mut trailer = BoxMetadata::default();
-        trailer.records.push(Record::File(FileRecord {
-            compression: Compression::Stored,
-            length: data.len() as u64,
-            decompressed_length: data.len() as u64,
-            data: NonZeroU64::new(std::mem::size_of::<BoxHeader>() as u64).unwrap(),
-            path: BoxPath::new("hello.txt").unwrap(),
-            attrs: HashMap::new(),
-        }));
-
-        header.trailer = NonZeroU64::new(std::mem::size_of::<BoxHeader>() as u64 + 8);
-
-        header.write(&mut cursor).unwrap();
         cursor.write_all(data).unwrap();
-        trailer.write(&mut cursor).unwrap();
+        cursor.seek(std::io::SeekFrom::Start(0));
 
-        let mut f = File::create(filename.as_ref()).unwrap();
-        f.write_all(&*cursor.get_ref()).unwrap();
+        let mut writer = BoxFileWriter::create(filename).unwrap();
+        writer.insert(
+            Compression::Stored,
+            BoxPath::new("hello.txt").unwrap(),
+            &mut cursor,
+            HashMap::new(),
+        );
     }
 
     #[test]
@@ -106,7 +123,10 @@ mod tests {
         let trailer = bf.metadata();
         println!("{:?}", bf.header);
         println!("{:?}", &trailer);
-        let file_data = unsafe { bf.memory_map(&trailer.records[0].as_file().unwrap()).unwrap() };
+        let file_data = unsafe {
+            bf.memory_map(&trailer.inodes[0].as_file().unwrap())
+                .unwrap()
+        };
         println!("{:?}", &*file_data);
         assert_eq!(&*file_data, b"hello\0\0\0")
     }
@@ -126,7 +146,7 @@ mod tests {
         let bf = BoxFileReader::open(&filename).unwrap();
         let record = bf
             .metadata()
-            .records()
+            .inodes
             .first()
             .map(|f| f.as_file().unwrap())
             .unwrap();
@@ -179,7 +199,7 @@ mod tests {
                 attrs.clone(),
             )
             .unwrap();
-            println!("{:?}", &bf);
+            // println!("{:?}", &bf);
             bf.finish().unwrap();
         }
 
@@ -188,12 +208,12 @@ mod tests {
 
         assert_eq!(
             v,
-            bf.decompress_value::<String>(&bf.meta.records[1].as_file().unwrap())
+            bf.decompress_value::<String>(&bf.meta.inodes[1].as_file().unwrap())
                 .unwrap()
         );
         assert_eq!(
             v,
-            bf.decompress_value::<String>(&bf.meta.records[2].as_file().unwrap())
+            bf.decompress_value::<String>(&bf.meta.inodes[2].as_file().unwrap())
                 .unwrap()
         );
     }
@@ -204,16 +224,10 @@ mod tests {
             BoxFileWriter::create(n).unwrap()
         });
         insert_impl("./insert_garbage_align8.box", |n| {
-            BoxFileWriter::create_with_alignment(n, NonZeroU64::new(8).unwrap()).unwrap()
+            BoxFileWriter::create_with_alignment(n, 8).unwrap()
         });
         insert_impl("./insert_garbage_align7.box", |n| {
-            BoxFileWriter::create_with_alignment(n, NonZeroU64::new(7).unwrap()).unwrap()
+            BoxFileWriter::create_with_alignment(n, 7).unwrap()
         });
-    }
-
-    #[test]
-    fn file_attrs() {
-        let bf = BoxFileWriter::create("./file_attrs.box").expect("Mah box");
-        bf.finish().unwrap();
     }
 }

@@ -137,6 +137,15 @@ enum Commands {
     )]
     Extract {
         #[structopt(
+            short = "o",
+            long = "output",
+            name = "output",
+            parse(from_os_str),
+            help = "Output directory"
+        )]
+        output_path: Option<PathBuf>,
+
+        #[structopt(
             name = "boxfile",
             parse(from_os_str),
             help = "Path to the .box archive"
@@ -190,39 +199,40 @@ fn append(
     allow_hidden: bool,
     verbose: bool,
 ) -> Result<()> {
-    let bf = BoxFileWriter::open(&path).context(CannotOpenArchive { path: &path })?;
+    // let bf = BoxFileWriter::open(&path).context(CannotOpenArchive { path: &path })?;
 
-    let (known_dirs, known_files) = {
-        (
-            bf.metadata()
-                .records()
-                .iter()
-                .filter_map(|x| x.as_directory())
-                .map(|r| r.path.clone())
-                .collect::<std::collections::HashSet<_>>(),
-            bf.metadata()
-                .records()
-                .iter()
-                .filter_map(|x| x.as_file())
-                .map(|r| r.path.clone())
-                .collect::<std::collections::HashSet<_>>(),
-        )
-    };
+    // let (known_dirs, known_files) = {
+    //     (
+    //         bf.metadata()
+    //             .records()
+    //             .iter()
+    //             .filter_map(|x| x.as_directory())
+    //             .map(|r| r.path.clone())
+    //             .collect::<std::collections::HashSet<_>>(),
+    //         bf.metadata()
+    //             .records()
+    //             .iter()
+    //             .filter_map(|x| x.as_file())
+    //             .map(|r| r.path.clone())
+    //             .collect::<std::collections::HashSet<_>>(),
+    //     )
+    // };
 
-    process_files(
-        selected_files.into_iter(),
-        recursive,
-        allow_hidden,
-        verbose,
-        compression,
-        bf,
-        known_dirs,
-        known_files,
-    )
-    .map_err(Box::new)
-    .context(CannotAddFiles { path: &path })?;
+    // process_files(
+    //     selected_files.into_iter(),
+    //     recursive,
+    //     allow_hidden,
+    //     verbose,
+    //     compression,
+    //     bf,
+    //     known_dirs,
+    //     known_files,
+    // )
+    // .map_err(Box::new)
+    // .context(CannotAddFiles { path: &path })?;
 
-    Ok(())
+    // Ok(())
+    todo!()
 }
 
 macro_rules! add {
@@ -301,17 +311,19 @@ fn list(path: &Path, _selected_files: Vec<PathBuf>, verbose: bool) -> Result<()>
     }
 
     let alignment = match bf.alignment() {
-        Some(v) => format!("{} bytes", v.get()),
-        None => "None".into(),
+        0 => "None".into(),
+        v => format!("{} bytes", v),
     };
     println!("Box archive: {} (alignment: {})", path.display(), alignment);
     println!("-------------  -------------  -------------  ---------------------  ----------  ---------  --------");
     println!(" Method         Compressed     Length         Created                Attrs       CRC32      Path");
     println!("-------------  -------------  -------------  ---------------------  ----------  ---------  --------");
-    for record in metadata.records().iter() {
+    for result in bf.iter() {
+        let record = result.record;
+
         let acl = unix_acl(record.attr(&bf, "unix.mode"));
         let time = time(record.attr(&bf, "created"));
-        let path = format_path(record.path(), record.as_directory().is_some());
+        let path = format_path(&result.path, record.as_directory().is_some());
 
         match record {
             Record::Directory(_) => {
@@ -321,17 +333,17 @@ fn list(path: &Path, _selected_files: Vec<PathBuf>, verbose: bool) -> Result<()>
                 );
             }
             Record::Link(link_record) => {
-                let target = format_path(
-                    &link_record.target,
-                    bf.resolve_link(&link_record)
-                        .map(|x| x.as_directory().is_some())
-                        .unwrap_or(false),
-                );
+                // let target = format_path(
+                //     &link_record.target,
+                //     bf.resolve_link(&link_record)
+                //         .map(|x| x.as_directory().is_some())
+                //         .unwrap_or(false),
+                // );
 
-                println!(
-                    " {:12}  {:>12}   {:>12}   {:<20}   {:<9}   {:>8}   {} -> {}",
-                    "<link>", "-", "-", time, acl, "-", path, target,
-                );
+                // println!(
+                //     " {:12}  {:>12}   {:>12}   {:<20}   {:<9}   {:>8}   {} -> {}",
+                //     "<link>", "-", "-", time, acl, "-", path, target,
+                // );
             }
             Record::File(record) => {
                 let length = record.length.file_size(options::BINARY).unwrap();
@@ -363,46 +375,15 @@ fn list(path: &Path, _selected_files: Vec<PathBuf>, verbose: bool) -> Result<()>
     Ok(())
 }
 
-fn extract(path: &Path, _selected_files: Vec<PathBuf>, verbose: bool) -> Result<()> {
+fn extract(
+    path: &Path,
+    output_path: &Path,
+    _selected_files: Vec<PathBuf>,
+    verbose: bool,
+) -> Result<()> {
+    println!("{} {}", path.display(), output_path.display());
     let bf = BoxFileReader::open(path).context(CannotOpenArchive { path })?;
-    Ok(bf.extract_all(path).unwrap())
-    // let metadata = bf.metadata();
-
-    // for record in metadata.records().iter() {
-    //     let formatted_path = format_path(record);
-    //     if verbose {
-    //         println!("{}", formatted_path);
-    //     }
-
-    //     match record {
-    //         Record::File(file) => {
-    //             let out_file =
-    //                 std::fs::File::create(&formatted_path).context(CannotCreateFile { path })?;
-    //             let out_file = BufWriter::new(out_file);
-    //             bf.decompress(&file, out_file)
-    //                 .with_context(|| CannotDecompressFile {
-    //                     archive_path: file.path.clone(),
-    //                     target_path: path,
-    //                 })?;
-    //         }
-    //         Record::Directory(dir) => {
-    //             std::fs::create_dir_all(&dir.path.to_path_buf()).context(
-    //                 CannotCreateDirectory {
-    //                     path: dir.path.clone(),
-    //                 },
-    //             )?;
-    //         }
-    //         Record::Link(link) => {
-    //             std::fs::create_dir_all(&dir.path.to_path_buf()).context(
-    //                 CannotCreateDirectory {
-    //                     path: dir.path.clone(),
-    //                 },
-    //             )?;
-    //         }
-    //     }
-    // }
-
-    // Ok(())
+    Ok(bf.extract_all(output_path).unwrap())
 }
 
 type ParentDirs = (BoxPath, HashMap<String, Vec<u8>>);
@@ -411,7 +392,7 @@ fn collect_parent_directories<P: AsRef<Path>>(path: P) -> Result<Vec<ParentDirs>
     let box_path = BoxPath::new(&path).context(CannotHandlePath {
         path: path.as_ref(),
     })?;
-    let levels = box_path.levels();
+    let levels = box_path.depth();
 
     let path = match path.as_ref().parent() {
         Some(v) => v,
@@ -698,7 +679,7 @@ fn create(
 ) -> Result<()> {
     let bf = match alignment {
         None => BoxFileWriter::create(&path),
-        Some(alignment) => BoxFileWriter::create_with_alignment(&path, alignment),
+        Some(alignment) => BoxFileWriter::create_with_alignment(&path, alignment.get()),
     }
     .context(CannotCreateArchive { path: &path })?;
 
@@ -736,7 +717,12 @@ fn main() -> Result<()> {
             opts.verbose,
         ),
         Commands::List { path } => list(&path, opts.selected_files, opts.verbose),
-        Commands::Extract { path } => extract(&path, opts.selected_files, opts.verbose),
+        Commands::Extract { path, output_path } => extract(
+            &path,
+            &output_path.unwrap_or_else(|| std::env::current_dir().expect("no pwd")),
+            opts.selected_files,
+            opts.verbose,
+        ),
         Commands::Create {
             path,
             alignment,

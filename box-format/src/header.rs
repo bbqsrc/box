@@ -4,7 +4,7 @@ use std::num::NonZeroU64;
 pub(crate) struct BoxHeader {
     pub(crate) magic_bytes: [u8; 4],
     pub(crate) version: u32,
-    pub(crate) alignment: Option<NonZeroU64>,
+    pub(crate) alignment: u64,
     pub(crate) trailer: Option<NonZeroU64>,
 }
 
@@ -17,14 +17,14 @@ impl BoxHeader {
         BoxHeader {
             magic_bytes: *MAGIC_BYTES,
             version: 0x0,
-            alignment: None,
+            alignment: 0,
             trailer,
         }
     }
 
-    pub(crate) fn with_alignment(alignment: NonZeroU64) -> BoxHeader {
+    pub(crate) fn with_alignment(alignment: u64) -> BoxHeader {
         let mut header = BoxHeader::default();
-        header.alignment = Some(alignment);
+        header.alignment = alignment;
         header
     }
 }

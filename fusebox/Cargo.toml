@@ -11,3 +11,4 @@ box_format = { path = "../box-format" }
 env_logger = "0.7.1"
 libc = "0.2.65"
 log = "0.4.8"
+fst = "0.3"

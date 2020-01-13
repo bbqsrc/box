@@ -1,19 +1,25 @@
 mod compression;
+#[cfg(feature = "reader")]
 mod de;
 mod file;
 mod header;
 pub mod path;
 mod record;
+#[cfg(feature = "writer")]
 mod ser;
 
 #[cfg(feature = "ffi")]
 pub mod ffi;
 
 pub use compression::Compression;
-pub use file::{reader::BoxFileReader, writer::BoxFileWriter, AttrMap, BoxMetadata};
+#[cfg(feature = "reader")]
+pub use file::reader::BoxFileReader;
+#[cfg(feature = "writer")]
+pub use file::writer::BoxFileWriter;
+pub use file::{AttrMap, BoxMetadata};
 use header::BoxHeader;
 pub use path::BoxPath;
-pub use record::{DirectoryRecord, FileRecord, Record, LinkRecord};
+pub use record::{DirectoryRecord, FileRecord, LinkRecord, Record};
 
 #[doc(hidden)]
 pub use comde;

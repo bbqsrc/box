@@ -1,6 +1,0 @@
-[workspace]
-members = [
-  "fusebox",
-  "box",
-  "box-format",
-]

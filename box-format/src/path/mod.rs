@@ -1,9 +1,8 @@
+use relative_path::RelativePath;
 use std::{
-    fs,
-    fmt,
+    fmt, fs,
     path::{Path, PathBuf},
 };
-use relative_path::RelativePath;
 
 mod error;
 
@@ -78,7 +77,20 @@ impl BoxPath {
         PathBuf::from(self.to_string())
     }
 
-    pub fn levels(&self) -> usize {
+    pub fn parent(&self) -> Option<BoxPath> {
+        let mut parts: Vec<_> = self.iter().collect();
+        if parts.len() == 1 {
+            return None;
+        }
+        parts.pop();
+        Some(BoxPath(parts.join(PATH_BOX_SEP)))
+    }
+
+    pub fn filename(&self) -> String {
+        self.iter().collect::<Vec<_>>().pop().unwrap().to_string()
+    }
+
+    pub fn depth(&self) -> usize {
         self.0.chars().filter(|c| c == &'\x1f').count()
     }
 
@@ -92,6 +104,10 @@ impl BoxPath {
 
     pub fn join<P: AsRef<Path>>(&self, tail: P) -> std::result::Result<BoxPath, IntoBoxPathError> {
         Self::new(&self.to_path_buf().join(tail))
+    }
+
+    pub fn iter(&self) -> std::str::Split<'_, &str> {
+        self.0.split(PATH_BOX_SEP)
     }
 }
 
@@ -116,9 +132,9 @@ mod tests {
     #[test]
     fn sanitisation() {
         let box_path = BoxPath::new("/something/../somethingelse/./foo.txt").unwrap();
-        assert_eq!(box_path, *"somethingelse\x1ffoo.txt");
+        assert_eq!(box_path.0, "somethingelse\x1ffoo.txt");
         let box_path = BoxPath::new("../something/../somethingelse/./foo.txt/.").unwrap();
-        assert_eq!(box_path, *"somethingelse\x1ffoo.txt");
+        assert_eq!(box_path.0, "somethingelse\x1ffoo.txt");
 
         // This one will do different things on Windows and Unix, because Unix loves a good backslash
         let box_path = BoxPath::new(r"..\something\..\somethingelse\.\foo.txt\.");

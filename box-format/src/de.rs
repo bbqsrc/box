@@ -3,11 +3,11 @@ use std::io::prelude::*;
 use std::num::NonZeroU64;
 
 use byteorder::{LittleEndian, ReadBytesExt};
-use vlq::ReadVlqExt;
+use vlq::fast::ReadVlqExt;
 
 use crate::{
-    AttrMap, BoxHeader, BoxMetadata, BoxPath, Compression, DirectoryRecord, FileRecord, Record,
-    LinkRecord,
+    AttrMap, BoxHeader, BoxMetadata, BoxPath, Compression, DirectoryRecord, FileRecord, LinkRecord,
+    Record,
 };
 
 use crate::compression::constants::*;
@@ -23,7 +23,7 @@ impl<T: DeserializeOwned> DeserializeOwned for Vec<T> {
     where
         Self: Sized,
     {
-        let len: u64 = reader.read_vlq()?;
+        let len: u64 = reader.read_fast_vlq()?;
         let mut buf = Vec::with_capacity(len as usize);
         for _ in 0..len {
             buf.push(T::deserialize_owned(reader)?);
@@ -47,12 +47,12 @@ impl DeserializeOwned for AttrMap {
         Self: Sized,
     {
         let _byte_count = reader.read_u64::<LittleEndian>()?;
-        let len: u64 = reader.read_vlq()?;
+        let len: u64 = reader.read_fast_vlq()?;
         let mut buf = HashMap::with_capacity(len as usize);
         for _ in 0..len {
-            let key: usize = reader.read_vlq()?;
+            let key = reader.read_fast_vlq()?;
             let value = Vec::deserialize_owned(reader)?;
-            buf.insert(key, value);
+            buf.insert(key as usize, value);
         }
         Ok(buf)
     }
@@ -64,37 +64,56 @@ impl DeserializeOwned for FileRecord {
         let length = reader.read_u64::<LittleEndian>()?;
         let decompressed_length = reader.read_u64::<LittleEndian>()?;
         let data = reader.read_u64::<LittleEndian>()?;
-        let path = BoxPath::deserialize_owned(reader)?;
+        let name = String::deserialize_owned(reader)?; //BoxPath::deserialize_owned(reader)?;
         let attrs = HashMap::deserialize_owned(reader)?;
 
         Ok(FileRecord {
             compression,
             length,
             decompressed_length,
-            path,
+            name,
             attrs,
             data: NonZeroU64::new(data).expect("non zero"),
         })
     }
 }
 
+use crate::file::Inode;
+impl DeserializeOwned for Inode {
+    fn deserialize_owned<R: Read>(reader: &mut R) -> std::io::Result<Self> {
+        reader.read_fast_vlq().and_then(Inode::new)
+    }
+}
+
 impl DeserializeOwned for DirectoryRecord {
     fn deserialize_owned<R: Read>(reader: &mut R) -> std::io::Result<Self> {
-        let path = BoxPath::deserialize_owned(reader)?;
+        let name = String::deserialize_owned(reader)?;
+
+        // Inodes vec
+        let len = reader.read_fast_vlq()? as usize;
+        let mut inodes = Vec::with_capacity(len);
+        for _ in 0..len {
+            inodes.push(Inode::deserialize_owned(reader)?);
+        }
+
         let attrs = HashMap::deserialize_owned(reader)?;
 
-        Ok(DirectoryRecord { path, attrs })
+        Ok(DirectoryRecord {
+            name,
+            inodes,
+            attrs,
+        })
     }
 }
 
 impl DeserializeOwned for LinkRecord {
     fn deserialize_owned<R: Read>(reader: &mut R) -> std::io::Result<Self> {
-        let path = BoxPath::deserialize_owned(reader)?;
+        let name = String::deserialize_owned(reader)?;
         let target = BoxPath::deserialize_owned(reader)?;
         let attrs = HashMap::deserialize_owned(reader)?;
 
         Ok(LinkRecord {
-            path,
+            name,
             target,
             attrs,
         })
@@ -130,7 +149,7 @@ impl DeserializeOwned for BoxHeader {
         }
 
         let version = reader.read_u32::<LittleEndian>()?;
-        let alignment = NonZeroU64::new(reader.read_u64::<LittleEndian>()?);
+        let alignment = reader.read_u64::<LittleEndian>()?;
         let trailer = reader.read_u64::<LittleEndian>()?;
 
         Ok(BoxHeader {
@@ -144,12 +163,14 @@ impl DeserializeOwned for BoxHeader {
 
 impl DeserializeOwned for BoxMetadata {
     fn deserialize_owned<R: Read>(reader: &mut R) -> std::io::Result<Self> {
-        let records = Vec::deserialize_owned(reader)?;
+        let root = Vec::deserialize_owned(reader)?;
+        let inodes = Vec::deserialize_owned(reader)?;
         let attr_keys = Vec::deserialize_owned(reader)?;
         let attrs = HashMap::deserialize_owned(reader)?;
 
         Ok(BoxMetadata {
-            records,
+            root,
+            inodes,
             attr_keys,
             attrs,
         })
@@ -182,7 +203,7 @@ impl DeserializeOwned for String {
     where
         Self: Sized,
     {
-        let len: u64 = reader.read_vlq()?;
+        let len: u64 = reader.read_fast_vlq()?;
         let mut string = String::with_capacity(len as usize);
         reader.take(len).read_to_string(&mut string)?;
         Ok(string)
@@ -194,7 +215,7 @@ impl DeserializeOwned for Vec<u8> {
     where
         Self: Sized,
     {
-        let len: u64 = reader.read_vlq()?;
+        let len: u64 = reader.read_fast_vlq()?;
         let mut buf = Vec::with_capacity(len as usize);
         reader.take(len).read_to_end(&mut buf)?;
         Ok(buf)
