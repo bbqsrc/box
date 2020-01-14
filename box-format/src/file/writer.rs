@@ -132,13 +132,7 @@ impl BoxFileWriter {
                     meta: BoxMetadata::default(),
                 })
             })?;
-
-        let now = SystemTime::now()
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .unwrap()
-            .as_secs()
-            .to_le_bytes();
-        boxfile.set_file_attr("created", now.to_vec())?;
+            
         boxfile.write_header()?;
 
         Ok(boxfile)
@@ -164,12 +158,6 @@ impl BoxFileWriter {
                 })
             })?;
 
-        let now = SystemTime::now()
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .unwrap()
-            .as_secs()
-            .to_le_bytes();
-        boxfile.set_file_attr("created", now.to_vec())?;
         boxfile.write_header()?;
 
         Ok(boxfile)
@@ -202,24 +190,34 @@ impl BoxFileWriter {
     where
         F: FnOnce(&mut Self, &BoxPath) -> std::io::Result<Record>,
     {
+        log::debug!("insert_inner path: {:?}", path);
         match path.parent() {
-            Some(parent) => match self.meta.inode(&parent) {
-                None => return Err(todo!()),
-                Some(parent) => {
-                    let record = create_record(self, &path)?;
-                    let new_inode = self.meta.insert_record(record);
-                    let parent = self
-                        .meta
-                        .record_mut(parent)
-                        .unwrap()
-                        .as_directory_mut()
-                        .unwrap();
-                    parent.inodes.push(new_inode);
-                    Ok(())
+            Some(parent) => {
+                log::debug!("insert_inner parent: {:?}", parent);
+
+                match self.meta.inode(&parent) {
+                    None => {
+                        return Err(todo!())
+                    },
+                    Some(parent) => {
+                        let record = create_record(self, &path)?;
+                        log::debug!("Inserting record into parent {:?}: {:?}", &parent, &record);
+                        let new_inode = self.meta.insert_record(record);
+                        log::debug!("Inserted with inode: {:?}", &new_inode);
+                        let parent = self
+                            .meta
+                            .record_mut(parent)
+                            .unwrap()
+                            .as_directory_mut()
+                            .unwrap();
+                        parent.inodes.push(new_inode);
+                        Ok(())
+                    }
                 }
             },
             None => {
                 let record = create_record(self, &path)?;
+                log::debug!("Inserting record into root: {:?}", &record);
                 let new_inode = self.meta.insert_record(record);
                 self.meta.root.push(new_inode);
                 return Ok(());
@@ -228,6 +226,8 @@ impl BoxFileWriter {
     }
 
     pub fn mkdir(&mut self, path: BoxPath, attrs: HashMap<String, Vec<u8>>) -> std::io::Result<()> {
+        log::debug!("mkdir: {}", path);
+
         self.insert_inner(path, move |this, path| {
             let attrs = attrs
                 .into_iter()

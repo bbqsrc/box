@@ -5,6 +5,7 @@ use std::collections::{HashMap, HashSet};
 use std::io::{BufReader, Read};
 use std::num::NonZeroU64;
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 use box_format::{
     path::PATH_PLATFORM_SEP, BoxFileReader, BoxFileWriter, BoxPath, Compression, Record,
@@ -283,8 +284,8 @@ fn from_acl_u16(acl: u16) -> String {
 }
 
 #[inline(always)]
-fn time(attr: Option<&Vec<u8>>) -> String {
-    attr.and_then(|x| x.as_slice().read_u64::<LittleEndian>().ok())
+fn time(attr: Option<&[u8]>) -> String {
+    attr.and_then(|mut x| x.read_u64::<LittleEndian>().ok())
         .map(|x| std::time::UNIX_EPOCH + std::time::Duration::new(x, 0))
         .map(|x| {
             let datetime: chrono::DateTime<chrono::Utc> = x.into();
@@ -294,7 +295,7 @@ fn time(attr: Option<&Vec<u8>>) -> String {
 }
 
 #[inline(always)]
-fn unix_acl(attr: Option<&Vec<u8>>) -> String {
+fn unix_acl(attr: Option<&[u8]>) -> String {
     attr.map(|x| from_acl_u16(u16::from_le_bytes([x[0], x[1]])))
         .unwrap_or_else(|| "-".into())
 }
@@ -318,11 +319,11 @@ fn list(path: &Path, _selected_files: Vec<PathBuf>, verbose: bool) -> Result<()>
     println!("-------------  -------------  -------------  ---------------------  ----------  ---------  --------");
     println!(" Method         Compressed     Length         Created                Attrs       CRC32      Path");
     println!("-------------  -------------  -------------  ---------------------  ----------  ---------  --------");
-    for result in bf.iter() {
+    for result in bf.metadata().iter() {
         let record = result.record;
 
-        let acl = unix_acl(record.attr(&bf, "unix.mode"));
-        let time = time(record.attr(&bf, "created"));
+        let acl = unix_acl(record.attr(bf.metadata(), "unix.mode"));
+        let time = time(record.attr(bf.metadata(), "created"));
         let path = format_path(&result.path, record.as_directory().is_some());
 
         match record {
@@ -333,17 +334,17 @@ fn list(path: &Path, _selected_files: Vec<PathBuf>, verbose: bool) -> Result<()>
                 );
             }
             Record::Link(link_record) => {
-                // let target = format_path(
-                //     &link_record.target,
-                //     bf.resolve_link(&link_record)
-                //         .map(|x| x.as_directory().is_some())
-                //         .unwrap_or(false),
-                // );
+                let target = format_path(
+                    &link_record.target,
+                    bf.resolve_link(&link_record)
+                        .map(|x| x.record.as_directory().is_some())
+                        .unwrap_or(false),
+                );
 
-                // println!(
-                //     " {:12}  {:>12}   {:>12}   {:<20}   {:<9}   {:>8}   {} -> {}",
-                //     "<link>", "-", "-", time, acl, "-", path, target,
-                // );
+                println!(
+                    " {:12}  {:>12}   {:>12}   {:<20}   {:<9}   {:>8}   {} -> {}",
+                    "<link>", "-", "-", time, acl, "-", path, target,
+                );
             }
             Record::File(record) => {
                 let length = record.length.file_size(options::BINARY).unwrap();
@@ -352,7 +353,7 @@ fn list(path: &Path, _selected_files: Vec<PathBuf>, verbose: bool) -> Result<()>
                     .file_size(options::BINARY)
                     .unwrap();
                 let crc32 = record
-                    .attr(&bf, "crc32")
+                    .attr(bf.metadata(), "crc32")
                     .map(|x| Some(u32::from_le_bytes([x[0], x[1], x[2], x[3]])))
                     .unwrap_or(None)
                     .map(|x| format!("{:x}", x))
@@ -546,16 +547,16 @@ fn process_files<I: Iterator<Item = PathBuf>>(
             .metadata
             .expect("read file metadata")
             .context(CannotProcessFile)?;
-        println!("Path: {:?}", entry.parent_spec.path);
+        log::debug!("Path: {:?}", entry.parent_spec.path);
         let file_path = entry.parent_spec.path.join(&entry.file_name);
-        println!("File Path: {:?}", &file_path);
+        log::debug!("File Path: {:?}", &file_path);
         let canonical_dir = std::env::current_dir()
             .unwrap()
             .join(&entry.parent_spec.path)
             .canonicalize()
             .context(CannotProcessFile)?;
         let canonical_path = canonical_dir.join(&entry.file_name);
-        println!("File Path: {:?}", &file_path);
+        log::debug!("Canonical Path: {:?}", &canonical_path);
 
         if bf.path() == canonical_path {
             continue;
@@ -677,11 +678,19 @@ fn create(
     verbose: bool,
     alignment: Option<NonZeroU64>,
 ) -> Result<()> {
-    let bf = match alignment {
+    let mut bf = match alignment {
         None => BoxFileWriter::create(&path),
         Some(alignment) => BoxFileWriter::create_with_alignment(&path, alignment.get()),
     }
     .context(CannotCreateArchive { path: &path })?;
+
+    let now = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        .to_le_bytes();
+    
+    bf.set_file_attr("created", now.to_vec()).unwrap();
 
     process_files(
         selected_files.into_iter(),
@@ -700,6 +709,8 @@ fn create(
 }
 
 fn main() -> Result<()> {
+    env_logger::init();
+
     let opts = CliOpts::from_args();
 
     match opts.cmd {

@@ -115,6 +115,8 @@ impl<'a> FindRecord<'a> {
         query: VecDeque<String>,
         inodes: &'a [Inode],
     ) -> FindRecord<'a> {
+        log::debug!("FindRecord query: {:?}", query);
+
         FindRecord {
             meta,
             query,
@@ -132,6 +134,8 @@ impl<'a> Iterator for FindRecord<'a> {
             None => return None,
         };
 
+        log::debug!("candidate_name: {}", &candidate_name);
+
         let result = self
             .inodes
             .iter()
@@ -140,12 +144,17 @@ impl<'a> Iterator for FindRecord<'a> {
 
         match result {
             Some(v) => {
+                log::debug!("{:?}", v);
                 if self.query.is_empty() {
                     return Some(v.0);
-                } else {
+                } else if let Record::Directory(record) = v.1 {
                     let mut tmp = VecDeque::new();
                     std::mem::swap(&mut self.query, &mut tmp);
-                    FindRecord::new(self.meta, tmp, self.inodes).next()
+                    let result = FindRecord::new(self.meta, tmp, &*record.inodes).next();
+                    log::debug!("FindRecord result: {:?}", &result);
+                    result
+                } else {
+                    None
                 }
             }
             None => None,

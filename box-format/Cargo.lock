@@ -69,6 +69,7 @@ dependencies = [
  "cursed 0.1.0 (git+https://github.com/cthulhu-rs/cthulhu)",
  "fst 0.3.5 (registry+https://github.com/rust-lang/crates.io-index)",
  "libc 0.2.66 (registry+https://github.com/rust-lang/crates.io-index)",
+ "log 0.4.8 (registry+https://github.com/rust-lang/crates.io-index)",
  "memmap 0.7.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "pathdiff 0.1.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "relative-path 1.0.0 (git+https://github.com/udoprog/relative-path?branch=relative)",
