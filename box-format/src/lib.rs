@@ -11,6 +11,7 @@ mod ser;
 #[cfg(feature = "ffi")]
 pub mod ffi;
 
+pub use self::file::Inode;
 pub use compression::Compression;
 #[cfg(feature = "reader")]
 pub use file::reader::BoxFileReader;

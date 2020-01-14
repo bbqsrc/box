@@ -2,6 +2,7 @@ use super::AttrMap;
 use crate::file::Inode;
 use crate::path::BoxPath;
 use crate::Record;
+use crate::record::DirectoryRecord;
 
 #[derive(Debug, Default)]
 pub struct BoxMetadata {
@@ -159,6 +160,25 @@ impl BoxMetadata {
     }
 
     #[inline(always)]
+    pub fn root_records(&self) -> Vec<(Inode, &Record)> {
+        self.root
+            .iter()
+            .copied()
+            .filter_map(|x| self.record(x).map(|r| (x, r)))
+            .collect()
+    }
+
+    #[inline(always)]
+    pub fn records(&self, dir_record: &DirectoryRecord) -> Vec<(Inode, &Record)> {
+        dir_record
+            .inodes
+            .iter()
+            .copied()
+            .filter_map(|x| self.record(x).map(|r| (x, r)))
+            .collect()
+    }
+
+    #[inline(always)]
     pub fn inode(&self, path: &BoxPath) -> Option<Inode> {
         if let Some(inode) = self.index.as_ref().and_then(|x| x.get(path)) {
             return Inode::new(inode).ok();
@@ -181,6 +201,24 @@ impl BoxMetadata {
     pub fn insert_record(&mut self, record: Record) -> Inode {
         self.inodes.push(record);
         Inode::new(self.inodes.len() as u64).unwrap()
+    }
+
+    #[inline(always)]
+    pub fn attr<S: AsRef<str>>(&self, path: &BoxPath, key: S) -> Option<&[u8]> {
+        let key = self.attr_key(key.as_ref())?;
+
+        if let Some(record) = self.inode(path).and_then(|x| self.record(x)) {
+            record.attrs().get(&key).map(|x| &**x)
+        } else {
+            None
+        }
+    }
+
+    #[inline(always)]
+    pub fn file_attr<S: AsRef<str>>(&self, key: S) -> Option<&Vec<u8>> {
+        let key = self.attr_key(key.as_ref())?;
+
+        self.attrs.get(&key)
     }
 
     #[inline(always)]

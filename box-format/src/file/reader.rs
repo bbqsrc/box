@@ -146,17 +146,6 @@ impl BoxFileReader {
     // }
 
     #[inline(always)]
-    pub fn attr<S: AsRef<str>>(&self, path: &BoxPath, key: S) -> Option<&Vec<u8>> {
-        let key = self.meta.attr_key(key.as_ref())?;
-
-        if let Some(record) = self.meta.inode(path).and_then(|x| self.meta.record(x)) {
-            record.attrs().get(&key)
-        } else {
-            None
-        }
-    }
-
-    #[inline(always)]
     pub fn resolve_link(&self, link: &LinkRecord) -> std::io::Result<RecordsItem> {
         match self.meta.inode(&link.target) {
             Some(inode) => Ok(RecordsItem {
@@ -169,13 +158,6 @@ impl BoxFileReader {
                 format!("No inode for link target: {}", link.target),
             )),
         }
-    }
-
-    #[inline(always)]
-    pub fn file_attr<S: AsRef<str>>(&self, key: S) -> Option<&Vec<u8>> {
-        let key = self.metadata().attr_key(key.as_ref())?;
-
-        self.meta.attrs.get(&key)
     }
 
     #[inline(always)]

@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::num::NonZeroU64;
 
 #[repr(transparent)]
-#[derive(Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub struct Inode(NonZeroU64);
 
 impl Inode {

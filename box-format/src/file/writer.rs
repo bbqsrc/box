@@ -4,6 +4,7 @@ use std::fs::File;
 use std::fs::OpenOptions;
 use std::io::{prelude::*, BufReader, BufWriter, Result, SeekFrom};
 use std::num::NonZeroU64;
+use std::time::SystemTime;
 use std::path::{Path, PathBuf};
 
 use memmap::MmapOptions;
@@ -132,6 +133,12 @@ impl BoxFileWriter {
                 })
             })?;
 
+        let now = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            .to_le_bytes();
+        boxfile.set_file_attr("created", now.to_vec())?;
         boxfile.write_header()?;
 
         Ok(boxfile)
@@ -157,6 +164,12 @@ impl BoxFileWriter {
                 })
             })?;
 
+        let now = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            .to_le_bytes();
+        boxfile.set_file_attr("created", now.to_vec())?;
         boxfile.write_header()?;
 
         Ok(boxfile)

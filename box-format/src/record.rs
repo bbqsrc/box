@@ -1,9 +1,6 @@
 use crate::{compression::Compression, path::BoxPath, AttrMap};
 
-#[cfg(feature = "reader")]
-use crate::file::reader::BoxFileReader;
-
-use crate::file::Inode;
+use crate::file::{BoxMetadata, Inode};
 use std::num::NonZeroU64;
 
 #[derive(Debug)]
@@ -71,11 +68,10 @@ impl Record {
         }
     }
 
-    #[cfg(feature = "reader")]
     #[inline(always)]
-    pub fn attr<S: AsRef<str>>(&self, boxfile: &BoxFileReader, key: S) -> Option<&Vec<u8>> {
-        let key = boxfile.metadata().attr_key(key.as_ref())?;
-        self.attrs().get(&key)
+    pub fn attr<S: AsRef<str>>(&self, metadata: &BoxMetadata, key: S) -> Option<&[u8]> {
+        let key = metadata.attr_key(key.as_ref())?;
+        self.attrs().get(&key).map(|x| &**x)
     }
 
     #[inline(always)]
@@ -111,11 +107,10 @@ pub struct LinkRecord {
 }
 
 impl LinkRecord {
-    #[cfg(feature = "reader")]
     #[inline(always)]
-    pub fn attr<S: AsRef<str>>(&self, boxfile: &BoxFileReader, key: S) -> Option<&Vec<u8>> {
-        let key = boxfile.metadata().attr_key(key.as_ref())?;
-        self.attrs.get(&key)
+    pub fn attr<S: AsRef<str>>(&self, metadata: &BoxMetadata, key: S) -> Option<&[u8]> {
+        let key = metadata.attr_key(key.as_ref())?;
+        self.attrs.get(&key).map(|x| &**x)
     }
 
     #[inline(always)]
@@ -137,10 +132,6 @@ pub struct DirectoryRecord {
 }
 
 impl DirectoryRecord {
-    // #[inline(always)]
-    // pub fn path(&self) -> &BoxPath {
-    //     &self.path
-    // }
     pub fn new(name: String) -> DirectoryRecord {
         DirectoryRecord {
             name,
@@ -149,11 +140,10 @@ impl DirectoryRecord {
         }
     }
 
-    #[cfg(feature = "reader")]
     #[inline(always)]
-    pub fn attr<S: AsRef<str>>(&self, boxfile: &BoxFileReader, key: S) -> Option<&Vec<u8>> {
-        let key = boxfile.metadata().attr_key(key.as_ref())?;
-        self.attrs.get(&key)
+    pub fn attr<S: AsRef<str>>(&self, metadata: &BoxMetadata, key: S) -> Option<&[u8]> {
+        let key = metadata.attr_key(key.as_ref())?;
+        self.attrs.get(&key).map(|x| &**x)
     }
 
     #[inline(always)]
@@ -189,16 +179,10 @@ impl FileRecord {
         self.compression
     }
 
-    // #[inline(always)]
-    // pub fn path(&self) -> &BoxPath {
-    //     &self.path
-    // }
-
-    #[cfg(feature = "reader")]
     #[inline(always)]
-    pub fn attr<S: AsRef<str>>(&self, boxfile: &BoxFileReader, key: S) -> Option<&Vec<u8>> {
-        let key = boxfile.metadata().attr_key(key.as_ref())?;
-        self.attrs.get(&key)
+    pub fn attr<S: AsRef<str>>(&self, metadata: &BoxMetadata, key: S) -> Option<&[u8]> {
+        let key = metadata.attr_key(key.as_ref())?;
+        self.attrs.get(&key).map(|x| &**x)
     }
 
     #[inline(always)]

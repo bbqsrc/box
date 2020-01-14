@@ -1,41 +1,56 @@
 use std::collections::HashMap;
 use std::ffi::{OsStr, OsString};
 use std::path::PathBuf;
-use std::time::{Duration, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use fuse::{
     FileAttr, FileType, Filesystem, ReplyAttr, ReplyData, ReplyDirectory, ReplyEmpty, ReplyEntry,
     Request,
 };
-use libc::ENOENT;
+use libc::{ENOENT, ENOSYS};
 use structopt::StructOpt;
 
-use box_format::BoxFileReader;
+use box_format::{BoxFileReader, BoxMetadata, Inode};
 
-struct BoxFs(BoxFileReader, HashMap<u64, Vec<u8>>);
+struct BoxFs(BoxFileReader, HashMap<Inode, Vec<u8>>);
 
 const TTL: Duration = Duration::from_secs(1);
 
-const ROOT_DIR_ATTR: FileAttr = FileAttr {
-    ino: 1,
-    size: 0,
-    blocks: 0,
-    atime: UNIX_EPOCH, // 1970-01-01 00:00:00
-    mtime: UNIX_EPOCH,
-    ctime: UNIX_EPOCH,
-    crtime: UNIX_EPOCH,
-    kind: FileType::Directory,
-    perm: 0o755,
-    nlink: 2,
-    uid: 501,
-    gid: 20,
-    rdev: 0,
-    flags: 0,
-};
+fn root_dir_attr(meta: &BoxMetadata) -> FileAttr {
+    let ctime = match meta.file_attr("created") {
+        Some(b) if b.len() == 8 => {
+            let secs = u64::from_le_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]]);
+            UNIX_EPOCH
+                .checked_add(Duration::from_secs(secs))
+                .unwrap_or(UNIX_EPOCH)
+        }
+        _ => UNIX_EPOCH,
+    };
+
+    FileAttr {
+        ino: 1,
+        size: meta.root_records().len() as u64,
+        blocks: 0,
+        atime: ctime,
+        mtime: ctime,
+        ctime,
+        crtime: ctime,
+        kind: FileType::Directory,
+        perm: 0o755,
+        nlink: 2,
+        uid: 501,
+        gid: 20,
+        rdev: 0,
+        flags: 0,
+    }
+}
 
 trait RecordExt {
     fn fuse_file_type(&self) -> FileType;
-    fn fuse_file_attr(&self, index: u64) -> FileAttr;
+    fn fuse_file_attr(&self, meta: &BoxMetadata, inode: Inode) -> FileAttr;
+
+    fn perm(&self, meta: &BoxMetadata) -> u16;
+    fn ctime(&self, meta: &BoxMetadata) -> SystemTime;
 }
 
 impl RecordExt for box_format::Record {
@@ -45,33 +60,33 @@ impl RecordExt for box_format::Record {
         match self {
             File(_) => FileType::RegularFile,
             Directory(_) => FileType::Directory,
+            Link(_) => FileType::Symlink,
         }
     }
 
-    fn fuse_file_attr(&self, index: u64) -> FileAttr {
+    fn fuse_file_attr(&self, meta: &BoxMetadata, inode: Inode) -> FileAttr {
         let kind = self.fuse_file_type();
-        let nlink = if kind == FileType::RegularFile { 1 } else { 2 };
+        let nlink = 1;
         let blocks = if kind == FileType::RegularFile { 1 } else { 0 };
 
         use box_format::Record::*;
         let size = match self {
             File(record) => record.decompressed_length,
-            Directory(_) => 0,
+            Directory(record) => record.inodes.len() as u64,
+            Link(_) => 1,
         };
 
-        let perm = match self {
-            File(_) => 0o644,
-            Directory(_) => 0o755,
-        };
+        let perm = self.perm(meta) & 0o0555;
+        let ctime = self.ctime(meta);
 
         FileAttr {
-            ino: index + 2,
+            ino: inode.get() + 1,
             size,
             blocks,
-            atime: UNIX_EPOCH,
-            mtime: UNIX_EPOCH,
-            ctime: UNIX_EPOCH,
-            crtime: UNIX_EPOCH,
+            atime: ctime,
+            mtime: ctime,
+            ctime,
+            crtime: ctime,
             kind: self.fuse_file_type(),
             perm,
             nlink,
@@ -81,57 +96,76 @@ impl RecordExt for box_format::Record {
             flags: 0,
         }
     }
+
+    fn perm(&self, meta: &BoxMetadata) -> u16 {
+        match self.attr(meta, "unix.mode") {
+            Some(bytes) if bytes.len() == 2 => u16::from_le_bytes([bytes[0], bytes[1]]),
+            _ => {
+                use box_format::Record::*;
+                match self {
+                    File(_) => 0o644,
+                    Directory(_) => 0o755,
+                    Link(_) => 0x644,
+                }
+            }
+        }
+    }
+
+    fn ctime(&self, meta: &BoxMetadata) -> SystemTime {
+        match self.attr(meta, "created") {
+            Some(b) if b.len() == 8 => {
+                let secs = u64::from_le_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]]);
+                UNIX_EPOCH
+                    .checked_add(Duration::from_secs(secs))
+                    .unwrap_or(UNIX_EPOCH)
+            }
+            _ => UNIX_EPOCH,
+        }
+    }
 }
 
-impl BoxFs {
-    fn record(&self, ino: u64) -> Option<&box_format::Record> {
-        self.0.metadata().records().get((ino - 2) as usize)
-    }
+fn inode(parent: u64) -> Option<Inode> {
+    Inode::new(parent - 1).ok()
 }
 
 impl Filesystem for BoxFs {
     fn lookup(&mut self, _req: &Request, parent: u64, name: &OsStr, reply: ReplyEntry) {
-        log::debug!("HELLO");
-
-        let records = self.0.metadata().records();
-
-        if parent == 1 {
-            // ROOT
-            for (index, entry) in records.iter().enumerate() {
-                log::debug!(
-                    "{} {} {} -> {:?}",
-                    index,
-                    entry.name(),
-                    entry.path().levels(),
-                    &name
-                );
-                if entry.path().levels() == 0 && entry.name() == name.to_str().unwrap() {
-                    reply.entry(&TTL, &entry.fuse_file_attr(index as u64), 0);
-                    return;
-                }
+        let name = match name.to_str() {
+            Some(v) => v,
+            None => {
+                reply.error(ENOENT);
+                return;
             }
-            log::debug!("END LOOP");
-        } else {
-            let index = (parent - 2) as usize;
-            log::debug!("Getting index {}", index);
-            let record = match records.get(index) {
+        };
+
+        let records = match inode(parent) {
+            Some(inode) => match self
+                .0
+                .metadata()
+                .record(inode)
+                .and_then(|x| x.as_directory())
+                .map(|x| self.0.metadata().records(x))
+            {
                 Some(v) => v,
                 None => {
                     reply.error(ENOENT);
                     return;
                 }
-            };
+            },
+            None => self.0.metadata().root_records(),
+        };
 
-            let candidate = record.path().join(name.to_str().unwrap()).unwrap();
-            for (i, record) in records.iter().enumerate() {
-                if record.path() == &candidate {
-                    reply.entry(&TTL, &record.fuse_file_attr(i as u64), 0);
-                    return;
-                }
+        match records
+            .iter()
+            .find(|(_inode, record)| record.name() == name)
+        {
+            Some((inode, record)) => {
+                reply.entry(&TTL, &record.fuse_file_attr(self.0.metadata(), *inode), 0);
+            }
+            None => {
+                reply.error(ENOENT);
             }
         }
-
-        reply.error(ENOENT);
     }
 
     fn read(
@@ -143,14 +177,23 @@ impl Filesystem for BoxFs {
         size: u32,
         reply: ReplyData,
     ) {
+        let inode = match inode(ino) {
+            Some(v) => v,
+            None => {
+                reply.error(ENOENT);
+                return;
+            }
+        };
+
         let offset = offset as usize;
         let size = size as usize;
-        if let Some(cached) = self.1.get(&ino) {
+
+        if let Some(cached) = self.1.get(&inode) {
             reply.data(&(&*cached)[offset..size + offset]);
             return;
         }
 
-        let record = match self.record(ino).and_then(|x| x.as_file()) {
+        let record = match self.0.metadata().record(inode).and_then(|x| x.as_file()) {
             Some(v) => v,
             None => {
                 reply.error(ENOENT);
@@ -162,7 +205,7 @@ impl Filesystem for BoxFs {
         match self.0.decompress(record, &mut buf) {
             Ok(_) => {
                 reply.data(&(&*buf)[offset..size + offset]);
-                self.1.insert(ino, buf);
+                self.1.insert(inode, buf);
             }
             Err(_) => {
                 reply.error(ENOENT);
@@ -180,29 +223,30 @@ impl Filesystem for BoxFs {
         _flush: bool,
         reply: ReplyEmpty,
     ) {
-        self.1.remove(&ino);
-        reply.ok();
+        if let Some(inode) = inode(ino) {
+            self.1.remove(&inode);
+            reply.ok();
+        } else {
+            reply.error(ENOENT);
+        }
     }
 
     fn getattr(&mut self, _req: &Request, ino: u64, reply: ReplyAttr) {
-        if ino == 1 {
-            reply.attr(&TTL, &ROOT_DIR_ATTR);
-            return;
-        }
-
-        // Otherwise we're looking in the file
-        let index = (ino - 2) as usize;
-
-        let record = match self.0.metadata().records().get(index) {
-            Some(v) => v,
+        match inode(ino) {
+            Some(inode) => match self.0.metadata().record(inode) {
+                Some(record) => {
+                    let file_attr = record.fuse_file_attr(self.0.metadata(), inode);
+                    reply.attr(&TTL, &file_attr);
+                }
+                None => {
+                    reply.error(ENOENT);
+                }
+            },
             None => {
-                reply.error(ENOENT);
+                reply.attr(&TTL, &root_dir_attr(self.0.metadata()));
                 return;
             }
-        };
-
-        let file_attr = record.fuse_file_attr(index as u64);
-        reply.attr(&TTL, &file_attr);
+        }
     }
 
     fn readdir(
@@ -213,48 +257,43 @@ impl Filesystem for BoxFs {
         offset: i64,
         mut reply: ReplyDirectory,
     ) {
-        let records = self.0.metadata().records();
-
-        if ino == 1 {
-            // Root
-            for (i, entry) in records.iter().enumerate().skip(offset as usize) {
-                let i = i as i64 + 2;
-                if entry.path().levels() == 0 {
-                    let is_full = reply.add(i as u64, i + 1, entry.fuse_file_type(), entry.name());
-                    if is_full {
-                        reply.ok();
-                        return;
-                    }
-                }
-            }
-
-            reply.ok();
-            return;
-        }
-
-        let index = (ino - 2) as usize;
-        let record = match records.get(index).and_then(|x| x.as_directory()) {
-            Some(v) => v,
-            None => {
-                reply.error(ENOENT);
-                return;
-            }
-        };
-
-        let depth = record.path.levels() + 1;
-        for (i, entry) in records.iter().enumerate().skip(offset as usize) {
-            let i = i as i64 + 2;
-            if entry.path().levels() == depth && entry.path().starts_with(&record.path) {
-                log::debug!("{} {} -> {}", depth, entry.path(), &record.path);
-                let is_full = reply.add(i as u64, i + 1, entry.fuse_file_type(), entry.name());
-                if is_full {
-                    reply.ok();
+        let records = match inode(ino) {
+            Some(inode) => match self
+                .0
+                .metadata()
+                .record(inode)
+                .and_then(|x| x.as_directory())
+                .map(|x| self.0.metadata().records(x))
+            {
+                Some(v) => v,
+                None => {
+                    reply.error(ENOENT);
                     return;
                 }
+            },
+            None => self.0.metadata().root_records(),
+        };
+
+        for (i, (inode, record)) in records.iter().enumerate().skip(offset as usize) {
+            log::info!("{:?}", record);
+
+            let is_full = reply.add(
+                inode.get() + 1,
+                i as i64 + 1,
+                record.fuse_file_type(),
+                record.name(),
+            );
+            if is_full {
+                reply.ok();
+                return;
             }
         }
 
         reply.ok();
+    }
+
+    fn readlink(&mut self, _req: &Request<'_>, _ino: u64, reply: ReplyData) {
+        reply.error(ENOSYS);
     }
 }
 
@@ -271,12 +310,10 @@ fn main() {
     env_logger::init();
     let opts = Options::from_args();
     let bf = BoxFileReader::open(opts.box_file).unwrap();
+    log::info!("{:?}", &bf);
     let fsname = OsString::from(format!("fsname={}", bf.path().display()));
     let x = vec!["-o", "ro", "-o"];
-    let mut options = x
-        .iter()
-        .map(|o| o.as_ref())
-        .collect::<Vec<&OsStr>>();
+    let mut options = x.iter().map(|o| o.as_ref()).collect::<Vec<&OsStr>>();
     options.push(&fsname);
     fuse::mount(BoxFs(bf, HashMap::new()), &opts.mountpoint, &options).unwrap();
 }
