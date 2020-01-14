@@ -25,7 +25,6 @@ impl Inode {
 pub mod reader;
 #[cfg(feature = "writer")]
 pub mod writer;
-
 mod meta;
 
 pub use self::meta::BoxMetadata;
@@ -35,9 +34,8 @@ pub type AttrMap = HashMap<usize, Vec<u8>>;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{compression::Compression, ser::Serialize, *};
+    use crate::{compression::Compression, *};
     use std::collections::HashMap;
-    use std::fs::File;
     use std::io::Cursor;
     use std::path::Path;
 
@@ -47,7 +45,7 @@ mod tests {
         let mut cursor: Cursor<Vec<u8>> = Cursor::new(vec![]);
         let data = b"hello\0\0\0";
         cursor.write_all(data).unwrap();
-        cursor.seek(std::io::SeekFrom::Start(0));
+        cursor.seek(std::io::SeekFrom::Start(0)).unwrap();
 
         let mut writer = BoxFileWriter::create(filename).unwrap();
         writer.insert(
@@ -55,7 +53,7 @@ mod tests {
             BoxPath::new("hello.txt").unwrap(),
             &mut cursor,
             HashMap::new(),
-        );
+        ).unwrap();
     }
 
     #[test]
