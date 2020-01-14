@@ -134,7 +134,18 @@ impl Serialize for BoxMetadata {
         self.root.write(writer)?;
         self.inodes.write(writer)?;
         self.attr_keys.write(writer)?;
-        self.attrs.write(writer)
+        self.attrs.write(writer)?;
+
+        // Write the index
+        let mut builder = fst::MapBuilder::memory();
+
+        for x in self.iter() {
+            builder
+                .insert(x.path, x.inode.get())
+                .expect("FST failed ot generate");
+        }
+
+        writer.write_all(&mut builder.into_inner().unwrap())
     }
 }
 

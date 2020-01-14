@@ -173,6 +173,7 @@ impl DeserializeOwned for BoxMetadata {
             inodes,
             attr_keys,
             attrs,
+            index: None,
         })
     }
 }

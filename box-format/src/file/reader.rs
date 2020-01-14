@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use comde::Decompress;
 use memmap::MmapOptions;
 
-use super::BoxMetadata;
+use super::{meta::RecordsItem, BoxMetadata};
 use crate::{
     de::DeserializeOwned,
     header::BoxHeader,
@@ -30,143 +30,22 @@ pub(super) fn read_header<R: Read + Seek>(file: &mut R) -> std::io::Result<BoxHe
 }
 
 #[inline(always)]
-pub(super) fn read_trailer<R: Read + Seek>(
-    file: &mut R,
+pub(super) fn read_trailer<R: Read + Seek, P: AsRef<Path>>(
+    reader: &mut R,
     ptr: NonZeroU64,
+    path: P,
 ) -> std::io::Result<BoxMetadata> {
-    file.seek(SeekFrom::Start(ptr.get()))?;
-    BoxMetadata::deserialize_owned(file)
-}
+    reader.seek(SeekFrom::Start(ptr.get()))?;
+    let mut meta = BoxMetadata::deserialize_owned(reader)?;
 
-use crate::file::Inode;
-use std::collections::VecDeque;
+    // Load index if exists
+    let fst_mmap = unsafe { fst::raw::MmapReadOnly::open_path(path.as_ref())? };
+    let offset = reader.seek(SeekFrom::Current(0))? as usize;
+    let fst_mmap = fst_mmap.range(offset, fst_mmap.len() - offset);
+    let index = fst::raw::Fst::from_mmap(fst_mmap).ok().map(fst::Map::from);
+    meta.index = index;
 
-pub struct FindRecord<'a> {
-    meta: &'a BoxMetadata,
-    query: VecDeque<String>,
-    inodes: &'a [Inode],
-}
-
-impl<'a> FindRecord<'a> {
-    pub(crate) fn new(
-        meta: &'a BoxMetadata,
-        query: VecDeque<String>,
-        inodes: &'a [Inode],
-    ) -> FindRecord<'a> {
-        FindRecord {
-            meta,
-            query,
-            inodes,
-        }
-    }
-}
-
-impl<'a> Iterator for FindRecord<'a> {
-    type Item = Inode;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        let candidate_name = match self.query.pop_front() {
-            Some(v) => v,
-            None => return None,
-        };
-
-        let result = self
-            .inodes
-            .iter()
-            .map(|inode| (*inode, self.meta.record(*inode).unwrap()))
-            .find(|x| x.1.name() == candidate_name);
-
-        match result {
-            Some(v) => {
-                if self.query.is_empty() {
-                    return Some(v.0);
-                } else {
-                    let mut tmp = VecDeque::new();
-                    std::mem::swap(&mut self.query, &mut tmp);
-                    FindRecord::new(self.meta, tmp, self.inodes).next()
-                }
-            }
-            None => None,
-        }
-    }
-}
-
-pub struct Records<'a> {
-    meta: &'a BoxMetadata,
-    inodes: &'a [Inode],
-    base_path: Option<BoxPath>,
-    cur_inode: usize,
-    cur_dir: Option<Box<Records<'a>>>,
-}
-
-impl<'a> Records<'a> {
-    pub(crate) fn new(
-        meta: &'a BoxMetadata,
-        inodes: &'a [Inode],
-        base_path: Option<BoxPath>,
-    ) -> Records<'a> {
-        Records {
-            meta,
-            inodes,
-            base_path,
-            cur_inode: 0,
-            cur_dir: None,
-        }
-    }
-}
-
-#[non_exhaustive]
-pub struct RecordsItem<'a> {
-    pub(crate) inode: Inode,
-    pub path: BoxPath,
-    pub record: &'a Record,
-}
-
-impl<'a> Iterator for Records<'a> {
-    type Item = RecordsItem<'a>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        // If iterating a child iterator, do it here.
-        if let Some(dir) = self.cur_dir.as_mut() {
-            if let Some(record) = dir.next() {
-                return Some(record);
-            }
-
-            // If nothing left, clear it here.
-            self.cur_dir = None;
-        }
-        let inode = match self.inodes.get(self.cur_inode) {
-            Some(i) => *i,
-            None => return None,
-        };
-
-        let record = match self.meta.record(inode) {
-            Some(v) => v,
-            None => return None,
-        };
-
-        let base_path = self
-            .base_path
-            .as_ref()
-            .map(|x| x.join(&record.name()).unwrap())
-            .or_else(|| BoxPath::new(&record.name()).ok())
-            .unwrap();
-
-        if let Record::Directory(record) = record {
-            self.cur_dir = Some(Box::new(Records::new(
-                self.meta,
-                &*record.inodes,
-                Some(base_path.clone()),
-            )));
-        }
-
-        self.cur_inode += 1;
-        Some(RecordsItem {
-            inode,
-            path: base_path,
-            record,
-        })
-    }
+    Ok(meta)
 }
 
 impl BoxFileReader {
@@ -184,7 +63,8 @@ impl BoxFileReader {
                     let ptr = header.trailer.ok_or_else(|| {
                         std::io::Error::new(std::io::ErrorKind::Other, "no trailer found")
                     })?;
-                    let meta = read_trailer(&mut reader, ptr)?;
+                    let meta = read_trailer(&mut reader, ptr, path.as_ref())?;
+
                     (header, meta)
                 };
 
@@ -234,42 +114,42 @@ impl BoxFileReader {
     }
 
     #[inline(always)]
-    pub fn iter(&self) -> Records {
-        Records::new(self.metadata(), &*self.metadata().root, None)
-    }
-
-    #[inline(always)]
     pub fn extract<P: AsRef<Path>>(&self, path: &BoxPath, output_path: P) -> std::io::Result<()> {
         let output_path = output_path.as_ref().canonicalize()?;
-        let record = self.record(path).ok_or_else(|| {
-            std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                format!("Path not found in archive: {}", path),
-            )
-        })?;
+        let record = self
+            .meta
+            .inode(path)
+            .and_then(|x| self.meta.record(x))
+            .ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    format!("Path not found in archive: {}", path),
+                )
+            })?;
         self.extract_inner(path, record, &output_path)
     }
 
     #[inline(always)]
     pub fn extract_all<P: AsRef<Path>>(&self, output_path: P) -> std::io::Result<()> {
         let output_path = output_path.as_ref().canonicalize()?;
-        self.iter()
+        self.meta
+            .iter()
             .map(|RecordsItem { path, record, .. }| self.extract_inner(&path, record, &output_path))
             .collect()
     }
 
-    #[inline(always)]
-    fn record(&self, path: &BoxPath) -> Option<&Record> {
-        let path_chunks = path.iter().map(str::to_string).collect();
-        let mut finder = FindRecord::new(self.metadata(), path_chunks, &*self.metadata().root);
-        finder.next().and_then(|x| self.meta.record(x))
-    }
+    // #[inline(always)]
+    // fn record(&self, path: &BoxPath) -> Option<&Record> {
+    //     let path_chunks = path.iter().map(str::to_string).collect();
+    //     let mut finder = FindRecord::new(self.metadata(), path_chunks, &*self.metadata().root);
+    //     finder.next().and_then(|x| self.meta.record(x))
+    // }
 
     #[inline(always)]
     pub fn attr<S: AsRef<str>>(&self, path: &BoxPath, key: S) -> Option<&Vec<u8>> {
         let key = self.meta.attr_key(key.as_ref())?;
 
-        if let Some(record) = self.record(path) {
+        if let Some(record) = self.meta.inode(path).and_then(|x| self.meta.record(x)) {
             record.attrs().get(&key)
         } else {
             None
@@ -278,14 +158,7 @@ impl BoxFileReader {
 
     #[inline(always)]
     pub fn resolve_link(&self, link: &LinkRecord) -> std::io::Result<RecordsItem> {
-        let result = FindRecord::new(
-            self.metadata(),
-            link.target.iter().map(str::to_string).collect(),
-            &*self.metadata().root,
-        )
-        .next();
-
-        match result {
+        match self.meta.inode(&link.target) {
             Some(inode) => Ok(RecordsItem {
                 inode,
                 path: link.target.to_owned(),

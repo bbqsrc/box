@@ -62,6 +62,13 @@ pub fn sanitize<P: AsRef<Path>>(path: P) -> Option<Vec<String>> {
     Some(out)
 }
 
+impl AsRef<[u8]> for BoxPath {
+    #[inline(always)]
+    fn as_ref(&self) -> &[u8] {
+        self.0.as_bytes()
+    }
+}
+
 impl BoxPath {
     pub fn new<P: AsRef<Path>>(path: P) -> std::result::Result<BoxPath, IntoBoxPathError> {
         let out = sanitize(&path).ok_or(IntoBoxPathError::UnrepresentableStr)?;

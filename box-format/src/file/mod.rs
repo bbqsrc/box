@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::io::{prelude::*, SeekFrom};
 use std::num::NonZeroU64;
 
 #[repr(transparent)]
@@ -21,11 +20,11 @@ impl Inode {
         self.0.get()
     }
 }
+mod meta;
 #[cfg(feature = "reader")]
 pub mod reader;
 #[cfg(feature = "writer")]
 pub mod writer;
-mod meta;
 
 pub use self::meta::BoxMetadata;
 
@@ -37,6 +36,7 @@ mod tests {
     use crate::{compression::Compression, *};
     use std::collections::HashMap;
     use std::io::Cursor;
+    use std::io::{prelude::*, SeekFrom};
     use std::path::Path;
 
     fn create_test_box<F: AsRef<Path>>(filename: F) {
@@ -48,12 +48,14 @@ mod tests {
         cursor.seek(std::io::SeekFrom::Start(0)).unwrap();
 
         let mut writer = BoxFileWriter::create(filename).unwrap();
-        writer.insert(
-            Compression::Stored,
-            BoxPath::new("hello.txt").unwrap(),
-            &mut cursor,
-            HashMap::new(),
-        ).unwrap();
+        writer
+            .insert(
+                Compression::Stored,
+                BoxPath::new("hello.txt").unwrap(),
+                &mut cursor,
+                HashMap::new(),
+            )
+            .unwrap();
     }
 
     #[test]
@@ -176,5 +178,20 @@ mod tests {
         insert_impl("./insert_garbage_align7.box", |n| {
             BoxFileWriter::create_with_alignment(n, 7).unwrap()
         });
+    }
+
+    #[test]
+    fn read_index() {
+        use fst::IntoStreamer;
+        use fst::Streamer;
+
+        insert_impl("./read_index.box", |n| BoxFileWriter::create(n).unwrap());
+
+        let bf = BoxFileReader::open("./read_index.box").unwrap();
+        let fst = bf.meta.index.unwrap();
+        let mut stream = fst.into_stream();
+        while let Some((k, v)) = stream.next() {
+            println!("{:?}: {}", k, v);
+        }
     }
 }

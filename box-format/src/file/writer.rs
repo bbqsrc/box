@@ -101,7 +101,7 @@ impl BoxFileWriter {
                     let ptr = header.trailer.ok_or_else(|| {
                         std::io::Error::new(std::io::ErrorKind::Other, "no trailer found")
                     })?;
-                    let meta = read_trailer(&mut reader, ptr)?;
+                    let meta = read_trailer(&mut reader, ptr, path.as_ref())?;
                     (header, meta)
                 };
 
@@ -180,8 +180,8 @@ impl BoxFileWriter {
     }
 
     #[inline(always)]
-    fn iter(&self) -> super::reader::Records {
-        super::reader::Records::new(self.metadata(), &*self.metadata().root, None)
+    fn iter(&self) -> super::meta::Records {
+        super::meta::Records::new(self.metadata(), &*self.metadata().root, None)
     }
 
     #[inline(always)]
@@ -189,33 +189,27 @@ impl BoxFileWriter {
     where
         F: FnOnce(&mut Self, &BoxPath) -> std::io::Result<Record>,
     {
-        if path.depth() == 0 {
-            let record = create_record(self, &path)?;
-            let new_inode = self.meta.insert_record(record);
-            self.meta.root.push(new_inode);
-            return Ok(());
-        }
-
-        let result = super::reader::FindRecord::new(
-            self.metadata(),
-            path.parent().unwrap().iter().map(str::to_string).collect(),
-            &*self.meta.root,
-        )
-        .next();
-
-        match result {
-            None => return Err(todo!()),
-            Some(parent) => {
+        match path.parent() {
+            Some(parent) => match self.meta.inode(&parent) {
+                None => return Err(todo!()),
+                Some(parent) => {
+                    let record = create_record(self, &path)?;
+                    let new_inode = self.meta.insert_record(record);
+                    let parent = self
+                        .meta
+                        .record_mut(parent)
+                        .unwrap()
+                        .as_directory_mut()
+                        .unwrap();
+                    parent.inodes.push(new_inode);
+                    Ok(())
+                }
+            },
+            None => {
                 let record = create_record(self, &path)?;
                 let new_inode = self.meta.insert_record(record);
-                let parent = self
-                    .meta
-                    .record_mut(parent)
-                    .unwrap()
-                    .as_directory_mut()
-                    .unwrap();
-                parent.inodes.push(new_inode);
-                Ok(())
+                self.meta.root.push(new_inode);
+                return Ok(());
             }
         }
     }
