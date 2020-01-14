@@ -20,7 +20,6 @@ use super::{
     reader::{read_header, read_trailer},
     BoxMetadata,
 };
-use crate::file::Inode;
 
 pub struct BoxFileWriter {
     pub(crate) file: BufWriter<File>,
