@@ -1,0 +1,7 @@
+[workspace]
+members = [
+  "box",
+  "box-format",
+  "fusebox",
+]
+default-members = ["box"]
