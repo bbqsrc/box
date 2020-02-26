@@ -32,11 +32,10 @@ pub type AttrMap = HashMap<usize, Vec<u8>>;
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use crate::{compression::Compression, *};
     use std::collections::HashMap;
+    use std::io::prelude::*;
     use std::io::Cursor;
-    use std::io::{prelude::*, SeekFrom};
     use std::path::Path;
 
     fn create_test_box<F: AsRef<Path>>(filename: F) {

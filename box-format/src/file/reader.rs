@@ -190,7 +190,9 @@ impl BoxFileReader {
                 let out_file = std::io::BufWriter::new(out_file);
                 self.decompress(&file, out_file)
             }
-            Record::Directory(dir) => std::fs::create_dir_all(output_path.join(path.to_path_buf())),
+            Record::Directory(_dir) => {
+                std::fs::create_dir_all(output_path.join(path.to_path_buf()))
+            }
             #[cfg(unix)]
             Record::Link(link) => {
                 let link_target = self.resolve_link(link)?;

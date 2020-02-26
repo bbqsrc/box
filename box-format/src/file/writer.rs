@@ -4,7 +4,6 @@ use std::fs::File;
 use std::fs::OpenOptions;
 use std::io::{prelude::*, BufReader, BufWriter, Result, SeekFrom};
 use std::num::NonZeroU64;
-use std::time::SystemTime;
 use std::path::{Path, PathBuf};
 
 use memmap::MmapOptions;
@@ -132,7 +131,7 @@ impl BoxFileWriter {
                     meta: BoxMetadata::default(),
                 })
             })?;
-            
+
         boxfile.write_header()?;
 
         Ok(boxfile)
@@ -197,8 +196,12 @@ impl BoxFileWriter {
 
                 match self.meta.inode(&parent) {
                     None => {
-                        return Err(todo!())
-                    },
+                        let err = std::io::Error::new(
+                            std::io::ErrorKind::Other,
+                            format!("No inode found for path: {:?}", parent),
+                        );
+                        return Err(err);
+                    }
                     Some(parent) => {
                         let record = create_record(self, &path)?;
                         log::debug!("Inserting record into parent {:?}: {:?}", &parent, &record);
@@ -214,7 +217,7 @@ impl BoxFileWriter {
                         Ok(())
                     }
                 }
-            },
+            }
             None => {
                 let record = create_record(self, &path)?;
                 log::debug!("Inserting record into root: {:?}", &record);

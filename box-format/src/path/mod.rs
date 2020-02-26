@@ -1,6 +1,5 @@
-use relative_path::RelativePath;
 use std::{
-    fmt, fs,
+    fmt,
     path::{Path, PathBuf},
 };
 

@@ -1,8 +1,8 @@
 use super::AttrMap;
 use crate::file::Inode;
 use crate::path::BoxPath;
-use crate::Record;
 use crate::record::DirectoryRecord;
+use crate::Record;
 
 #[derive(Debug, Default)]
 pub struct BoxMetadata {
