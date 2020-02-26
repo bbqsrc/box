@@ -200,7 +200,7 @@ impl BoxFileWriter {
                             std::io::ErrorKind::Other,
                             format!("No inode found for path: {:?}", parent),
                         );
-                        return Err(err);
+                        Err(err)
                     }
                     Some(parent) => {
                         let record = create_record(self, &path)?;
@@ -223,7 +223,7 @@ impl BoxFileWriter {
                 log::debug!("Inserting record into root: {:?}", &record);
                 let new_inode = self.meta.insert_record(record);
                 self.meta.root.push(new_inode);
-                return Ok(());
+                Ok(())
             }
         }
     }
@@ -308,6 +308,11 @@ impl BoxFileWriter {
         Ok(&self.meta.inodes.last().unwrap().as_file().unwrap())
     }
 
+    /// # Safety
+    /// 
+    /// Use of memory maps is unsafe as modifications to the file could affect the operation
+    /// of the application. Ensure that the Box being operated on is not mutated while a memory
+    /// map is in use.
     pub unsafe fn data(&self, record: &FileRecord) -> std::io::Result<memmap::Mmap> {
         self.read_data(record)
     }

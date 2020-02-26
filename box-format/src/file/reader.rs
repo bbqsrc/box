@@ -168,6 +168,11 @@ impl BoxFileReader {
         Ok(file.take(record.length))
     }
 
+    /// # Safety
+    /// 
+    /// Use of memory maps is unsafe as modifications to the file could affect the operation
+    /// of the application. Ensure that the Box being operated on is not mutated while a memory
+    /// map is in use.
     #[inline(always)]
     pub unsafe fn memory_map(&self, record: &FileRecord) -> std::io::Result<memmap::Mmap> {
         MmapOptions::new()

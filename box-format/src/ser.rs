@@ -145,7 +145,7 @@ impl Serialize for BoxMetadata {
                 .expect("FST failed ot generate");
         }
 
-        writer.write_all(&mut builder.into_inner().unwrap())
+        writer.write_all(&builder.into_inner().unwrap())
     }
 }
 

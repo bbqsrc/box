@@ -146,7 +146,7 @@ impl<'a> Iterator for FindRecord<'a> {
             Some(v) => {
                 log::debug!("{:?}", v);
                 if self.query.is_empty() {
-                    return Some(v.0);
+                    Some(v.0)
                 } else if let Record::Directory(record) = v.1 {
                     let mut tmp = VecDeque::new();
                     std::mem::swap(&mut self.query, &mut tmp);
