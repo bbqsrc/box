@@ -384,7 +384,8 @@ fn extract(
 ) -> Result<()> {
     println!("{} {}", path.display(), output_path.display());
     let bf = BoxFileReader::open(path).context(CannotOpenArchive { path })?;
-    Ok(bf.extract_all(output_path).unwrap())
+    bf.extract_all(output_path).unwrap();
+    Ok(())
 }
 
 type ParentDirs = (BoxPath, HashMap<String, Vec<u8>>);
