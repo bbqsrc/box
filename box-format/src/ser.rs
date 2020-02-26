@@ -142,7 +142,7 @@ impl Serialize for BoxMetadata {
         for x in self.iter() {
             builder
                 .insert(x.path, x.inode.get())
-                .expect("FST failed ot generate");
+                .expect("FST failed to generate");
         }
 
         writer.write_all(&builder.into_inner().unwrap())

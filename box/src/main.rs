@@ -617,17 +617,15 @@ fn process_files<I: Iterator<Item = PathBuf>>(
                         })?;
                     known_dirs.insert(box_path);
                 }
-            } else {
-                if !known_files.contains(&box_path) {
-                    if verbose {
-                        println!("{} -> {} (link)", &file_path.display(), &target_path);
-                    }
-                    bf.link(box_path.clone(), target_path, metadata(&meta))
-                        .with_context(|| CannotCreateLink {
-                            path: box_path.clone(),
-                        })?;
-                    known_files.insert(box_path);
+            } else if !known_files.contains(&box_path) {
+                if verbose {
+                    println!("{} -> {} (link)", &file_path.display(), &target_path);
                 }
+                bf.link(box_path.clone(), target_path, metadata(&meta))
+                    .with_context(|| CannotCreateLink {
+                        path: box_path.clone(),
+                    })?;
+                known_files.insert(box_path);
             }
         } else if file_type.is_dir() {
             if !known_dirs.contains(&box_path) {
