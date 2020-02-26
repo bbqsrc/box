@@ -1,36 +1,54 @@
-# Box Open Standard Archive Format
+# Box - Open Standard Archive Format
 
 [![Actions Status](https://github.com/bbqsrc/box/workflows/Continuous%20Integration/badge.svg)](https://github.com/bbqsrc/box/actions)
 
-The `.box` file format is designed to be a modern successor to formats such as `.zip` and `.7z`,
-removing several painpoints:
+<table>
+<tr><td>⚠️<td>Box is under active development. Do not expect compatibility between versions until v1.0.
+</table>
 
-* **Cross-platform path support**, with relative paths only and platform-agnostic separators
-* **UTF-8 only, unicode normalised** path names and string data
-* Extensible with **space-efficient attributes in key-value pairs** for records and whole archives
-  * This mechanism is how Unix and Windows-specific file attributes are carried
-* Configurable optional **byte-alignment of files** (so you can memory map data easily)
-* Support for files and directories
-  * Support for symlinks, hard links and other platform-specific specialities is coming
-* **Multiple compression methods within a single archive**, including:
-  * Stored (no compress)
-  * Brotli
-  * DEFLATE
-  * Snappy
-  * xz
-  * Zstandard
-* Well-defined, **open specification** of file format (in progress)
+The `.box` file format and related tooling is designed to be a modern successor to formats such as 
+`.zip` and `.7z`, removing several painpoints and introducing modern features and expectations:
 
-See the `fusebox` repo for an example of the `.box` file format being used with a FUSE driver, also
-written in Rust. :smile:
+## Features
 
-## Support platforms
+<table>
+<tr><td>🌉<td><strong>Cross-platform path support</strong>, with relative paths only and platform-agnostic separators
+<tr><td>🌐<td><strong>UTF-8 only, Unicode normalised</strong> path names and string data
+<tr><td>🔍<td>FST-based indexing for <strong>extremely fast path lookups</strong>
+<tr><td>👩‍🚀<td>Extensible with <strong>space-efficient attributes in key-value pairs</strong> for records and whole archives
+<tr><td>↔️<td>Configurable optional <strong>byte-alignment of files</strong> to enable easy memory mapping
+<tr><td>💽<td><strong>Inode-based metadata</strong> for tree-based structuring, mapping closely to how filesystems work
+<tr><td>📁<td>Support for <strong>directories, files and links</strong>
+<tr><td>🗜️<td><strong>Multiple compression methods</strong> within a single archive
+<tr><td>🖥️<td>A <strong>truly cross-platform command line tool</strong>
+<tr><td>📜<td>Well-defined, <strong>open specification</strong> of file format (due before v1.0)
+</table>
+
+### Compression methods
+
+Currently supported compression methods:
+
+<ul>
+<li> Stored (no compression)
+<li> Brotli
+<li> DEFLATE
+<li> Snappy
+<li> xz
+<li> Zstandard
+</ul>
+
+## Supported platforms
 
 * Windows
 * macOS
 * Linux
 * iOS
 * Android
+
+---
+
+See the `fusebox` repo for an example of the `.box` file format being used with a FUSE driver, also
+written in Rust. :smile:
 
 ## License
 
