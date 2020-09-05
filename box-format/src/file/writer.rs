@@ -309,7 +309,7 @@ impl BoxFileWriter {
     }
 
     /// # Safety
-    /// 
+    ///
     /// Use of memory maps is unsafe as modifications to the file could affect the operation
     /// of the application. Ensure that the Box being operated on is not mutated while a memory
     /// map is in use.

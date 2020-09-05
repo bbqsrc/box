@@ -1,7 +1,7 @@
 Feature: Archive header
   The header consists of the following elements:
 
-    * Four (4) LE bytes, which in ASCII represent `BOX\0` named `magic_bytes`
+    * Four (4) LE bytes, which in ASCII represent `\xffBOX` named `magic_bytes`
     * a 32-bit unsigned LE integer field named `version`
     * a 64-bit unsigned LE integer field named `alignment`
     * a 64-bit unsigned LE non-zero integer field named `trailer`

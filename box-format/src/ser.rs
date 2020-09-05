@@ -137,15 +137,13 @@ impl Serialize for BoxMetadata {
         self.attrs.write(writer)?;
 
         // Write the index
-        let mut builder = fst::MapBuilder::memory();
+        let mut builder = pathtrie::PathTrie::new();
 
         for x in self.iter() {
-            builder
-                .insert(x.path, x.inode.get())
-                .expect("FST failed to generate");
+            builder.insert(x.path, x.inode.get())
         }
 
-        writer.write_all(&builder.into_inner().unwrap())
+        builder.write_fst(writer)
     }
 }
 

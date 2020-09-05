@@ -39,10 +39,10 @@ pub(super) fn read_trailer<R: Read + Seek, P: AsRef<Path>>(
     let mut meta = BoxMetadata::deserialize_owned(reader)?;
 
     // Load index if exists
-    let fst_mmap = unsafe { fst::raw::MmapReadOnly::open_path(path.as_ref())? };
-    let offset = reader.seek(SeekFrom::Current(0))? as usize;
-    let fst_mmap = fst_mmap.range(offset, fst_mmap.len() - offset);
-    let index = fst::raw::Fst::from_mmap(fst_mmap).ok().map(fst::Map::from);
+    let offset = reader.seek(SeekFrom::Current(0))?;
+    let file = std::fs::File::open(path.as_ref())?;
+    let fst_mmap = unsafe { memmap::MmapOptions::new().offset(offset).map(&file)? };
+    let index = pathtrie::fst::Fst::new(fst_mmap).ok();
     meta.index = index;
 
     Ok(meta)
@@ -169,7 +169,7 @@ impl BoxFileReader {
     }
 
     /// # Safety
-    /// 
+    ///
     /// Use of memory maps is unsafe as modifications to the file could affect the operation
     /// of the application. Ensure that the Box being operated on is not mutated while a memory
     /// map is in use.

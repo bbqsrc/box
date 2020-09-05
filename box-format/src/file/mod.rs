@@ -181,16 +181,11 @@ mod tests {
 
     #[test]
     fn read_index() {
-        use fst::IntoStreamer;
-        use fst::Streamer;
-
         insert_impl("./read_index.box", |n| BoxFileWriter::create(n).unwrap());
 
         let bf = BoxFileReader::open("./read_index.box").unwrap();
         let fst = bf.meta.index.unwrap();
-        let mut stream = fst.into_stream();
-        while let Some((k, v)) = stream.next() {
-            println!("{:?}: {}", k, v);
-        }
+
+        fst.get("nothing");
     }
 }

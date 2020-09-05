@@ -20,7 +20,7 @@ pub struct BoxMetadata {
     pub(crate) attrs: AttrMap,
 
     /// The index of paths to files.
-    pub(crate) index: Option<fst::Map>,
+    pub(crate) index: Option<pathtrie::fst::Fst<u64>>,
 }
 
 pub struct Records<'a> {
