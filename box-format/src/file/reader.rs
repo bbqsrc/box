@@ -1,6 +1,6 @@
 use std::fs::File;
-use std::fs::OpenOptions;
-use std::io::{prelude::*, BufReader, SeekFrom};
+use std::fs::{self, OpenOptions};
+use std::io::{prelude::*, BufReader, SeekFrom, BufWriter, self};
 use std::num::NonZeroU64;
 use std::path::{Path, PathBuf};
 
@@ -24,7 +24,7 @@ pub struct BoxFileReader {
 }
 
 #[inline(always)]
-pub(super) fn read_header<R: Read + Seek>(file: &mut R) -> std::io::Result<BoxHeader> {
+pub(super) fn read_header<R: Read + Seek>(file: &mut R) -> io::Result<BoxHeader> {
     file.seek(SeekFrom::Start(0))?;
     BoxHeader::deserialize_owned(file)
 }
@@ -34,13 +34,13 @@ pub(super) fn read_trailer<R: Read + Seek, P: AsRef<Path>>(
     reader: &mut R,
     ptr: NonZeroU64,
     path: P,
-) -> std::io::Result<BoxMetadata> {
+) -> io::Result<BoxMetadata> {
     reader.seek(SeekFrom::Start(ptr.get()))?;
     let mut meta = BoxMetadata::deserialize_owned(reader)?;
 
     // Load index if exists
     let offset = reader.seek(SeekFrom::Current(0))?;
-    let file = std::fs::File::open(path.as_ref())?;
+    let file = File::open(path.as_ref())?;
     let fst_mmap = unsafe { memmap::MmapOptions::new().offset(offset).map(&file)? };
     let index = pathtrie::fst::Fst::new(fst_mmap).ok();
     meta.index = index;
@@ -50,7 +50,7 @@ pub(super) fn read_trailer<R: Read + Seek, P: AsRef<Path>>(
 
 impl BoxFileReader {
     /// This will open an existing `.box` file for reading and writing, and error if the file is not valid.
-    pub fn open<P: AsRef<Path>>(path: P) -> std::io::Result<BoxFileReader> {
+    pub fn open<P: AsRef<Path>>(path: P) -> io::Result<BoxFileReader> {
         OpenOptions::new()
             .read(true)
             .open(path.as_ref())
@@ -61,7 +61,7 @@ impl BoxFileReader {
                     let mut reader = BufReader::new(&mut file);
                     let header = read_header(&mut reader)?;
                     let ptr = header.trailer.ok_or_else(|| {
-                        std::io::Error::new(std::io::ErrorKind::Other, "no trailer found")
+                        io::Error::new(io::ErrorKind::Other, "no trailer found")
                     })?;
                     let meta = read_trailer(&mut reader, ptr, path.as_ref())?;
 
@@ -100,29 +100,29 @@ impl BoxFileReader {
     }
 
     #[inline(always)]
-    pub fn decompress_value<V: Decompress>(&self, record: &FileRecord) -> std::io::Result<V> {
+    pub fn decompress_value<V: Decompress>(&self, record: &FileRecord) -> io::Result<V> {
         let mmap = unsafe { self.memory_map(record)? };
-        record.compression.decompress(std::io::Cursor::new(mmap))
+        record.compression.decompress(io::Cursor::new(mmap))
     }
 
     #[inline(always)]
-    pub fn decompress<W: Write>(&self, record: &FileRecord, dest: W) -> std::io::Result<()> {
+    pub fn decompress<W: Write>(&self, record: &FileRecord, dest: W) -> io::Result<()> {
         let mmap = unsafe { self.memory_map(record)? };
         record
             .compression
-            .decompress_write(std::io::Cursor::new(mmap), dest)
+            .decompress_write(io::Cursor::new(mmap), dest)
     }
 
     #[inline(always)]
-    pub fn extract<P: AsRef<Path>>(&self, path: &BoxPath, output_path: P) -> std::io::Result<()> {
+    pub fn extract<P: AsRef<Path>>(&self, path: &BoxPath, output_path: P) -> io::Result<()> {
         let output_path = output_path.as_ref().canonicalize()?;
         let record = self
             .meta
             .inode(path)
             .and_then(|x| self.meta.record(x))
             .ok_or_else(|| {
-                std::io::Error::new(
-                    std::io::ErrorKind::NotFound,
+                io::Error::new(
+                    io::ErrorKind::NotFound,
                     format!("Path not found in archive: {}", path),
                 )
             })?;
@@ -130,7 +130,7 @@ impl BoxFileReader {
     }
 
     #[inline(always)]
-    pub fn extract_all<P: AsRef<Path>>(&self, output_path: P) -> std::io::Result<()> {
+    pub fn extract_all<P: AsRef<Path>>(&self, output_path: P) -> io::Result<()> {
         let output_path = output_path.as_ref().canonicalize()?;
         self.meta
             .iter()
@@ -138,33 +138,26 @@ impl BoxFileReader {
             .collect()
     }
 
-    // #[inline(always)]
-    // fn record(&self, path: &BoxPath) -> Option<&Record> {
-    //     let path_chunks = path.iter().map(str::to_string).collect();
-    //     let mut finder = FindRecord::new(self.metadata(), path_chunks, &*self.metadata().root);
-    //     finder.next().and_then(|x| self.meta.record(x))
-    // }
-
     #[inline(always)]
-    pub fn resolve_link(&self, link: &LinkRecord) -> std::io::Result<RecordsItem> {
+    pub fn resolve_link(&self, link: &LinkRecord) -> io::Result<RecordsItem> {
         match self.meta.inode(&link.target) {
             Some(inode) => Ok(RecordsItem {
                 inode,
                 path: link.target.to_owned(),
                 record: self.meta.record(inode).unwrap(),
             }),
-            None => Err(std::io::Error::new(
-                std::io::ErrorKind::NotFound,
+            None => Err(io::Error::new(
+                io::ErrorKind::NotFound,
                 format!("No inode for link target: {}", link.target),
             )),
         }
     }
 
     #[inline(always)]
-    pub fn read_bytes(&self, record: &FileRecord) -> std::io::Result<std::io::Take<File>> {
+    pub fn read_bytes(&self, record: &FileRecord) -> io::Result<io::Take<File>> {
         let mut file = OpenOptions::new().read(true).open(&self.path)?;
 
-        file.seek(std::io::SeekFrom::Start(record.data.get()))?;
+        file.seek(io::SeekFrom::Start(record.data.get()))?;
         Ok(file.take(record.length))
     }
 
@@ -174,7 +167,7 @@ impl BoxFileReader {
     /// of the application. Ensure that the Box being operated on is not mutated while a memory
     /// map is in use.
     #[inline(always)]
-    pub unsafe fn memory_map(&self, record: &FileRecord) -> std::io::Result<memmap::Mmap> {
+    pub unsafe fn memory_map(&self, record: &FileRecord) -> io::Result<memmap::Mmap> {
         MmapOptions::new()
             .offset(record.data.get())
             .len(record.length as usize)
@@ -187,16 +180,16 @@ impl BoxFileReader {
         path: &BoxPath,
         record: &Record,
         output_path: &Path,
-    ) -> std::io::Result<()> {
+    ) -> io::Result<()> {
         println!("{} -> {}: {:?}", path, output_path.display(), record);
         match record {
             Record::File(file) => {
-                let out_file = std::fs::File::create(output_path.join(path.to_path_buf())).unwrap();
-                let out_file = std::io::BufWriter::new(out_file);
+                let out_file = File::create(output_path.join(path.to_path_buf())).unwrap();
+                let out_file = BufWriter::new(out_file);
                 self.decompress(&file, out_file)
             }
             Record::Directory(_dir) => {
-                std::fs::create_dir_all(output_path.join(path.to_path_buf()))
+                fs::create_dir_all(output_path.join(path.to_path_buf()))
             }
             #[cfg(unix)]
             Record::Link(link) => {

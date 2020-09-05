@@ -1,4 +1,4 @@
-// Copyright (c) 2019  Brendan Molloy <brendan@bbqsrc.net>
+// Copyright (c) 2019-2020  Brendan Molloy <brendan@bbqsrc.net>
 // Licensed under the EUPL 1.2 or later. See LICENSE file.
 
 use std::collections::{HashMap, HashSet};
@@ -11,9 +11,8 @@ use box_format::{
     path::PATH_PLATFORM_SEP, BoxFileReader, BoxFileWriter, BoxPath, Compression, Record,
 };
 use byteorder::{LittleEndian, ReadBytesExt};
-use jwalk::DirEntry;
-use snafu::ResultExt;
-use structopt::StructOpt;
+use jwalk::{ClientState, DirEntry};
+use structopt::{clap::AppSettings::*, StructOpt};
 
 type Result<T> = std::result::Result<T, Error>;
 
@@ -36,17 +35,14 @@ fn parse_compression(src: &str) -> std::result::Result<Compression, Error> {
         "xz" => Compression::Xz,
         "snappy" => Compression::Snappy,
         _ => {
-            return UnknownCompressionFormat {
+            return Err(Error::UnknownCompressionFormat {
                 name: src.to_string(),
-            }
-            .fail()
+            })
         }
     };
 
     Ok(compression)
 }
-
-use structopt::clap::AppSettings::*;
 
 #[inline(always)]
 #[allow(dead_code)] // used in Commands
@@ -57,37 +53,10 @@ fn stored() -> Compression {
 #[derive(Debug, StructOpt)]
 enum Commands {
     #[structopt(
-        name = "a",
-        visible_alias = "append",
-        about = "Append files to an existing archive"
+        name = "l",
+        alias = "list",
+        about = "List files of an archive [aliases: list]"
     )]
-    Append {
-        #[structopt(
-            short = "C",
-            long,
-            parse(try_from_str = parse_compression),
-            hide_default_value = true,
-            default_value = "stored",
-            possible_values = Compression::available_variants(),
-            help = "Compression to be used for a file [default: stored]"
-        )]
-        compression: Compression,
-
-        #[structopt(short, long, help = "Recursively handle provided paths")]
-        recursive: bool,
-
-        #[structopt(short = "H", long = "hidden", help = "Allow adding hidden files")]
-        allow_hidden: bool,
-
-        #[structopt(
-            name = "boxfile",
-            parse(from_os_str),
-            help = "Path to the .box archive"
-        )]
-        path: PathBuf,
-    },
-
-    #[structopt(name = "l", visible_alias = "list", about = "List files of an archive")]
     List {
         #[structopt(
             name = "boxfile",
@@ -97,7 +66,11 @@ enum Commands {
         path: PathBuf,
     },
 
-    #[structopt(name = "c", visible_alias = "create", about = "Create a new archive")]
+    #[structopt(
+        name = "c",
+        alias = "create",
+        about = "Create a new archive [aliases: create]"
+    )]
     Create {
         #[structopt(
             short = "A",
@@ -133,8 +106,8 @@ enum Commands {
 
     #[structopt(
         name = "x",
-        visible_alias = "extract",
-        about = "Extract files from an archive"
+        alias = "extract",
+        about = "Extract files from an archive [aliases: extract]"
     )]
     Extract {
         #[structopt(
@@ -156,8 +129,8 @@ enum Commands {
 
     #[structopt(
         name = "t",
-        visible_alias = "test",
-        about = "Test and verify integrity of archive"
+        alias = "test",
+        about = "Test and verify integrity of archive [aliases: test]"
     )]
     Test {
         #[structopt(
@@ -174,7 +147,7 @@ enum Commands {
     name = "box",
     about = "Brendan Molloy <https://github.com/bbqsrc/box>\nCreate, modify and extract box archives.",
     settings = &[SubcommandRequiredElseHelp, DisableHelpSubcommand, VersionlessSubcommands],
-    usage = "box (a|c|l|t|x) [FLAGS|OPTIONS] <boxfile> [files]..."
+    usage = "box (c|l|t|x) [FLAGS|OPTIONS] <boxfile> [files]..."
 )]
 struct CliOpts {
     #[structopt(short, long, help = "Show verbose output", global = true)]
@@ -190,50 +163,6 @@ struct CliOpts {
         global = true
     )]
     selected_files: Vec<PathBuf>,
-}
-
-fn append(
-    _path: PathBuf,
-    _selected_files: Vec<PathBuf>,
-    _compression: Compression,
-    _recursive: bool,
-    _allow_hidden: bool,
-    _verbose: bool,
-) -> Result<()> {
-    // let bf = BoxFileWriter::open(&path).context(CannotOpenArchive { path: &path })?;
-
-    // let (known_dirs, known_files) = {
-    //     (
-    //         bf.metadata()
-    //             .records()
-    //             .iter()
-    //             .filter_map(|x| x.as_directory())
-    //             .map(|r| r.path.clone())
-    //             .collect::<std::collections::HashSet<_>>(),
-    //         bf.metadata()
-    //             .records()
-    //             .iter()
-    //             .filter_map(|x| x.as_file())
-    //             .map(|r| r.path.clone())
-    //             .collect::<std::collections::HashSet<_>>(),
-    //     )
-    // };
-
-    // process_files(
-    //     selected_files.into_iter(),
-    //     recursive,
-    //     allow_hidden,
-    //     verbose,
-    //     compression,
-    //     bf,
-    //     known_dirs,
-    //     known_files,
-    // )
-    // .map_err(Box::new)
-    // .context(CannotAddFiles { path: &path })?;
-
-    // Ok(())
-    todo!()
 }
 
 macro_rules! add {
@@ -303,7 +232,10 @@ fn unix_acl(attr: Option<&[u8]>) -> String {
 fn list(path: &Path, _selected_files: Vec<PathBuf>, verbose: bool) -> Result<()> {
     use humansize::{file_size_opts as options, FileSize};
 
-    let bf = BoxFileReader::open(path).context(CannotOpenArchive { path })?;
+    let bf = BoxFileReader::open(path).map_err(|source| Error::CannotOpenArchive {
+        path: path.to_path_buf(),
+        source,
+    })?;
     let metadata = bf.metadata();
 
     if verbose {
@@ -383,16 +315,20 @@ fn extract(
     _verbose: bool,
 ) -> Result<()> {
     println!("{} {}", path.display(), output_path.display());
-    let bf = BoxFileReader::open(path).context(CannotOpenArchive { path })?;
-    bf.extract_all(output_path).unwrap();
-    Ok(())
+    let bf = BoxFileReader::open(path).map_err(|source| Error::CannotOpenArchive {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    bf.extract_all(output_path)
+        .map_err(|source| Error::CannotExtractFiles { source })
 }
 
 type ParentDirs = (BoxPath, HashMap<String, Vec<u8>>);
 
 fn collect_parent_directories<P: AsRef<Path>>(path: P) -> Result<Vec<ParentDirs>> {
-    let box_path = BoxPath::new(&path).context(CannotHandlePath {
-        path: path.as_ref(),
+    let box_path = BoxPath::new(&path).map_err(|source| Error::CannotHandlePath {
+        path: path.as_ref().to_path_buf(),
+        source,
     })?;
     let levels = box_path.depth();
 
@@ -406,11 +342,17 @@ fn collect_parent_directories<P: AsRef<Path>>(path: P) -> Result<Vec<ParentDirs>
         .take(levels)
         .map(|path: &Path| {
             Ok((
-                BoxPath::new(path).context(CannotHandlePath { path: &path })?,
+                BoxPath::new(path).map_err(|source| Error::CannotHandlePath {
+                    path: path.to_path_buf(),
+                    source,
+                })?,
                 metadata(
                     &path
                         .metadata()
-                        .context(CannotReadFileMetadata { path: &path })?,
+                        .map_err(|source| Error::CannotReadFileMetadata {
+                            path: path.to_path_buf(),
+                            source,
+                        })?,
                 ),
             ))
         })
@@ -469,7 +411,7 @@ fn metadata(meta: &std::fs::Metadata) -> HashMap<String, Vec<u8>> {
 
 #[inline(always)]
 #[cfg(not(windows))]
-fn is_hidden(entry: &DirEntry) -> bool {
+fn is_hidden<C: ClientState>(entry: &DirEntry<C>) -> bool {
     entry
         .file_name
         .to_str()
@@ -477,8 +419,9 @@ fn is_hidden(entry: &DirEntry) -> bool {
         .unwrap_or(false)
 }
 
+#[inline(always)]
 #[cfg(windows)]
-fn is_hidden(entry: &DirEntry) -> bool {
+fn is_hidden<C: ClientState>(entry: &DirEntry<C>) -> bool {
     match entry.metadata.as_ref() {
         Some(m) => m
             .as_ref()
@@ -526,12 +469,12 @@ fn process_files<I: Iterator<Item = PathBuf>>(
     mut known_files: HashSet<BoxPath>,
 ) -> Result<()> {
     let iter = iter.flat_map(|path| {
-        let mut walker = jwalk::WalkDir::new(&path).sort(true).preload_metadata(true);
+        let mut walker = jwalk::WalkDir::new(&path).sort(true);
         if !recursive {
-            walker = walker.num_threads(1).max_depth(0);
+            walker = walker.parallelism(jwalk::Parallelism::Serial).max_depth(0);
         }
         if !allow_hidden {
-            walker = walker.process_entries(|e| {
+            walker = walker.process_read_dir(|_, e| {
                 e.retain(|entry| match entry {
                     Ok(v) => !is_hidden(&v),
                     _ => true,
@@ -542,22 +485,28 @@ fn process_files<I: Iterator<Item = PathBuf>>(
     });
 
     for entry in iter {
-        let entry = entry.context(CannotProcessFile)?;
-        let file_type = entry.file_type.context(CannotProcessFile)?;
+        let entry = entry.map_err(|source| Error::CannotProcessDirEntry { source })?;
+        let file_type = entry.file_type;
+        let file_path = entry.parent_path.join(&entry.file_name);
         let meta = entry
-            .metadata
-            .expect("read file metadata")
-            .context(CannotProcessFile)?;
-        log::debug!("Path: {:?}", entry.parent_spec.path);
-        let file_path = entry.parent_spec.path.join(&entry.file_name);
-        log::debug!("File Path: {:?}", &file_path);
+            .metadata()
+            .map_err(|source| Error::CannotProcessFile {
+                path: file_path.to_path_buf(),
+                source,
+            })?;
+        tracing::debug!("File Path: {:?}", &file_path);
         let canonical_dir = std::env::current_dir()
-            .unwrap()
-            .join(&entry.parent_spec.path)
-            .canonicalize()
-            .context(CannotProcessFile)?;
+            .map_err(|source| Error::CannotGetCurrentDir { source })
+            .and_then(|p| {
+                p.join(&entry.parent_path).canonicalize().map_err(|source| {
+                    Error::CannotCanonicalizePath {
+                        path: file_path.to_path_buf(),
+                        source,
+                    }
+                })
+            })?;
         let canonical_path = canonical_dir.join(&entry.file_name);
-        log::debug!("Canonical Path: {:?}", &canonical_path);
+        tracing::debug!("Canonical Path: {:?}", &canonical_path);
 
         if bf.path() == canonical_path {
             continue;
@@ -565,47 +514,54 @@ fn process_files<I: Iterator<Item = PathBuf>>(
 
         let parents = collect_parent_directories(&*file_path)
             .map_err(Box::new)
-            .with_context(|| CannotProcessParents {
+            .map_err(|source| Error::CannotProcessParents {
                 path: file_path.clone(),
+                source,
             })?;
-        let box_path = BoxPath::new(&file_path).context(CannotHandlePath { path: &file_path })?;
+        let box_path = BoxPath::new(&file_path).map_err(|source| Error::CannotHandlePath {
+            path: file_path.to_path_buf(),
+            source,
+        })?;
 
         for (parent, meta) in parents.into_iter() {
             if !known_dirs.contains(&parent) {
                 bf.mkdir(parent.clone(), meta)
-                    .with_context(|| CannotCreateDirectory {
+                    .map_err(|source| Error::CannotCreateDirectory {
                         path: parent.clone(),
+                        source,
                     })?;
                 known_dirs.insert(parent);
             }
         }
 
         if file_type.is_symlink() {
-            let target_path = std::fs::read_link(&file_path).context(CannotProcessFile)?;
-            println!("XXX {:?}", &target_path);
+            let target_path =
+                std::fs::read_link(&file_path).map_err(|source| Error::CannotReadLink {
+                    path: file_path.to_path_buf(),
+                    source,
+                })?;
+            tracing::trace!("XXX {:?}", &target_path);
 
             // Get relative path from current ref
-            let target_path = entry.parent_spec.path.join(&target_path);
-            println!("{:?}", &target_path);
+            let target_path = entry.parent_path.join(&target_path);
+            tracing::trace!("{:?}", &target_path);
 
             // Ensure it's not also a symlink
-            let _ = std::fs::canonicalize(&target_path).unwrap();
-            println!("{:?} {:?}", &target_path, &canonical_path);
-
-            // let target_path = pathdiff::diff_paths(&target_path, &canonical_path).unwrap();
-            // println!("YYY {:?}", &target_path);
-            // println!("PPP {:?}", entry.parent_spec.path);
+            let _ = std::fs::canonicalize(&target_path).map_err(|source| {
+                Error::CannotCanonicalizePath {
+                    path: file_path.to_path_buf(),
+                    source,
+                }
+            })?;
+            tracing::trace!("{:?} {:?}", &target_path, &canonical_path);
 
             let target_path =
-                BoxPath::new(&target_path).context(CannotHandlePath { path: &target_path })?;
-            // println!("ZZZ {:?}", &archive_base_path);
-            // let target_path = pathdiff::diff_paths(canonical_path.join(&target_path), &archive_base_path).unwrap();
+                BoxPath::new(&target_path).map_err(|source| Error::CannotHandlePath {
+                    path: target_path.to_path_buf(),
+                    source,
+                })?;
 
-            println!("XXX {:?}", &target_path);
-            // let target_box_path = match BoxPath::new(&target_path) {
-            //     Ok(v) => v,
-            //     Err(e) => { eprintln!("{:?}", e); panic!(); }
-            // };
+            tracing::trace!("XXX {:?}", &target_path);
 
             if file_type.is_dir() {
                 if !known_dirs.contains(&box_path) {
@@ -613,8 +569,9 @@ fn process_files<I: Iterator<Item = PathBuf>>(
                         println!("{} -> {} (link)", &file_path.display(), &target_path);
                     }
                     bf.link(box_path.clone(), target_path, metadata(&meta))
-                        .with_context(|| CannotCreateLink {
+                        .map_err(|source| Error::CannotCreateLink {
                             path: box_path.clone(),
+                            source,
                         })?;
                     known_dirs.insert(box_path);
                 }
@@ -623,8 +580,9 @@ fn process_files<I: Iterator<Item = PathBuf>>(
                     println!("{} -> {} (link)", &file_path.display(), &target_path);
                 }
                 bf.link(box_path.clone(), target_path, metadata(&meta))
-                    .with_context(|| CannotCreateLink {
+                    .map_err(|source| Error::CannotCreateLink {
                         path: box_path.clone(),
+                        source,
                     })?;
                 known_files.insert(box_path);
             }
@@ -634,18 +592,24 @@ fn process_files<I: Iterator<Item = PathBuf>>(
                     println!("{} (directory)", &file_path.display());
                 }
                 bf.mkdir(box_path.clone(), metadata(&meta))
-                    .with_context(|| CannotCreateDirectory {
+                    .map_err(|source| Error::CannotCreateDirectory {
                         path: box_path.clone(),
+                        source,
                     })?;
                 known_dirs.insert(box_path);
             }
         } else if !known_files.contains(&box_path) {
-            let file =
-                std::fs::File::open(&file_path).context(CannotOpenFile { path: &file_path })?;
+            let file = std::fs::File::open(&file_path).map_err(|source| Error::CannotOpenFile {
+                path: file_path.to_path_buf(),
+                source,
+            })?;
             let mut file = BufReader::new(Crc32Reader::new(file));
             let record = bf
                 .insert(compression, box_path.clone(), &mut file, metadata(&meta))
-                .context(CannotAddFile { path: &file_path })?;
+                .map_err(|source| Error::CannotAddFile {
+                    path: file_path.to_path_buf(),
+                    source,
+                })?;
             if verbose {
                 let len = if record.decompressed_length == 0 {
                     100.0f64
@@ -657,15 +621,19 @@ fn process_files<I: Iterator<Item = PathBuf>>(
 
             let hash = file.into_inner().finalize().to_le_bytes().to_vec();
             bf.set_attr(&box_path, "crc32", hash)
-                .context(CannotAddChecksum { path: &file_path })?;
+                .map_err(|source| Error::CannotAddChecksum {
+                    path: file_path,
+                    source,
+                })?;
 
             known_files.insert(box_path);
         }
     }
 
-    bf.finish().unwrap();
-
-    Ok(())
+    let path = bf.path().to_path_buf();
+    bf.finish()
+        .map_err(|source| Error::CannotCreateFile { path, source })
+        .map(|_| {})
 }
 
 fn create(
@@ -681,7 +649,10 @@ fn create(
         None => BoxFileWriter::create(&path),
         Some(alignment) => BoxFileWriter::create_with_alignment(&path, alignment.get()),
     }
-    .context(CannotCreateArchive { path: &path })?;
+    .map_err(|source| Error::CannotCreateArchive {
+        path: path.to_path_buf(),
+        source,
+    })?;
 
     let now = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
@@ -689,7 +660,12 @@ fn create(
         .as_secs()
         .to_le_bytes();
 
-    bf.set_file_attr("created", now.to_vec()).unwrap();
+    bf.set_file_attr("created", now.to_vec())
+        .map_err(|source| Error::CannotSetAttribute {
+            key: "created".to_string(),
+            value: now.to_vec(),
+            source,
+        })?;
 
     process_files(
         selected_files.into_iter(),
@@ -702,30 +678,20 @@ fn create(
         HashSet::new(),
     )
     .map_err(Box::new)
-    .context(CannotAddFiles { path: &path })?;
+    .map_err(|source| Error::CannotAddFiles {
+        path: path.to_path_buf(),
+        source,
+    })?;
 
     Ok(())
 }
 
 fn main() -> Result<()> {
-    env_logger::init();
+    tracing_subscriber::fmt::init();
 
     let opts = CliOpts::from_args();
 
     match opts.cmd {
-        Commands::Append {
-            path,
-            compression,
-            recursive,
-            allow_hidden,
-        } => append(
-            path,
-            opts.selected_files,
-            compression,
-            recursive,
-            allow_hidden,
-            opts.verbose,
-        ),
         Commands::List { path } => list(&path, opts.selected_files, opts.verbose),
         Commands::Extract { path, output_path } => extract(
             &path,
@@ -752,100 +718,139 @@ fn main() -> Result<()> {
     }
 }
 
-#[derive(snafu::Snafu, snafu_cli_debug::SnafuCliDebug)]
+#[derive(Debug, thiserror::Error)]
 enum Error {
-    #[snafu(display("Unknown compression method `{}`", name))]
-    UnknownCompressionFormat {
-        name: String,
-        backtrace: snafu::Backtrace,
-    },
-    #[snafu(display("Cannot handle path `{}`", path.display()))]
+    #[error("Unknown compression method `{name}`")]
+    UnknownCompressionFormat { name: String },
+
+    #[error("Cannot handle path `{}`", .path.display())]
     CannotHandlePath {
         path: PathBuf,
+        #[source]
         source: box_format::path::IntoBoxPathError,
-        backtrace: snafu::Backtrace,
     },
-    #[snafu(display("Cannot open archive `{}`", path.display()))]
+
+    #[error("Cannot open archive `{}`", .path.display())]
     CannotOpenArchive {
         path: PathBuf,
+        #[source]
         source: std::io::Error,
-        backtrace: snafu::Backtrace,
     },
-    #[snafu(display("Cannot open file `{}`", path.display()))]
+
+    #[error("Cannot open file `{}`", path.display())]
     CannotOpenFile {
         path: PathBuf,
+        #[source]
         source: std::io::Error,
-        backtrace: snafu::Backtrace,
     },
-    #[snafu(display("Cannot create directory `{}`", path))]
+
+    #[error("Cannot create directory `{}`", path)]
     CannotCreateDirectory {
         path: BoxPath,
+        #[source]
         source: std::io::Error,
-        backtrace: snafu::Backtrace,
     },
-    #[snafu(display("Cannot create link `{}`", path))]
+
+    #[error("Cannot create link `{}`", path)]
     CannotCreateLink {
         path: BoxPath,
+        #[source]
         source: std::io::Error,
-        backtrace: snafu::Backtrace,
     },
-    #[snafu(display("Cannot read metadata of file `{}`", path.display()))]
+
+    #[error("Cannot read metadata of file `{}`", path.display())]
     CannotReadFileMetadata {
         path: PathBuf,
+        #[source]
         source: std::io::Error,
-        backtrace: snafu::Backtrace,
     },
-    #[snafu(display("Cannot add file to archive `{}`", path.display()))]
+
+    #[error("Cannot add file to archive `{}`", path.display())]
     CannotAddFile {
         path: PathBuf,
+        #[source]
         source: std::io::Error,
-        backtrace: snafu::Backtrace,
     },
-    #[snafu(display("Cannot create file `{}`", path.display()))]
+
+    #[error("Cannot create file `{}`", path.display())]
     CannotCreateFile {
         path: PathBuf,
+        #[source]
         source: std::io::Error,
-        backtrace: snafu::Backtrace,
     },
-    #[snafu(display("Cannot add checksum for file `{}`", path.display()))]
+
+    #[error("Cannot add checksum for file `{}`", path.display())]
     CannotAddChecksum {
         path: PathBuf,
+        #[source]
         source: std::io::Error,
-        backtrace: snafu::Backtrace,
     },
-    #[snafu(display("Cannot decompress file `{}` to `{}`", archive_path, target_path.display()))]
-    CannotDecompressFile {
-        archive_path: BoxPath,
-        target_path: PathBuf,
-        source: std::io::Error,
-        backtrace: snafu::Backtrace,
-    },
-    #[snafu(display("Cannot create archive `{}`", path.display()))]
+
+    #[error("Cannot create archive `{}`", path.display())]
     CannotCreateArchive {
         path: PathBuf,
+        #[source]
         source: std::io::Error,
-        backtrace: snafu::Backtrace,
     },
-    #[snafu(display("Cannot process parents `{}`", path.display()))]
+
+    #[error("Cannot process parents `{}`", path.display())]
     CannotProcessParents {
         path: PathBuf,
+        #[source]
         source: Box<Error>,
-        backtrace: snafu::Backtrace,
     },
-    #[snafu(display("Cannot add files to archive `{}`", path.display()))]
+
+    #[error("Cannot add files to archive `{}`", .path.display())]
     CannotAddFiles {
         path: PathBuf,
+        #[source]
         source: Box<Error>,
-        backtrace: snafu::Backtrace,
     },
-    #[snafu(display("Cannot process file"))]
+
+    #[error("Cannot directory entry")]
+    CannotProcessDirEntry {
+        #[source]
+        source: jwalk::Error,
+    },
+
+    #[error("Cannot process file `{}`", .path.display())]
     CannotProcessFile {
-        source: std::io::Error,
-        backtrace: snafu::Backtrace,
-    },
-    #[snafu(display("Cowardly refusing to recursively archive self. `{}` is part of selected files", path.display()))]
-    WillNotArchiveSelf {
         path: PathBuf,
-        backtrace: snafu::Backtrace,
+        #[source]
+        source: jwalk::Error,
+    },
+
+    #[error("Cannot canonicalize path `{}`", .path.display())]
+    CannotCanonicalizePath {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+
+    #[error("Cannot read link  `{}`", .path.display())]
+    CannotReadLink {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+
+    #[error("Cannot extract files")]
+    CannotExtractFiles {
+        #[source]
+        source: std::io::Error,
+    },
+
+    #[error("Cannot set attribute `{key}` to value `{value:x?}`")]
+    CannotSetAttribute {
+        key: String,
+        value: Vec<u8>,
+        #[source]
+        source: std::io::Error,
+    },
+
+    #[error("Cannot get current directory`")]
+    CannotGetCurrentDir {
+        #[source]
+        source: std::io::Error,
     },
 }
