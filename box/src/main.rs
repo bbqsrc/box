@@ -25,7 +25,9 @@ use std::os::windows::fs::MetadataExt;
 mod winapi {
     pub const FILE_ATTRIBUTE_HIDDEN: u32 = 2;
 }
-
+#[cfg(windows)]
+const SELF_EXTRACTOR_BIN: &'static [u8] = include_bytes!("../../target/release/selfextract.exe");
+#[cfg(not(windows))]
 const SELF_EXTRACTOR_BIN: &'static [u8] = include_bytes!("../../target/release/selfextract");
 const DIVIDER_UUID: u128 = 0xaae8ea9c35484ee4bf28f1a25a6b3c6c;
 
@@ -428,11 +430,8 @@ fn is_hidden<C: ClientState>(entry: &DirEntry<C>) -> bool {
 #[inline(always)]
 #[cfg(windows)]
 fn is_hidden<C: ClientState>(entry: &DirEntry<C>) -> bool {
-    match entry.metadata.as_ref() {
-        Some(m) => m
-            .as_ref()
-            .map(|m| (m.file_attributes() & winapi::FILE_ATTRIBUTE_HIDDEN) != 0)
-            .unwrap_or(false),
+    match entry.metadata().ok() {
+        Some(m) => (m.file_attributes() & winapi::FILE_ATTRIBUTE_HIDDEN) != 0,
         None => false,
     }
 }
