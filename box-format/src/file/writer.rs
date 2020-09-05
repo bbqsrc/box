@@ -97,11 +97,11 @@ impl BoxFileWriter {
                 // If header is invalid, we're not even loading a .box file.
                 let (header, meta) = {
                     let mut reader = BufReader::new(&mut file);
-                    let header = read_header(&mut reader)?;
+                    let header = read_header(&mut reader, 0)?;
                     let ptr = header.trailer.ok_or_else(|| {
                         std::io::Error::new(std::io::ErrorKind::Other, "no trailer found")
                     })?;
-                    let meta = read_trailer(&mut reader, ptr, path.as_ref())?;
+                    let meta = read_trailer(&mut reader, ptr, path.as_ref(), 0)?;
                     (header, meta)
                 };
 

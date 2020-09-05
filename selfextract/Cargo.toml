@@ -1,0 +1,10 @@
+[package]
+name = "selfextract"
+version = "0.1.0"
+authors = ["Brendan Molloy <brendan@bbqsrc.net>"]
+edition = "2018"
+
+[dependencies]
+box-format = { path = "../box-format", default-features = false, features = ["reader", "xz"] }
+memmap = "0.7"
+twoway = "0.2.1"

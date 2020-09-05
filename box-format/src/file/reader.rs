@@ -21,11 +21,12 @@ pub struct BoxFileReader {
     pub(crate) path: PathBuf,
     pub(crate) header: BoxHeader,
     pub(crate) meta: BoxMetadata,
+    pub(crate) offset: u64,
 }
 
 #[inline(always)]
-pub(super) fn read_header<R: Read + Seek>(file: &mut R) -> io::Result<BoxHeader> {
-    file.seek(SeekFrom::Start(0))?;
+pub(super) fn read_header<R: Read + Seek>(file: &mut R, offset: u64) -> io::Result<BoxHeader> {
+    file.seek(SeekFrom::Start(offset + 0))?;
     BoxHeader::deserialize_owned(file)
 }
 
@@ -34,8 +35,9 @@ pub(super) fn read_trailer<R: Read + Seek, P: AsRef<Path>>(
     reader: &mut R,
     ptr: NonZeroU64,
     path: P,
+    offset: u64,
 ) -> io::Result<BoxMetadata> {
-    reader.seek(SeekFrom::Start(ptr.get()))?;
+    reader.seek(SeekFrom::Start(offset + ptr.get()))?;
     let mut meta = BoxMetadata::deserialize_owned(reader)?;
 
     // Load index if exists
@@ -50,7 +52,7 @@ pub(super) fn read_trailer<R: Read + Seek, P: AsRef<Path>>(
 
 impl BoxFileReader {
     /// This will open an existing `.box` file for reading and writing, and error if the file is not valid.
-    pub fn open<P: AsRef<Path>>(path: P) -> io::Result<BoxFileReader> {
+    pub fn open_at_offset<P: AsRef<Path>>(path: P, offset: u64) -> io::Result<BoxFileReader> {
         OpenOptions::new()
             .read(true)
             .open(path.as_ref())
@@ -59,11 +61,11 @@ impl BoxFileReader {
                 // If header is invalid, we're not even loading a .box file.
                 let (header, meta) = {
                     let mut reader = BufReader::new(&mut file);
-                    let header = read_header(&mut reader)?;
+                    let header = read_header(&mut reader, offset)?;
                     let ptr = header.trailer.ok_or_else(|| {
                         io::Error::new(io::ErrorKind::Other, "no trailer found")
                     })?;
-                    let meta = read_trailer(&mut reader, ptr, path.as_ref())?;
+                    let meta = read_trailer(&mut reader, ptr, path.as_ref(), offset)?;
 
                     (header, meta)
                 };
@@ -73,10 +75,17 @@ impl BoxFileReader {
                     path: path.as_ref().to_path_buf().canonicalize()?,
                     header,
                     meta,
+                    offset,
                 };
 
                 Ok(f)
             })?
+    }
+
+    /// This will open an existing `.box` file for reading and writing, and error if the file is not valid.
+    #[inline]
+    pub fn open<P: AsRef<Path>>(path: P) -> io::Result<BoxFileReader> {
+        Self::open_at_offset(path, 0)
     }
 
     #[inline(always)]
@@ -157,7 +166,7 @@ impl BoxFileReader {
     pub fn read_bytes(&self, record: &FileRecord) -> io::Result<io::Take<File>> {
         let mut file = OpenOptions::new().read(true).open(&self.path)?;
 
-        file.seek(io::SeekFrom::Start(record.data.get()))?;
+        file.seek(io::SeekFrom::Start(self.offset + record.data.get()))?;
         Ok(file.take(record.length))
     }
 
@@ -169,7 +178,7 @@ impl BoxFileReader {
     #[inline(always)]
     pub unsafe fn memory_map(&self, record: &FileRecord) -> io::Result<memmap::Mmap> {
         MmapOptions::new()
-            .offset(record.data.get())
+            .offset(self.offset + record.data.get())
             .len(record.length as usize)
             .map(self.file.get_ref())
     }

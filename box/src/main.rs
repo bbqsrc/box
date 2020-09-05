@@ -2,7 +2,7 @@
 // Licensed under the EUPL 1.2 or later. See LICENSE file.
 
 use std::collections::{HashMap, HashSet};
-use std::io::{BufReader, Read};
+use std::io::{BufReader, Read, BufWriter, Write};
 use std::num::NonZeroU64;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
@@ -25,6 +25,9 @@ use std::os::windows::fs::MetadataExt;
 mod winapi {
     pub const FILE_ATTRIBUTE_HIDDEN: u32 = 2;
 }
+
+const SELF_EXTRACTOR_BIN: &'static [u8] = include_bytes!("../../target/release/selfextract");
+const DIVIDER_UUID: u128 = 0xaae8ea9c35484ee4bf28f1a25a6b3c6c;
 
 fn parse_compression(src: &str) -> std::result::Result<Compression, Error> {
     let compression = match src {
@@ -95,6 +98,9 @@ enum Commands {
 
         #[structopt(short = "H", long = "hidden", help = "Allow adding hidden files")]
         allow_hidden: bool,
+
+        #[structopt(short = "S", long = "self-extracting", help = "Generate a self-extracting archive")]
+        is_self_extracting: bool,
 
         #[structopt(
             name = "boxfile",
@@ -637,14 +643,21 @@ fn process_files<I: Iterator<Item = PathBuf>>(
 }
 
 fn create(
-    path: PathBuf,
+    mut path: PathBuf,
     selected_files: Vec<PathBuf>,
     compression: Compression,
     recursive: bool,
     allow_hidden: bool,
     verbose: bool,
     alignment: Option<NonZeroU64>,
+    is_self_extracting: bool,
 ) -> Result<()> {
+    let original_path = path.clone();
+
+    // if is_self_extracting {
+    path.set_file_name(format!("{}.tmp", Path::new(path.file_name().unwrap()).display()));
+    // }
+    
     let mut bf = match alignment {
         None => BoxFileWriter::create(&path),
         Some(alignment) => BoxFileWriter::create_with_alignment(&path, alignment.get()),
@@ -682,6 +695,34 @@ fn create(
         path: path.to_path_buf(),
         source,
     })?;
+    
+    if is_self_extracting {
+        let tmp_path = path;
+        let stem = tmp_path.file_stem().unwrap();
+        let mut path = tmp_path.to_path_buf();
+
+        #[cfg(unix)]
+        path.set_file_name(stem);
+        #[cfg(windows)]
+        path.set_file_name(format!("{}.exe", Path::new(stem).display()));
+
+        let file = std::fs::File::create(&path).unwrap();
+        let mut writer = BufWriter::new(file);
+
+        let tmp_file = std::fs::File::open(&tmp_path).unwrap();
+        let mut reader = BufReader::new(tmp_file);
+
+        writer.write_all(&SELF_EXTRACTOR_BIN).unwrap();
+        writer.write_all(&DIVIDER_UUID.to_le_bytes()).unwrap();
+        std::io::copy(&mut reader, &mut writer).unwrap();
+
+        drop(reader);
+        drop(writer);
+
+        std::fs::remove_file(tmp_path).unwrap();
+    } else {
+        std::fs::rename(path, original_path).unwrap();
+    }
 
     Ok(())
 }
@@ -705,6 +746,7 @@ fn main() -> Result<()> {
             compression,
             recursive,
             allow_hidden,
+            is_self_extracting,
         } => create(
             path,
             opts.selected_files,
@@ -713,6 +755,7 @@ fn main() -> Result<()> {
             allow_hidden,
             opts.verbose,
             alignment,
+            is_self_extracting,
         ),
         Commands::Test { .. } => unimplemented!(),
     }
