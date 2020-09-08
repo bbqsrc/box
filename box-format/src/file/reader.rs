@@ -1,6 +1,6 @@
 use std::fs::File;
 use std::fs::{self, OpenOptions};
-use std::io::{prelude::*, BufReader, SeekFrom, BufWriter, self};
+use std::io::{self, prelude::*, BufReader, BufWriter, SeekFrom};
 use std::num::NonZeroU64;
 use std::path::{Path, PathBuf};
 
@@ -62,9 +62,9 @@ impl BoxFileReader {
                 let (header, meta) = {
                     let mut reader = BufReader::new(&mut file);
                     let header = read_header(&mut reader, offset)?;
-                    let ptr = header.trailer.ok_or_else(|| {
-                        io::Error::new(io::ErrorKind::Other, "no trailer found")
-                    })?;
+                    let ptr = header
+                        .trailer
+                        .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "no trailer found"))?;
                     let meta = read_trailer(&mut reader, ptr, path.as_ref(), offset)?;
 
                     (header, meta)
@@ -184,12 +184,7 @@ impl BoxFileReader {
     }
 
     #[inline(always)]
-    fn extract_inner(
-        &self,
-        path: &BoxPath,
-        record: &Record,
-        output_path: &Path,
-    ) -> io::Result<()> {
+    fn extract_inner(&self, path: &BoxPath, record: &Record, output_path: &Path) -> io::Result<()> {
         println!("{} -> {}: {:?}", path, output_path.display(), record);
         match record {
             Record::File(file) => {
@@ -197,9 +192,7 @@ impl BoxFileReader {
                 let out_file = BufWriter::new(out_file);
                 self.decompress(&file, out_file)
             }
-            Record::Directory(_dir) => {
-                fs::create_dir_all(output_path.join(path.to_path_buf()))
-            }
+            Record::Directory(_dir) => fs::create_dir_all(output_path.join(path.to_path_buf())),
             #[cfg(unix)]
             Record::Link(link) => {
                 let link_target = self.resolve_link(link)?;

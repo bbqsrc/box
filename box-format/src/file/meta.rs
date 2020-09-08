@@ -3,6 +3,7 @@ use crate::file::Inode;
 use crate::path::BoxPath;
 use crate::record::DirectoryRecord;
 use crate::Record;
+use std::collections::VecDeque;
 
 #[derive(Debug, Default)]
 pub struct BoxMetadata {
@@ -77,12 +78,10 @@ impl<'a> Iterator for Records<'a> {
             None => return None,
         };
 
-        let base_path = self
-            .base_path
-            .as_ref()
-            .map(|x| x.join(&record.name()).unwrap())
-            .or_else(|| BoxPath::new(&record.name()).ok())
-            .unwrap();
+        let base_path = match self.base_path.as_ref() {
+            Some(x) => x.join_unchecked(&record.name()),
+            None => BoxPath(record.name().to_string()),
+        };
 
         if let Record::Directory(record) = record {
             self.cur_dir = Some(Box::new(Records::new(
@@ -100,8 +99,6 @@ impl<'a> Iterator for Records<'a> {
         })
     }
 }
-
-use std::collections::VecDeque;
 
 pub struct FindRecord<'a> {
     meta: &'a BoxMetadata,

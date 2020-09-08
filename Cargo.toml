@@ -3,6 +3,6 @@ members = [
   "box",
   "box-format",
   "fusebox",
-  "selfextract",
 ]
+exclude = ["selfextract"]
 default-members = ["box"]

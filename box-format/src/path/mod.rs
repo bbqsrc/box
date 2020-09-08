@@ -112,6 +112,10 @@ impl BoxPath {
         Self::new(&self.to_path_buf().join(tail))
     }
 
+    pub(crate) fn join_unchecked(&self, tail: &str) -> BoxPath {
+        BoxPath(format!("{}{}{}", self.0, PATH_BOX_SEP, tail))
+    }
+
     pub fn iter(&self) -> std::str::Split<'_, &str> {
         self.0.split(PATH_BOX_SEP)
     }

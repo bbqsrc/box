@@ -1,12 +1,17 @@
 const DIVIDER_UUID: u128 = 0xaae8ea9c35484ee4bf28f1a25a6b3c6c;
 
 fn main() {
+    std::process::exit(run());
+}
+
+#[inline(always)]
+fn run() -> i32 {
     let current_dir = match std::env::current_dir() {
         Ok(path) => path,
         Err(e) => {
             eprintln!("ERROR: Could not access current directory!");
-            eprintln!("{:?}", e);
-            std::process::exit(1);
+            // eprintln!("{:?}", e);
+            return 1;
         }
     };
 
@@ -15,7 +20,7 @@ fn main() {
         Err(e) => {
             eprintln!("ERROR: Could not access self-extractor for opening!");
             eprintln!("{:?}", e);
-            std::process::exit(1);
+            return 1;
         }
     };
 
@@ -24,7 +29,7 @@ fn main() {
         Err(e) => {
             eprintln!("ERROR: Could not access self-extractor for opening!");
             eprintln!("{:?}", e);
-            std::process::exit(1);
+            return 1;
         }
     };
 
@@ -33,7 +38,7 @@ fn main() {
         Err(e) => {
             eprintln!("ERROR: Could not access self-extractor for opening!");
             eprintln!("{:?}", e);
-            std::process::exit(1);
+            return 1;
         }
     };
     
@@ -42,7 +47,7 @@ fn main() {
         Some(v) => v + std::mem::size_of::<u128>(),
         None => {
             eprintln!("ERROR: Could not find embedded .box file data to extract.");
-            std::process::exit(1);
+            return 1;
         }
     };
 
@@ -51,9 +56,10 @@ fn main() {
         Err(e) => {
             eprintln!("ERROR: Could not read .box data!");
             eprintln!("{:?}", e);
-            std::process::exit(1);
+            return 1;
         }
     };
 
     bf.extract_all(current_dir).unwrap();
+    0
 }
