@@ -1,40 +1,64 @@
-name: Continuous Integration
-on:
-  push:
-  pull_request:
-  schedule:
-    - cron: "0 0 1,15 * *"
+on: [push, pull_request]
+
+name: Continuous integration
 
 jobs:
-  test:
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, windows-latest, macOS-latest]
-        rust: [stable, beta, nightly]
-
-    steps:
-      - name: Mac CPU info
-        if: matrix.os == 'macOS-latest'
-        run: sysctl -a | grep machdep
-      - name: Lunix CPU info
-        if: matrix.os == 'ubuntu-latest'
-        run: cat /proc/cpuinfo
-      - uses: hecrj/setup-rust-action@v1
-        with:
-          rust-version: ${{ matrix.rust }}
-      - uses: actions/checkout@v1
-      - name: Run tests
-        run: cargo test -p box -p box_format --all-features
-
-  clippy:
+  check:
+    name: Check
     runs-on: ubuntu-latest
     steps:
-      - uses: hecrj/setup-rust-action@v1
+      - uses: actions/checkout@v2
+      - uses: actions-rs/toolchain@v1
         with:
-          rust-version: stable
-          components: clippy
-      - uses: actions/checkout@v1
-      - name: Clippy
-        run: cargo clippy -p box -p box_format -- -D warnings
+          profile: minimal
+          toolchain: stable
+          override: true
+      - uses: actions-rs/cargo@v1
+        with:
+          command: check
+
+  test:
+    name: Test Suite
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v2
+      - uses: actions-rs/toolchain@v1
+        with:
+          profile: minimal
+          toolchain: stable
+          override: true
+      - uses: actions-rs/cargo@v1
+        with:
+          command: test
+
+  fmt:
+    name: Rustfmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v2
+      - uses: actions-rs/toolchain@v1
+        with:
+          profile: minimal
+          toolchain: stable
+          override: true
+      - run: rustup component add rustfmt
+      - uses: actions-rs/cargo@v1
+        with:
+          command: fmt
+          args: --all -- --check
+
+  clippy:
+    name: Clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v2
+      - uses: actions-rs/toolchain@v1
+        with:
+          profile: minimal
+          toolchain: stable
+          override: true
+      - run: rustup component add clippy
+      - uses: actions-rs/cargo@v1
+        with:
+          command: clippy
+          args: -- -D warnings

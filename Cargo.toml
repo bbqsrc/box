@@ -5,4 +5,4 @@ members = [
   "fusebox",
 ]
 exclude = ["selfextract"]
-default-members = ["box"]
+default-members = ["box", "box-format"]
