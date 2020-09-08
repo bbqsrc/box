@@ -45,11 +45,11 @@ Currently supported compression methods:
 
 ### Unix
 
-<img width="815" src="https://user-images.githubusercontent.com/279099/92532802-6466cf00-f231-11ea-9fc1-4e9342b37dd3.png">
+<img width="809" src="https://user-images.githubusercontent.com/279099/92532977-d17a6480-f231-11ea-8d8c-637918d2c6cc.png">
 
 ### Windows
 
-<img width="814" src="https://user-images.githubusercontent.com/279099/92532809-6761bf80-f231-11ea-8ffd-9f86e6fe2cb5.png">
+<img width="815" src="https://user-images.githubusercontent.com/279099/92532802-6466cf00-f231-11ea-9fc1-4e9342b37dd3.png">
 
 ## Supported platforms
 
