@@ -26,7 +26,7 @@ pub struct BoxFileReader {
 
 #[inline(always)]
 pub(super) fn read_header<R: Read + Seek>(file: &mut R, offset: u64) -> io::Result<BoxHeader> {
-    file.seek(SeekFrom::Start(offset + 0))?;
+    file.seek(SeekFrom::Start(offset))?;
     BoxHeader::deserialize_owned(file)
 }
 
