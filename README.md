@@ -41,6 +41,16 @@ Currently supported compression methods:
 <li> Zstandard
 </ul>
 
+## Screenshots
+
+### Unix
+
+<img width="815" src="https://user-images.githubusercontent.com/279099/92532802-6466cf00-f231-11ea-9fc1-4e9342b37dd3.png">
+
+### Windows
+
+<img width="814" src="https://user-images.githubusercontent.com/279099/92532809-6761bf80-f231-11ea-8ffd-9f86e6fe2cb5.png">
+
 ## Supported platforms
 
 * Windows
