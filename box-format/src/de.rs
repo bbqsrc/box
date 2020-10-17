@@ -3,7 +3,7 @@ use std::io::prelude::*;
 use std::num::NonZeroU64;
 
 use byteorder::{LittleEndian, ReadBytesExt};
-use vlq::fast::ReadVlqExt;
+use fastvlq::ReadVu64Ext as _;
 
 use crate::{
     AttrMap, BoxHeader, BoxMetadata, BoxPath, Compression, DirectoryRecord, FileRecord, LinkRecord,
@@ -23,7 +23,7 @@ impl<T: DeserializeOwned> DeserializeOwned for Vec<T> {
     where
         Self: Sized,
     {
-        let len: u64 = reader.read_fast_vlq()?;
+        let len: u64 = reader.read_vu64()?;
         let mut buf = Vec::with_capacity(len as usize);
         for _ in 0..len {
             buf.push(T::deserialize_owned(reader)?);
@@ -47,10 +47,10 @@ impl DeserializeOwned for AttrMap {
         Self: Sized,
     {
         let _byte_count = reader.read_u64::<LittleEndian>()?;
-        let len: u64 = reader.read_fast_vlq()?;
+        let len: u64 = reader.read_vu64()?;
         let mut buf = HashMap::with_capacity(len as usize);
         for _ in 0..len {
-            let key = reader.read_fast_vlq()?;
+            let key = reader.read_vu64()?;
             let value = Vec::deserialize_owned(reader)?;
             buf.insert(key as usize, value);
         }
@@ -81,7 +81,7 @@ impl DeserializeOwned for FileRecord {
 use crate::file::Inode;
 impl DeserializeOwned for Inode {
     fn deserialize_owned<R: Read>(reader: &mut R) -> std::io::Result<Self> {
-        reader.read_fast_vlq().and_then(Inode::new)
+        reader.read_vu64().and_then(Inode::new)
     }
 }
 
@@ -90,7 +90,7 @@ impl DeserializeOwned for DirectoryRecord {
         let name = String::deserialize_owned(reader)?;
 
         // Inodes vec
-        let len = reader.read_fast_vlq()? as usize;
+        let len = reader.read_vu64()? as usize;
         let mut inodes = Vec::with_capacity(len);
         for _ in 0..len {
             inodes.push(Inode::deserialize_owned(reader)?);
@@ -204,7 +204,7 @@ impl DeserializeOwned for String {
     where
         Self: Sized,
     {
-        let len: u64 = reader.read_fast_vlq()?;
+        let len: u64 = reader.read_vu64()?;
         let mut string = String::with_capacity(len as usize);
         reader.take(len).read_to_string(&mut string)?;
         Ok(string)
@@ -216,7 +216,7 @@ impl DeserializeOwned for Vec<u8> {
     where
         Self: Sized,
     {
-        let len: u64 = reader.read_fast_vlq()?;
+        let len: u64 = reader.read_vu64()?;
         let mut buf = Vec::with_capacity(len as usize);
         reader.take(len).read_to_end(&mut buf)?;
         Ok(buf)
