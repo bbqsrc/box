@@ -87,6 +87,15 @@ fn process(bf: &BoxFileReader, path: Option<&std::path::Path>, _is_verbose: bool
         },
     };
 
+    match std::fs::create_dir_all(&path) {
+        Ok(_) => {}
+        Err(e) => {
+            eprintln!("ERROR: Could not create output directory!");
+            eprintln!("{:?}", e);
+            return 12;
+        }
+    }
+
     match bf.extract_all(&path) {
         Ok(_) => {}
         Err(e) => {
@@ -149,8 +158,16 @@ fn run_shell_exec(input: &str, args: &[&str], cwd: &std::path::Path, is_verbose:
     let status = match Command::new(exec)
         .args(args)
         .current_dir(cwd)
-        .stdout(if is_verbose { Stdio::inherit() } else { Stdio::null() })
-        .stderr(if is_verbose { Stdio::inherit() } else { Stdio::null() })
+        .stdout(if is_verbose {
+            Stdio::inherit()
+        } else {
+            Stdio::null()
+        })
+        .stderr(if is_verbose {
+            Stdio::inherit()
+        } else {
+            Stdio::null()
+        })
         .status()
     {
         Ok(v) => v,
