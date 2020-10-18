@@ -1,6 +1,5 @@
 use std::{env, path::PathBuf, process::Command};
 
-#[cfg(unix)]
 #[allow(deprecated)]
 fn cargo_install_dir() -> PathBuf {
     std::env::home_dir().unwrap().join(".cargo").join("bin")
@@ -21,7 +20,9 @@ fn main() {
 
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
     let cwd = manifest_dir.join("..").join("selfextract");
-    println!("cargo:rerun-if-changed={}/src/main.rs", cwd.display());
+    
+    #[cfg(unix)]
+    println!("cargo:rerun-if-changed={}", cwd.join("src").join("main.rs").canonicalize().unwrap().display());
 
     let xargo = cargo_install_dir().join("xargo");
 
@@ -41,7 +42,7 @@ fn main() {
         .join(bin_name())
         .canonicalize()
         .unwrap();
-        
+    #[cfg(unix)]    
     Command::new("strip")
         .arg(&output_dir)
         .status()
