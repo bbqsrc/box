@@ -185,12 +185,29 @@ impl BoxFileReader {
 
     #[inline(always)]
     fn extract_inner(&self, path: &BoxPath, record: &Record, output_path: &Path) -> io::Result<()> {
-        println!("{} -> {}: {:?}", path, output_path.display(), record);
+        // println!("{} -> {}: {:?}", path, output_path.display(), record);
         match record {
             Record::File(file) => {
-                let out_file = File::create(output_path.join(path.to_path_buf())).unwrap();
+                let out_path = output_path.join(path.to_path_buf());
+                let mut out_file = std::fs::OpenOptions::new();
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::OpenOptionsExt;
+                    
+                    let mode: Option<u32> = record.attr(self.metadata(), "unix.mode")
+                        .filter(|x| x.len() == 4)
+                        .map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]));
+
+                    if let Some(mode) = mode {
+                        out_file.mode(mode);
+                    }
+                }
+                let out_file = out_file.create(true).write(true).open(&out_path)?;
+
                 let out_file = BufWriter::new(out_file);
-                self.decompress(&file, out_file)
+                self.decompress(&file, out_file)?;
+
+                Ok(())
             }
             Record::Directory(_dir) => fs::create_dir_all(output_path.join(path.to_path_buf())),
             #[cfg(unix)]

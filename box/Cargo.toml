@@ -10,7 +10,7 @@ name = "box"
 path = "src/main.rs"
 
 [dependencies]
-box-format = { path = "../box-format", features = ["reader", "writer"] }
+box-format = { path = "../box-format", default-features = false, features = ["reader", "writer", "zstd"] }
 structopt = "0.3.17"
 humansize = "1.1.0"
 byteorder = "1.3.4"

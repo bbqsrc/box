@@ -2,7 +2,7 @@
 // Licensed under the EUPL 1.2 or later. See LICENSE file.
 
 use std::collections::{HashMap, HashSet};
-use std::io::{BufReader, Read, BufWriter, Write};
+use std::io::{BufReader, BufWriter, Read, Write};
 use std::num::NonZeroU64;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
@@ -18,6 +18,7 @@ type Result<T> = std::result::Result<T, Error>;
 
 #[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
+
 #[cfg(windows)]
 use std::os::windows::fs::MetadataExt;
 
@@ -25,10 +26,8 @@ use std::os::windows::fs::MetadataExt;
 mod winapi {
     pub const FILE_ATTRIBUTE_HIDDEN: u32 = 2;
 }
-#[cfg(windows)]
-const SELF_EXTRACTOR_BIN: &'static [u8] = include_bytes!("../../target/release/selfextract.exe");
-#[cfg(not(windows))]
-const SELF_EXTRACTOR_BIN: &'static [u8] = include_bytes!("../../target/release/selfextract");
+
+const SELF_EXTRACTOR_BIN: &'static [u8] = include_bytes!(env!("SELFEXTRACT_PATH"));
 const DIVIDER_UUID: u128 = 0xaae8ea9c35484ee4bf28f1a25a6b3c6c;
 
 fn parse_compression(src: &str) -> std::result::Result<Compression, Error> {
@@ -72,6 +71,32 @@ enum Commands {
     },
 
     #[structopt(
+        name = "cs",
+        alias = "create-selfextracting",
+        about = "Create a new create-selfextracting archive [aliases: create-selfextracting]"
+    )]
+    CreateSelfExtracting {
+        #[structopt(
+            short = "c",
+            help = "Shell exec string to run upon self-extraction (ad-hoc installers, etc)"
+        )]
+        exec_cmd: Option<String>,
+
+        #[structopt(short, long, help = "Recursively handle provided paths")]
+        recursive: bool,
+
+        #[structopt(short = "H", long = "hidden", help = "Allow adding hidden files")]
+        allow_hidden: bool,
+
+        #[structopt(
+            name = "boxfile",
+            parse(from_os_str),
+            help = "Path to the .box archive"
+        )]
+        path: PathBuf,
+    },
+
+    #[structopt(
         name = "c",
         alias = "create",
         about = "Create a new archive [aliases: create]"
@@ -100,9 +125,6 @@ enum Commands {
 
         #[structopt(short = "H", long = "hidden", help = "Allow adding hidden files")]
         allow_hidden: bool,
-
-        #[structopt(short = "S", long = "self-extracting", help = "Generate a self-extracting archive")]
-        is_self_extracting: bool,
 
         #[structopt(
             name = "boxfile",
@@ -596,7 +618,13 @@ fn process_files<I: Iterator<Item = PathBuf>>(
                 if verbose {
                     println!("{} (directory)", &file_path.display());
                 }
-                bf.mkdir(box_path.clone(), metadata(&meta))
+                let mut dir_meta = metadata(&meta);
+                #[cfg(unix)]
+                {
+                    let mode = std::fs::metadata(file_path).unwrap().mode();
+                    dir_meta.insert("unix.mode".to_string(), mode.to_le_bytes().to_vec());
+                }
+                bf.mkdir(box_path.clone(), dir_meta)
                     .map_err(|source| Error::CannotCreateDirectory {
                         path: box_path.clone(),
                         source,
@@ -608,9 +636,17 @@ fn process_files<I: Iterator<Item = PathBuf>>(
                 path: file_path.to_path_buf(),
                 source,
             })?;
+            let mut file_meta = metadata(&meta);
+            
+            #[cfg(unix)]
+            {
+                let mode = file.metadata().unwrap().mode();
+                file_meta.insert("unix.mode".to_string(), mode.to_le_bytes().to_vec());
+            }
+
             let mut file = BufReader::new(Crc32Reader::new(file));
             let record = bf
-                .insert(compression, box_path.clone(), &mut file, metadata(&meta))
+                .insert(compression, box_path.clone(), &mut file, file_meta)
                 .map_err(|source| Error::CannotAddFile {
                     path: file_path.to_path_buf(),
                     source,
@@ -650,13 +686,17 @@ fn create(
     verbose: bool,
     alignment: Option<NonZeroU64>,
     is_self_extracting: bool,
+    exec_cmd: Option<String>,
 ) -> Result<()> {
     let original_path = path.clone();
 
     // if is_self_extracting {
-    path.set_file_name(format!("{}.tmp", Path::new(path.file_name().unwrap()).display()));
+    path.set_file_name(format!(
+        "{}.tmp",
+        Path::new(path.file_name().unwrap()).display()
+    ));
     // }
-    
+
     let mut bf = match alignment {
         None => BoxFileWriter::create(&path),
         Some(alignment) => BoxFileWriter::create_with_alignment(&path, alignment.get()),
@@ -679,6 +719,10 @@ fn create(
             source,
         })?;
 
+    if let Some(exec_str) = exec_cmd {
+        bf.set_file_attr("box.exec", exec_str.as_bytes().to_vec()).unwrap();
+    }
+
     process_files(
         selected_files.into_iter(),
         recursive,
@@ -694,7 +738,7 @@ fn create(
         path: path.to_path_buf(),
         source,
     })?;
-    
+
     if is_self_extracting {
         let tmp_path = path;
         let stem = tmp_path.file_stem().unwrap();
@@ -705,7 +749,14 @@ fn create(
         #[cfg(windows)]
         path.set_file_name(format!("{}.exe", Path::new(stem).display()));
 
-        let file = std::fs::File::create(&path).unwrap();
+        let mut file = std::fs::OpenOptions::new();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            file.mode(0o755);
+        }
+
+        let file = file.create(true).write(true).open(&path).unwrap();
         let mut writer = BufWriter::new(file);
 
         let tmp_file = std::fs::File::open(&tmp_path).unwrap();
@@ -717,7 +768,6 @@ fn create(
 
         drop(reader);
         drop(writer);
-
         std::fs::remove_file(tmp_path).unwrap();
     } else {
         std::fs::rename(path, original_path).unwrap();
@@ -745,7 +795,6 @@ fn main() -> Result<()> {
             compression,
             recursive,
             allow_hidden,
-            is_self_extracting,
         } => create(
             path,
             opts.selected_files,
@@ -754,7 +803,24 @@ fn main() -> Result<()> {
             allow_hidden,
             opts.verbose,
             alignment,
-            is_self_extracting,
+            false,
+            None,
+        ),
+        Commands::CreateSelfExtracting {
+            path,
+            recursive,
+            allow_hidden,
+            exec_cmd,
+        } => create(
+            path,
+            opts.selected_files,
+            Compression::Zstd,
+            recursive,
+            allow_hidden,
+            opts.verbose,
+            None,
+            true,
+            exec_cmd,
         ),
         Commands::Test { .. } => unimplemented!(),
     }
