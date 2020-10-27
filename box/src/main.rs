@@ -779,7 +779,7 @@ fn create(
 fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
 
-    let opts = CliOpts::from_args();
+    let opts = CliOpts::from_iter(wild::args_os());
 
     match opts.cmd {
         Commands::List { path } => list(&path, opts.selected_files, opts.verbose),
