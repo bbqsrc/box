@@ -82,6 +82,12 @@ enum Commands {
         )]
         exec_cmd: Option<String>,
 
+        #[structopt(
+            short = "a",
+            help = "Shell exec args to run upon self-extraction (ad-hoc installers, etc)"
+        )]
+        args_cmd: Option<String>,
+
         #[structopt(short, long, help = "Recursively handle provided paths")]
         recursive: bool,
 
@@ -687,6 +693,7 @@ fn create(
     alignment: Option<NonZeroU64>,
     is_self_extracting: bool,
     exec_cmd: Option<String>,
+    args_cmd: Option<String>,
 ) -> Result<()> {
     let original_path = path.clone();
 
@@ -721,6 +728,10 @@ fn create(
 
     if let Some(exec_str) = exec_cmd {
         bf.set_file_attr("box.exec", exec_str.as_bytes().to_vec()).unwrap();
+    }
+
+    if let Some(args_str) = args_cmd {
+        bf.set_file_attr("box.args", args_str.as_bytes().to_vec()).unwrap();
     }
 
     process_files(
@@ -805,12 +816,14 @@ fn main() -> Result<()> {
             alignment,
             false,
             None,
+            None,
         ),
         Commands::CreateSelfExtracting {
             path,
             recursive,
             allow_hidden,
             exec_cmd,
+            args_cmd,
         } => create(
             path,
             opts.selected_files,
@@ -821,6 +834,7 @@ fn main() -> Result<()> {
             None,
             true,
             exec_cmd,
+            args_cmd,
         ),
         Commands::Test { .. } => unimplemented!(),
     }
