@@ -190,9 +190,25 @@ fn run(args: Args) -> i32 {
 
     let exec_attr = bf.metadata().file_attr("box.exec");
     let args_attr = bf.metadata().file_attr("box.args");
-    let args_attr: &[&str] = match args_attr {
-        Some(_v) => todo!("Args not supported yet"),
-        None => &[],
+    let args_attr: Vec<String> = match args_attr {
+        Some(value) => {
+            let args_str = match std::str::from_utf8(value) {
+                Ok(v) => v,
+                Err(_) => {
+                    eprintln!("ERROR: Could not read args string, invalid UTF-8!");
+                    return 7;
+                }
+            };
+
+            match shell_words::split(&args_str) {
+                Ok(args) => args,
+                Err(_) => {
+                    eprintln!("ERROR: Could not read args string, invalid UTF-8!");
+                    return 7;
+                }
+            }
+        }
+        None => vec![],
     };
 
     match exec_attr {
@@ -205,7 +221,7 @@ fn run(args: Args) -> i32 {
                 }
             };
 
-            process_exec(&bf, exec_str, args_attr, args.verbose)
+            process_exec(&bf, exec_str, &args_attr.iter().map(|s| &**s).collect::<Vec<_>>(), args.verbose)
         }
         _ => process(&bf, args.output.as_ref().map(|x| &**x), args.verbose),
     }
