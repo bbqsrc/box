@@ -78,14 +78,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "bare-io"
-version = "0.2.1"
-source = "git+http://github.com/bbqsrc/bare-io?branch=main#05ac573ef06b2cd6e648ec14bfd9e1195a90b159"
-dependencies = [
- "memchr",
-]
-
-[[package]]
 name = "bitflags"
 version = "1.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -243,10 +235,10 @@ dependencies = [
 
 [[package]]
 name = "comde"
-version = "0.2.0-pre.1"
-source = "git+https://github.com/bbqsrc/comde#7f8cdeae7999dc4b4ff5fce94f6df6ea90b60b3f"
+version = "0.2.0-pre.2"
+source = "git+https://github.com/bbqsrc/comde#9ccab0a9d5f24d4d4371d909c365166c8c739450"
 dependencies = [
- "bare-io 0.2.1 (git+http://github.com/bbqsrc/bare-io?branch=main)",
+ "bare-io",
  "brotli",
  "delegate",
  "flate2",
@@ -436,9 +428,9 @@ dependencies = [
 
 [[package]]
 name = "delegate"
-version = "0.4.3"
+version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "12e531288b600a8bea48baff926d2f16a3f68fda1cd2d59240279907ba727332"
+checksum = "d9521a61c2b177e0515b69dd1bd0f396a6b322832c54b4ba03cd33030ff6014b"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -470,7 +462,7 @@ version = "1.0.0-alpha.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e55f8ecdf107dba1cef86fe48a5f6dabfd635a48db76636f299dc3b224e74f44"
 dependencies = [
- "bare-io 0.2.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "bare-io",
 ]
 
 [[package]]
@@ -1628,17 +1620,18 @@ dependencies = [
 
 [[package]]
 name = "zstd"
-version = "0.5.3+zstd.1.4.5"
-source = "git+https://github.com/bbqsrc/zstd-rs?branch=feature/no-std#12aef5acc096810a2123422d32015d966d24c6cc"
+version = "0.6.0+zstd.1.4.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d4e44664feba7f2f1a9f300c1f6157f2d1bfc3c15c6f3cf4beabf3f5abe9c237"
 dependencies = [
- "bare-io 0.2.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "zstd-safe",
 ]
 
 [[package]]
 name = "zstd-safe"
-version = "2.0.5+zstd.1.4.5"
-source = "git+https://github.com/bbqsrc/zstd-rs?branch=feature/no-std#12aef5acc096810a2123422d32015d966d24c6cc"
+version = "3.0.0+zstd.1.4.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d9447afcd795693ad59918c7bbffe42fdd6e467d708f3537e3dc14dc598c573f"
 dependencies = [
  "libc",
  "zstd-sys",
@@ -1646,8 +1639,9 @@ dependencies = [
 
 [[package]]
 name = "zstd-sys"
-version = "1.4.17+zstd.1.4.5"
-source = "git+https://github.com/bbqsrc/zstd-rs?branch=feature/no-std#12aef5acc096810a2123422d32015d966d24c6cc"
+version = "1.4.19+zstd.1.4.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ec24a9273d24437afb8e71b16f3d9a5d569193cccdb7896213b59f552f387674"
 dependencies = [
  "cc",
  "glob",

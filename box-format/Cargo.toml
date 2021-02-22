@@ -35,6 +35,4 @@ deflate = ["comde/deflate"]
 zstd = ["comde/zstandard"]
 snappy = ["comde/snappy"]
 
-nightly = ["comde/nightly"]
-
 ffi = ["libc", "cffi"]
