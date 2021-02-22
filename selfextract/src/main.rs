@@ -1,3 +1,5 @@
+#![windows_subsystem = "windows"]
+
 use std::process::{Command, Stdio};
 
 use box_format::BoxFileReader;
