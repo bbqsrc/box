@@ -193,8 +193,9 @@ impl BoxFileReader {
                 #[cfg(unix)]
                 {
                     use std::os::unix::fs::OpenOptionsExt;
-                    
-                    let mode: Option<u32> = record.attr(self.metadata(), "unix.mode")
+
+                    let mode: Option<u32> = record
+                        .attr(self.metadata(), "unix.mode")
                         .filter(|x| x.len() == 4)
                         .map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]));
 

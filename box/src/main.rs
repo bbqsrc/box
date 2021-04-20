@@ -630,11 +630,12 @@ fn process_files<I: Iterator<Item = PathBuf>>(
                     let mode = std::fs::metadata(file_path).unwrap().mode();
                     dir_meta.insert("unix.mode".to_string(), mode.to_le_bytes().to_vec());
                 }
-                bf.mkdir(box_path.clone(), dir_meta)
-                    .map_err(|source| Error::CannotCreateDirectory {
+                bf.mkdir(box_path.clone(), dir_meta).map_err(|source| {
+                    Error::CannotCreateDirectory {
                         path: box_path.clone(),
                         source,
-                    })?;
+                    }
+                })?;
                 known_dirs.insert(box_path);
             }
         } else if !known_files.contains(&box_path) {
@@ -643,7 +644,7 @@ fn process_files<I: Iterator<Item = PathBuf>>(
                 source,
             })?;
             let mut file_meta = metadata(&meta);
-            
+
             #[cfg(unix)]
             {
                 let mode = file.metadata().unwrap().mode();
@@ -727,11 +728,13 @@ fn create(
         })?;
 
     if let Some(exec_str) = exec_cmd {
-        bf.set_file_attr("box.exec", exec_str.as_bytes().to_vec()).unwrap();
+        bf.set_file_attr("box.exec", exec_str.as_bytes().to_vec())
+            .unwrap();
     }
 
     if let Some(args_str) = args_cmd {
-        bf.set_file_attr("box.args", args_str.as_bytes().to_vec()).unwrap();
+        bf.set_file_attr("box.args", args_str.as_bytes().to_vec())
+            .unwrap();
     }
 
     process_files(
