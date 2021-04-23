@@ -84,8 +84,8 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf1de2fe8c75bc145a2f577add951f8134889b4795d47466a54a5c846d691693"
 
 [[package]]
-name = "box"
-version = "0.3.0"
+name = "box-bin"
+version = "0.3.1"
 dependencies = [
  "anyhow",
  "box-format",
@@ -106,7 +106,7 @@ dependencies = [
 
 [[package]]
 name = "box-format"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "byteorder",
  "cffi",
