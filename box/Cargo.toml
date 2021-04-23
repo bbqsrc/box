@@ -1,9 +1,11 @@
 [package]
 name = "box"
+description = "Box open standard archiver binary."
 version = "0.3.0"
 authors = ["Brendan Molloy <brendan@bbqsrc.net>"]
 edition = "2018"
 license = "EUPL-1.2"
+repository = "https://github.com/bbqsrc/box"
 
 [[bin]]
 name = "box"
@@ -23,3 +25,7 @@ anyhow = "1.0.32"
 tracing = "0.1.19"
 tracing-subscriber = { version = "0.2.11", features = ["fmt"] }
 wild = "2.0.4"
+
+[features]
+default = ["selfextract"]
+selfextract = []

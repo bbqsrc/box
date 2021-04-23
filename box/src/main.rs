@@ -27,7 +27,9 @@ mod winapi {
     pub const FILE_ATTRIBUTE_HIDDEN: u32 = 2;
 }
 
+#[cfg(feature = "selfextract")]
 const SELF_EXTRACTOR_BIN: &'static [u8] = include_bytes!(env!("SELFEXTRACT_PATH"));
+#[cfg(feature = "selfextract")]
 const DIVIDER_UUID: u128 = 0xaae8ea9c35484ee4bf28f1a25a6b3c6c;
 
 fn parse_compression(src: &str) -> std::result::Result<Compression, Error> {
@@ -70,6 +72,7 @@ enum Commands {
         path: PathBuf,
     },
 
+    #[cfg(feature = "selfextract")]
     #[structopt(
         name = "cs",
         alias = "create-selfextracting",
@@ -684,18 +687,31 @@ fn process_files<I: Iterator<Item = PathBuf>>(
         .map(|_| {})
 }
 
-fn create(
-    mut path: PathBuf,
+#[derive(Debug, Clone, Default)]
+struct CreateOpts {
     selected_files: Vec<PathBuf>,
     compression: Compression,
     recursive: bool,
     allow_hidden: bool,
     verbose: bool,
     alignment: Option<NonZeroU64>,
-    is_self_extracting: bool,
     exec_cmd: Option<String>,
     args_cmd: Option<String>,
-) -> Result<()> {
+    is_self_extracting: bool,
+}
+
+fn create(mut path: PathBuf, opts: CreateOpts) -> Result<()> {
+    let CreateOpts {
+        selected_files,
+        compression,
+        recursive,
+        allow_hidden,
+        verbose,
+        alignment,
+        exec_cmd,
+        args_cmd,
+        is_self_extracting,
+    } = opts;
     let original_path = path.clone();
 
     // if is_self_extracting {
@@ -753,7 +769,13 @@ fn create(
         source,
     })?;
 
-    if is_self_extracting {
+    if !is_self_extracting {
+        std::fs::rename(path, original_path).unwrap();
+        return Ok(());
+    }
+
+    #[cfg(feature = "selfextract")]
+    {
         let tmp_path = path;
         let stem = tmp_path.file_stem().unwrap();
         let mut path = tmp_path.to_path_buf();
@@ -783,8 +805,6 @@ fn create(
         drop(reader);
         drop(writer);
         std::fs::remove_file(tmp_path).unwrap();
-    } else {
-        std::fs::rename(path, original_path).unwrap();
     }
 
     Ok(())
@@ -811,16 +831,16 @@ fn main() -> Result<()> {
             allow_hidden,
         } => create(
             path,
-            opts.selected_files,
-            compression,
-            recursive,
-            allow_hidden,
-            opts.verbose,
-            alignment,
-            false,
-            None,
-            None,
+            CreateOpts {
+                selected_files: opts.selected_files,
+                compression,
+                recursive,
+                allow_hidden,
+                alignment,
+                ..Default::default()
+            },
         ),
+        #[cfg(feature = "selfextract")]
         Commands::CreateSelfExtracting {
             path,
             recursive,
@@ -829,15 +849,16 @@ fn main() -> Result<()> {
             args_cmd,
         } => create(
             path,
-            opts.selected_files,
-            Compression::Zstd,
-            recursive,
-            allow_hidden,
-            opts.verbose,
-            None,
-            true,
-            exec_cmd,
-            args_cmd,
+            CreateOpts {
+                selected_files: opts.selected_files,
+                compression: Compression::Zstd,
+                recursive,
+                allow_hidden,
+                is_self_extracting: true,
+                exec_cmd,
+                args_cmd,
+                ..Default::default()
+            },
         ),
         Commands::Test { .. } => unimplemented!(),
     }
