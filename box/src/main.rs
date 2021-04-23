@@ -1,7 +1,7 @@
-// Copyright (c) 2019-2020  Brendan Molloy <brendan@bbqsrc.net>
+// Copyright (c) 2019-2021  Brendan Molloy <brendan@bbqsrc.net>
 // Licensed under the EUPL 1.2 or later. See LICENSE file.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::num::NonZeroU64;
 use std::path::{Path, PathBuf};
@@ -50,6 +50,25 @@ fn parse_compression(src: &str) -> std::result::Result<Compression, Error> {
     Ok(compression)
 }
 
+fn parse_attrs(
+    attrs: Vec<String>,
+) -> std::result::Result<BTreeMap<String, Option<serde_json::Value>>, Error> {
+    let map = attrs
+        .into_iter()
+        .map(|x| {
+            let mut chunks = x.splitn(2, "=");
+            let key = chunks.next().unwrap();
+            println!("{}", key);
+            let value: Option<serde_json::Value> = chunks.next().map(|v| {
+                serde_json::from_str(&v)
+                    .unwrap_or_else(|_| serde_json::Value::String(v.to_string()))
+            });
+            Ok((key.to_string(), value))
+        })
+        .collect::<std::result::Result<BTreeMap<_, _>, _>>()?;
+    Ok(map)
+}
+
 #[inline(always)]
 #[allow(dead_code)] // used in Commands
 fn stored() -> Compression {
@@ -80,13 +99,13 @@ enum Commands {
     )]
     CreateSelfExtracting {
         #[structopt(
-            short = "c",
+            long = "exec"
             help = "Shell exec string to run upon self-extraction (ad-hoc installers, etc)"
         )]
         exec_cmd: Option<String>,
 
         #[structopt(
-            short = "a",
+            long = "args",
             help = "Shell exec args to run upon self-extraction (ad-hoc installers, etc)"
         )]
         args_cmd: Option<String>,
@@ -112,7 +131,7 @@ enum Commands {
     )]
     Create {
         #[structopt(
-            short = "A",
+            short = "a",
             long,
             help = "Align inserted records by specified bytes [unsigned 64-bit int, default: none]"
         )]
@@ -141,6 +160,12 @@ enum Commands {
             help = "Path to the .box archive"
         )]
         path: PathBuf,
+
+        #[structopt(
+            short = "A",
+            help = "Attributes to be assigned to the file, e.g. key=value."
+        )]
+        attrs: Vec<String>,
     },
 
     #[structopt(
@@ -286,7 +311,12 @@ fn list(path: &Path, _selected_files: Vec<PathBuf>, verbose: bool) -> Result<()>
         0 => "None".into(),
         v => format!("{} bytes", v),
     };
-    println!("Box archive: {} (alignment: {})", path.display(), alignment);
+    print!("Box archive: {} (alignment: {}", path.display(), alignment);
+    if let Some(v) = bf.metadata().file_attr("created") {
+        println!(", created: {})", time(Some(v)));
+    } else {
+        println!(")");
+    }
     println!("-------------  -------------  -------------  ---------------------  ----------  ---------  --------");
     println!(" Method         Compressed     Length         Created                Attrs       CRC32      Path");
     println!("-------------  -------------  -------------  ---------------------  ----------  ---------  --------");
@@ -340,6 +370,24 @@ fn list(path: &Path, _selected_files: Vec<PathBuf>, verbose: bool) -> Result<()>
                     crc32,
                     path,
                 );
+            }
+        }
+    }
+
+    let mut attrs = bf.metadata().file_attrs();
+    attrs.remove("created");
+
+    if !attrs.is_empty() {
+        println!();
+        println!("File attributes:");
+        for (key, value) in attrs {
+            if key == "created" {
+                continue;
+            } else if let box_format::AttrValue::Json(json) = value {
+                let v = serde_json::to_string_pretty(&json).unwrap();
+                println!("  {} => {}", key, textwrap::indent(&v, "  ").trim_start());
+            } else {
+                println!("  {} => {}", key, value);
             }
         }
     }
@@ -695,6 +743,7 @@ struct CreateOpts {
     allow_hidden: bool,
     verbose: bool,
     alignment: Option<NonZeroU64>,
+    attrs: BTreeMap<String, Option<serde_json::Value>>,
     exec_cmd: Option<String>,
     args_cmd: Option<String>,
     is_self_extracting: bool,
@@ -708,6 +757,7 @@ fn create(mut path: PathBuf, opts: CreateOpts) -> Result<()> {
         allow_hidden,
         verbose,
         alignment,
+        attrs,
         exec_cmd,
         args_cmd,
         is_self_extracting,
@@ -751,6 +801,14 @@ fn create(mut path: PathBuf, opts: CreateOpts) -> Result<()> {
     if let Some(args_str) = args_cmd {
         bf.set_file_attr("box.args", args_str.as_bytes().to_vec())
             .unwrap();
+    }
+
+    for (key, value) in attrs {
+        let value = match value {
+            Some(v) => serde_json::to_vec(&v).unwrap(),
+            None => vec![],
+        };
+        bf.set_file_attr(key, value).unwrap();
     }
 
     process_files(
@@ -829,17 +887,22 @@ fn main() -> Result<()> {
             compression,
             recursive,
             allow_hidden,
-        } => create(
-            path,
-            CreateOpts {
-                selected_files: opts.selected_files,
-                compression,
-                recursive,
-                allow_hidden,
-                alignment,
-                ..Default::default()
-            },
-        ),
+            attrs,
+        } => {
+            let attrs = parse_attrs(attrs)?;
+            create(
+                path,
+                CreateOpts {
+                    selected_files: opts.selected_files,
+                    compression,
+                    recursive,
+                    allow_hidden,
+                    alignment,
+                    attrs,
+                    ..Default::default()
+                },
+            )
+        }
         #[cfg(feature = "selfextract")]
         Commands::CreateSelfExtracting {
             path,
@@ -994,7 +1057,7 @@ enum Error {
         source: std::io::Error,
     },
 
-    #[error("Cannot get current directory`")]
+    #[error("Cannot get current directory")]
     CannotGetCurrentDir {
         #[source]
         source: std::io::Error,

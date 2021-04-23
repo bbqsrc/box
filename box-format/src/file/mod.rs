@@ -20,7 +20,8 @@ impl Inode {
         self.0.get()
     }
 }
-mod meta;
+
+pub(crate) mod meta;
 #[cfg(feature = "reader")]
 pub mod reader;
 #[cfg(feature = "writer")]

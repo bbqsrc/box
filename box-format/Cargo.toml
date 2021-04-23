@@ -24,6 +24,7 @@ libc = { version = "0.2.79", optional = true }
 log = "0.4.11"
 pathtrie = "0.1.1"
 tracing = "0.1.21"
+serde_json = "1.0.64"
 
 [features]
 default = ["brotli", "xz", "deflate", "zstd", "snappy", "writer", "reader"]

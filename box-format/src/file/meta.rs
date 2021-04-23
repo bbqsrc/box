@@ -3,7 +3,11 @@ use crate::file::Inode;
 use crate::path::BoxPath;
 use crate::record::DirectoryRecord;
 use crate::Record;
-use std::collections::VecDeque;
+use std::{
+    borrow::Cow,
+    collections::{BTreeMap, VecDeque},
+    fmt::Display,
+};
 
 #[derive(Debug, Default)]
 pub struct BoxMetadata {
@@ -220,6 +224,26 @@ impl BoxMetadata {
         }
     }
 
+    pub fn file_attrs<'a>(&'a self) -> BTreeMap<&'a str, AttrValue<'a>> {
+        let mut map = BTreeMap::new();
+
+        for key in self.attr_keys.iter() {
+            let k = self.attr_key(key).unwrap();
+            if let Some(v) = self.attrs.get(&k) {
+                let value = std::str::from_utf8(v)
+                    .and_then(|v| {
+                        Ok(serde_json::from_str(v)
+                            .map(AttrValue::Json)
+                            .unwrap_or_else(|_| AttrValue::String(v)))
+                    })
+                    .unwrap_or_else(|_| AttrValue::Bytes(v));
+                map.insert(&**key, value);
+            }
+        }
+
+        map
+    }
+
     #[inline(always)]
     pub fn file_attr<S: AsRef<str>>(&self, key: S) -> Option<&Vec<u8>> {
         let key = self.attr_key(key.as_ref())?;
@@ -240,6 +264,44 @@ impl BoxMetadata {
                 let len = self.attr_keys.len();
                 self.attr_keys.push(key.to_string());
                 len
+            }
+        }
+    }
+}
+
+pub enum AttrValue<'a> {
+    String(&'a str),
+    Bytes(&'a [u8]),
+    Json(serde_json::Value),
+}
+
+impl AttrValue<'_> {
+    pub fn as_bytes(&self) -> Cow<'_, [u8]> {
+        match self {
+            AttrValue::String(x) => Cow::Borrowed(x.as_bytes()),
+            AttrValue::Bytes(x) => Cow::Borrowed(*x),
+            AttrValue::Json(x) => Cow::Owned(serde_json::to_vec(x).unwrap()),
+        }
+    }
+}
+
+impl Display for AttrValue<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            AttrValue::String(v) => f.write_str(v),
+            AttrValue::Bytes(bytes) => {
+                let mut bytes = bytes.iter();
+                if let Some(v) = bytes.next() {
+                    f.write_fmt(format_args!("{:02x}", v))?;
+                }
+                for b in bytes {
+                    f.write_fmt(format_args!(" {:02x}", b))?;
+                }
+                Ok(())
+            }
+            AttrValue::Json(value) => {
+                let v = serde_json::to_string_pretty(value).unwrap();
+                f.write_str(&v)
             }
         }
     }
