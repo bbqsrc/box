@@ -1,9 +1,11 @@
 [package]
 name = "box-format"
+description = "Support library for the Box open standard archive format."
 version = "0.3.0"
 authors = ["Brendan Molloy <brendan@bbqsrc.net>"]
 edition = "2018"
 license = "Apache-2.0 OR MIT"
+repository = "https://github.com/bbqsrc/box"
 
 [lib]
 crate-type = ["cdylib", "rlib", "staticlib"]

@@ -38,8 +38,13 @@ pub enum Compression {
     Unknown(u8),
 }
 
+impl Default for Compression {
+    fn default() -> Self {
+        Self::Stored
+    }
+}
+
 impl Compression {
-    // FIXME(killercup): Replace with strum-macros when new release is available
     pub fn available_variants() -> &'static [&'static str] {
         &["stored", "brotli", "deflate", "snappy", "xz", "zstd"]
     }
