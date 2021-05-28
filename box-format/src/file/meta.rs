@@ -224,19 +224,19 @@ impl BoxMetadata {
         }
     }
 
-    pub fn file_attrs<'a>(&'a self) -> BTreeMap<&'a str, AttrValue<'a>> {
+    pub fn file_attrs(&self) -> BTreeMap<&str, AttrValue<'_>> {
         let mut map = BTreeMap::new();
 
         for key in self.attr_keys.iter() {
             let k = self.attr_key(key).unwrap();
             if let Some(v) = self.attrs.get(&k) {
                 let value = std::str::from_utf8(v)
-                    .and_then(|v| {
-                        Ok(serde_json::from_str(v)
+                    .map(|v| {
+                        serde_json::from_str(v)
                             .map(AttrValue::Json)
-                            .unwrap_or_else(|_| AttrValue::String(v)))
+                            .unwrap_or(AttrValue::String(v))
                     })
-                    .unwrap_or_else(|_| AttrValue::Bytes(v));
+                    .unwrap_or(AttrValue::Bytes(v));
                 map.insert(&**key, value);
             }
         }

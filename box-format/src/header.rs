@@ -23,9 +23,10 @@ impl BoxHeader {
     }
 
     pub(crate) fn with_alignment(alignment: u64) -> BoxHeader {
-        let mut header = BoxHeader::default();
-        header.alignment = alignment;
-        header
+        BoxHeader {
+            alignment,
+            ..Default::default()
+        }
     }
 }
 

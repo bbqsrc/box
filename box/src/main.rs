@@ -2,7 +2,7 @@
 // Licensed under the EUPL 1.2 or later. See LICENSE file.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::io::{BufReader, BufWriter, Read, Write};
+use std::io::{BufReader, Read};
 use std::num::NonZeroU64;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
@@ -28,7 +28,7 @@ mod winapi {
 }
 
 #[cfg(feature = "selfextract")]
-const SELF_EXTRACTOR_BIN: &'static [u8] = include_bytes!(env!("SELFEXTRACT_PATH"));
+const SELF_EXTRACTOR_BIN: &[u8] = include_bytes!(env!("SELFEXTRACT_PATH"));
 #[cfg(feature = "selfextract")]
 const DIVIDER_UUID: u128 = 0xaae8ea9c35484ee4bf28f1a25a6b3c6c;
 
@@ -56,7 +56,7 @@ fn parse_attrs(
     let map = attrs
         .into_iter()
         .map(|x| {
-            let mut chunks = x.splitn(2, "=");
+            let mut chunks = x.splitn(2, '=');
             let key = chunks.next().unwrap();
             println!("{}", key);
             let value: Option<serde_json::Value> = chunks.next().map(|v| {
@@ -99,7 +99,7 @@ enum Commands {
     )]
     CreateSelfExtracting {
         #[structopt(
-            long = "exec"
+            long = "exec",
             help = "Shell exec string to run upon self-extraction (ad-hoc installers, etc)"
         )]
         exec_cmd: Option<String>,
@@ -246,7 +246,7 @@ fn format_path(box_path: &BoxPath, is_dir: bool) -> String {
     if is_dir {
         path.push_str(PATH_PLATFORM_SEP);
     }
-    path.push_str("]");
+    path.push(']');
     path
 }
 
@@ -834,6 +834,8 @@ fn create(mut path: PathBuf, opts: CreateOpts) -> Result<()> {
 
     #[cfg(feature = "selfextract")]
     {
+        use std::io::{BufWriter, Write};
+
         let tmp_path = path;
         let stem = tmp_path.file_stem().unwrap();
         let mut path = tmp_path.to_path_buf();
