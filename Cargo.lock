@@ -240,9 +240,9 @@ dependencies = [
 
 [[package]]
 name = "comde"
-version = "0.2.2"
+version = "0.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b361cd26fe955b64e49eb0e6cec6ec87ebcec1180ded5b9e84ec11544ae01b66"
+checksum = "2818decc3ad4e0c11b650cc9e1cf310f7b19c1d4dc17d9d9a93219f41a48c85e"
 dependencies = [
  "brotli",
  "delegate",
