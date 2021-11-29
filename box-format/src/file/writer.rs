@@ -305,7 +305,7 @@ impl BoxFileWriter {
             Ok(record.upcast())
         })?;
 
-        Ok(&self.meta.inodes.last().unwrap().as_file().unwrap())
+        Ok(self.meta.inodes.last().unwrap().as_file().unwrap())
     }
 
     /// # Safety

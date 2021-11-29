@@ -200,7 +200,7 @@ impl BoxFileReader {
                 let out_file = out_file.create(true).write(true).open(&out_path)?;
 
                 let out_file = BufWriter::new(out_file);
-                self.decompress(&file, out_file)?;
+                self.decompress(file, out_file)?;
 
                 Ok(())
             }

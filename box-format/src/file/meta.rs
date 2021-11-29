@@ -83,7 +83,7 @@ impl<'a> Iterator for Records<'a> {
         };
 
         let base_path = match self.base_path.as_ref() {
-            Some(x) => x.join_unchecked(&record.name()),
+            Some(x) => x.join_unchecked(record.name()),
             None => BoxPath(record.name().to_string()),
         };
 
