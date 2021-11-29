@@ -60,7 +60,7 @@ fn parse_attrs(
             let key = chunks.next().unwrap();
             println!("{}", key);
             let value: Option<serde_json::Value> = chunks.next().map(|v| {
-                serde_json::from_str(&v)
+                serde_json::from_str(v)
                     .unwrap_or_else(|_| serde_json::Value::String(v.to_string()))
             });
             Ok((key.to_string(), value))
@@ -337,7 +337,7 @@ fn list(path: &Path, _selected_files: Vec<PathBuf>, verbose: bool) -> Result<()>
             Record::Link(link_record) => {
                 let target = format_path(
                     &link_record.target,
-                    bf.resolve_link(&link_record)
+                    bf.resolve_link(link_record)
                         .map(|x| x.record.as_directory().is_some())
                         .unwrap_or(false),
                 );
@@ -535,7 +535,7 @@ impl<R: Read> Crc32Reader<R> {
 
 impl<R: Read> Read for Crc32Reader<R> {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        self.hasher.update(&buf);
+        self.hasher.update(buf);
         self.inner.read(buf)
     }
 }
@@ -560,7 +560,7 @@ fn process_files<I: Iterator<Item = PathBuf>>(
         if !allow_hidden {
             walker = walker.process_read_dir(|_, e| {
                 e.retain(|entry| match entry {
-                    Ok(v) => !is_hidden(&v),
+                    Ok(v) => !is_hidden(v),
                     _ => true,
                 });
             });

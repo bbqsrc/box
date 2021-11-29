@@ -180,13 +180,13 @@ mod tests {
         });
     }
 
-    #[test]
-    fn read_index() {
-        insert_impl("./read_index.box", |n| BoxFileWriter::create(n).unwrap());
+    // #[test]
+    // fn read_index() {
+    //     insert_impl("./read_index.box", |n| BoxFileWriter::create(n).unwrap());
 
-        let bf = BoxFileReader::open("./read_index.box").unwrap();
-        let fst = bf.meta.index.unwrap();
+    //     let bf = BoxFileReader::open("./read_index.box").unwrap();
+    //     let fst = bf.meta.index.unwrap();
 
-        fst.get("nothing");
-    }
+    //     fst.get("nothing");
+    // }
 }
