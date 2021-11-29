@@ -1,3 +1,7 @@
+//! Herein lies the brains of the `box` file format.
+//!
+//! Use [BoxFileReader][BoxFileReader] to read files, and [BoxFileWriter][BoxFileWriter] to write files.
+
 mod compression;
 #[cfg(feature = "reader")]
 mod de;

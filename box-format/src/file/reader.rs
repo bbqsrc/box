@@ -5,7 +5,7 @@ use std::num::NonZeroU64;
 use std::path::{Path, PathBuf};
 
 use comde::Decompress;
-use memmap::MmapOptions;
+use memmap2::{Mmap, MmapOptions};
 
 use super::{meta::RecordsItem, BoxMetadata};
 use crate::{
@@ -34,18 +34,11 @@ pub(super) fn read_header<R: Read + Seek>(file: &mut R, offset: u64) -> io::Resu
 pub(super) fn read_trailer<R: Read + Seek, P: AsRef<Path>>(
     reader: &mut R,
     ptr: NonZeroU64,
-    path: P,
+    _path: P,
     offset: u64,
 ) -> io::Result<BoxMetadata> {
     reader.seek(SeekFrom::Start(offset + ptr.get()))?;
-    let mut meta = BoxMetadata::deserialize_owned(reader)?;
-
-    // Load index if exists
-    let offset = reader.seek(SeekFrom::Current(0))?;
-    let file = File::open(path.as_ref())?;
-    let fst_mmap = unsafe { memmap::MmapOptions::new().offset(offset).map(&file)? };
-    let index = pathtrie::fst::Fst::new(fst_mmap).ok();
-    meta.index = index;
+    let meta = BoxMetadata::deserialize_owned(reader)?;
 
     Ok(meta)
 }
@@ -177,7 +170,7 @@ impl BoxFileReader {
     /// of the application. Ensure that the Box being operated on is not mutated while a memory
     /// map is in use.
     #[inline(always)]
-    pub unsafe fn memory_map(&self, record: &FileRecord) -> io::Result<memmap::Mmap> {
+    pub unsafe fn memory_map(&self, record: &FileRecord) -> io::Result<Mmap> {
         MmapOptions::new()
             .offset(self.offset + record.data.get())
             .len(record.length as usize)

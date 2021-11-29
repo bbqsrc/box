@@ -6,7 +6,7 @@ use std::io::{prelude::*, BufReader, BufWriter, Result, SeekFrom};
 use std::num::NonZeroU64;
 use std::path::{Path, PathBuf};
 
-use memmap::MmapOptions;
+use memmap2::{Mmap, MmapOptions};
 
 use crate::{
     compression::Compression,
@@ -313,7 +313,7 @@ impl BoxFileWriter {
     /// Use of memory maps is unsafe as modifications to the file could affect the operation
     /// of the application. Ensure that the Box being operated on is not mutated while a memory
     /// map is in use.
-    pub unsafe fn data(&self, record: &FileRecord) -> std::io::Result<memmap::Mmap> {
+    pub unsafe fn data(&self, record: &FileRecord) -> std::io::Result<Mmap> {
         self.read_data(record)
     }
 
@@ -355,10 +355,10 @@ impl BoxFileWriter {
     }
 
     #[inline(always)]
-    unsafe fn read_data(&self, header: &FileRecord) -> std::io::Result<memmap::Mmap> {
+    unsafe fn read_data(&self, header: &FileRecord) -> std::io::Result<Mmap> {
         MmapOptions::new()
             .offset(header.data.get())
             .len(header.length as usize)
-            .map(&self.file.get_ref())
+            .map(self.file.get_ref())
     }
 }

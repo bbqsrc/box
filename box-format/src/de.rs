@@ -7,7 +7,7 @@ use fastvlq::ReadVu64Ext as _;
 
 use crate::{
     AttrMap, BoxHeader, BoxMetadata, BoxPath, Compression, DirectoryRecord, FileRecord, LinkRecord,
-    Record,
+    Record, file::Inode,
 };
 
 use crate::compression::constants::*;
@@ -78,7 +78,6 @@ impl DeserializeOwned for FileRecord {
     }
 }
 
-use crate::file::Inode;
 impl DeserializeOwned for Inode {
     fn deserialize_owned<R: Read>(reader: &mut R) -> std::io::Result<Self> {
         reader.read_vu64().and_then(Inode::new)
@@ -173,7 +172,7 @@ impl DeserializeOwned for BoxMetadata {
             inodes,
             attr_keys,
             attrs,
-            index: None,
+            // index: None,
         })
     }
 }

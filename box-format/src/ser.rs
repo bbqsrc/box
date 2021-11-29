@@ -135,15 +135,16 @@ impl Serialize for BoxMetadata {
         self.inodes.write(writer)?;
         self.attr_keys.write(writer)?;
         self.attrs.write(writer)?;
+        Ok(())
 
         // Write the index
-        let mut builder = pathtrie::PathTrie::new();
+        // let mut builder = pathtrie::PathTrie::new();
 
-        for x in self.iter() {
-            builder.insert(x.path, x.inode.get())
-        }
+        // for x in self.iter() {
+        //     builder.insert(x.path, x.inode.get())
+        // }
 
-        builder.write_fst(writer)
+        // builder.write_fst(writer)
     }
 }
 

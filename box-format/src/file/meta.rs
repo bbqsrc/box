@@ -24,8 +24,8 @@ pub struct BoxMetadata {
     /// The global attributes that apply to this entire box file.
     pub(crate) attrs: AttrMap,
 
-    /// The index of paths to files.
-    pub(crate) index: Option<pathtrie::fst::Fst<u64>>,
+    // /// The index of paths to files.
+    // pub(crate) index: Option<pathtrie::fst::Fst<u64>>,
 }
 
 pub struct Records<'a> {
@@ -190,9 +190,9 @@ impl BoxMetadata {
 
     #[inline(always)]
     pub fn inode(&self, path: &BoxPath) -> Option<Inode> {
-        if let Some(inode) = self.index.as_ref().and_then(|x| x.get(path)) {
-            return Inode::new(inode).ok();
-        };
+        // if let Some(inode) = self.index.as_ref().and_then(|x| x.get(path)) {
+        //     return Inode::new(inode).ok();
+        // };
 
         FindRecord::new(self, path.iter().map(str::to_string).collect(), &*self.root).next()
     }

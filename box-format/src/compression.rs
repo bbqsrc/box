@@ -45,7 +45,7 @@ impl Default for Compression {
 }
 
 impl Compression {
-    pub fn available_variants() -> &'static [&'static str] {
+    pub const fn available_variants() -> &'static [&'static str] {
         &["stored", "brotli", "deflate", "snappy", "xz", "zstd"]
     }
 }
@@ -75,7 +75,7 @@ impl fmt::Debug for Compression {
 }
 
 impl Compression {
-    pub fn id(self) -> u8 {
+    pub const fn id(self) -> u8 {
         use Compression::*;
 
         match self {

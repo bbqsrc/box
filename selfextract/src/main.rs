@@ -2,6 +2,7 @@
 
 use std::process::{Command, Stdio};
 
+use memmap2::Mmap;
 use box_format::BoxFileReader;
 use gumdrop::Options;
 
@@ -46,7 +47,7 @@ fn open_box_segment() -> Result<BoxFileReader, i32> {
         }
     };
 
-    let mmap = match unsafe { memmap::Mmap::map(&file) } {
+    let mmap = match unsafe { Mmap::map(&file) } {
         Ok(v) => v,
         Err(e) => {
             eprintln!("ERROR: Could not access self-extractor for opening!");
