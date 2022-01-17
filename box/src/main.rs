@@ -318,9 +318,9 @@ fn list(path: &Path, _selected_files: Vec<PathBuf>, verbose: bool) -> Result<()>
     } else {
         println!(")");
     }
-    println!("-------------  -------------  -------------  ---------------------  ----------  ---------  --------");
-    println!(" Method         Compressed     Length         Created                Attrs       CRC32      Path");
-    println!("-------------  -------------  -------------  ---------------------  ----------  ---------  --------");
+    println!("--------  -------------  -------------  ---------------------  ----------  ---------  --------");
+    println!(" Method    Compressed     Length         Created                Attrs       CRC32      Path");
+    println!("--------  -------------  -------------  ---------------------  ----------  ---------  --------");
     for result in bf.metadata().iter() {
         let record = result.record;
 
@@ -331,8 +331,8 @@ fn list(path: &Path, _selected_files: Vec<PathBuf>, verbose: bool) -> Result<()>
         match record {
             Record::Directory(_) => {
                 println!(
-                    " {:12}  {:>12}   {:>12}   {:<20}   {:<9}   {:>8}   {}",
-                    "<directory>", "-", "-", time, acl, "-", path,
+                    "{:8}  {:>12}   {:>12}   {:<20}   {:<9}   {:>8}   {}",
+                    "<dir>", "-", "-", time, acl, "-", path,
                 );
             }
             Record::Link(link_record) => {
@@ -344,7 +344,7 @@ fn list(path: &Path, _selected_files: Vec<PathBuf>, verbose: bool) -> Result<()>
                 );
 
                 println!(
-                    " {:12}  {:>12}   {:>12}   {:<20}   {:<9}   {:>8}   {} -> {}",
+                    "{:8}  {:>12}   {:>12}   {:<20}   {:<9}   {:>8}   {} -> {}",
                     "<link>", "-", "-", time, acl, "-", path, target,
                 );
             }
@@ -362,8 +362,8 @@ fn list(path: &Path, _selected_files: Vec<PathBuf>, verbose: bool) -> Result<()>
                     .unwrap_or_else(|| "-".to_string());
 
                 println!(
-                    " {:12}  {:>12}   {:>12}   {:<20}   {:<9}   {:>8}   {}",
-                    format!("{:?}", record.compression),
+                    "{:8}  {:>12}   {:>12}   {:<20}   {:<9}   {:>8}   {}",
+                    format!("{}", record.compression),
                     length,
                     decompressed_length,
                     time,

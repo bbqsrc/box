@@ -57,11 +57,11 @@ impl fmt::Display for Compression {
         let s = match self {
             Stored => "stored",
             Deflate => "DEFLATE",
-            Zstd => "Zstandard",
+            Zstd => "Zstd",
             Xz => "xz",
             Snappy => "Snappy",
             Brotli => "Brotli",
-            Unknown(id) => return write!(f, "Unknown(id: {:x})", id),
+            Unknown(id) => return write!(f, "?{:x}?", id),
         };
 
         write!(f, "{}", s)
