@@ -252,7 +252,7 @@ impl BoxFileReader {
         record: &Record,
         output_path: &Path,
     ) -> Result<(), ExtractError> {
-        println!("{} -> {}: {:?}", path, output_path.display(), record);
+        // println!("{} -> {}: {:?}", path, output_path.display(), record);
         match record {
             Record::File(file) => {
                 fs::create_dir_all(&output_path)
