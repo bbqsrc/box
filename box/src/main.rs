@@ -688,6 +688,7 @@ fn process_files<I: Iterator<Item = PathBuf>>(
                 if verbose {
                     println!("{} (directory)", &file_path.display());
                 }
+                #[allow(unused_mut)]
                 let mut dir_meta = metadata(&meta);
                 #[cfg(unix)]
                 {
@@ -707,6 +708,7 @@ fn process_files<I: Iterator<Item = PathBuf>>(
                 path: file_path.to_path_buf(),
                 source,
             })?;
+            #[allow(unused_mut)]
             let mut file_meta = metadata(&meta);
 
             #[cfg(unix)]
