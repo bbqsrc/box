@@ -1,11 +1,11 @@
 use std::collections::HashMap;
-use std::ffi::{OsStr, OsString};
+use std::ffi::OsStr;
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use fuse::{
-    FileAttr, FileType, Filesystem, ReplyAttr, ReplyData, ReplyDirectory, ReplyEmpty, ReplyEntry,
-    Request,
+use fuser::{
+    FileAttr, FileType, Filesystem, MountOption, ReplyAttr, ReplyData, ReplyDirectory, ReplyEmpty,
+    ReplyEntry, Request,
 };
 use libc::{ENOENT, ENOSYS};
 use structopt::StructOpt;
@@ -42,6 +42,7 @@ fn root_dir_attr(meta: &BoxMetadata) -> FileAttr {
         gid: 20,
         rdev: 0,
         flags: 0,
+        blksize: 0,
     }
 }
 
@@ -94,6 +95,7 @@ impl RecordExt for box_format::Record {
             gid: 20,
             rdev: 0,
             flags: 0,
+            blksize: 0,
         }
     }
 
@@ -170,11 +172,13 @@ impl Filesystem for BoxFs {
 
     fn read(
         &mut self,
-        _req: &Request,
+        _req: &Request<'_>,
         ino: u64,
         _fh: u64,
         offset: i64,
         size: u32,
+        _flags: i32,
+        _lock_owner: Option<u64>,
         reply: ReplyData,
     ) {
         let inode = match inode(ino) {
@@ -218,8 +222,8 @@ impl Filesystem for BoxFs {
         _req: &Request<'_>,
         ino: u64,
         _fh: u64,
-        _flags: u32,
-        _lock_owner: u64,
+        _flags: i32,
+        _lock_owner: Option<u64>,
         _flush: bool,
         reply: ReplyEmpty,
     ) {
@@ -311,9 +315,9 @@ fn main() {
     let opts = Options::from_args();
     let bf = BoxFileReader::open(opts.box_file).unwrap();
     log::info!("{:?}", &bf);
-    let fsname = OsString::from(format!("fsname={}", bf.path().display()));
-    let x = vec!["-o", "ro", "-o"];
-    let mut options = x.iter().map(|o| o.as_ref()).collect::<Vec<&OsStr>>();
-    options.push(&fsname);
-    fuse::mount(BoxFs(bf, HashMap::new()), &opts.mountpoint, &options).unwrap();
+    let mount_opts = &[
+        MountOption::RO,
+        MountOption::FSName(bf.path().to_string_lossy().to_string()),
+    ];
+    fuser::mount2(BoxFs(bf, HashMap::new()), &opts.mountpoint, mount_opts).unwrap();
 }

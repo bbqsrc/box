@@ -5,9 +5,9 @@ authors = ["Brendan Molloy <brendan@bbqsrc.net>"]
 edition = "2018"
 
 [dependencies]
-fuse = { git = "https://github.com/zargony/rust-fuse" }
+fuser = { git = "https://github.com/cberner/fuser" }
 structopt = "0.3.17"
 box-format = { path = "../box-format" }
-env_logger = "0.7.1"
+env_logger = "0.9"
 libc = "0.2.76"
 log = "0.4.11"

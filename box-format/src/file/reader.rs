@@ -193,11 +193,10 @@ impl BoxFileReader {
             .meta
             .inode(path)
             .ok_or_else(|| ExtractError::NotFoundInArchive(path.to_path_buf()))?;
-        
-        Records::new(&self.meta, &[inode], None)
-            .try_for_each(|RecordsItem { path, record, .. }| {
-                self.extract_inner(&path, record, output_path)
-            })
+
+        Records::new(&self.meta, &[inode], None).try_for_each(
+            |RecordsItem { path, record, .. }| self.extract_inner(&path, record, output_path),
+        )
     }
 
     #[inline(always)]

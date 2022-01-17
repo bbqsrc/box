@@ -202,6 +202,7 @@ enum Commands {
             parse(from_os_str),
             help = "Path to the .box archive"
         )]
+        #[allow(unused)]
         path: PathBuf,
     },
 }
@@ -570,7 +571,7 @@ fn process_files<I: Iterator<Item = PathBuf>>(
             walker = walker.parallelism(jwalk::Parallelism::Serial).max_depth(0);
         }
         if !allow_hidden {
-            walker = walker.process_read_dir(|_, e| {
+            walker = walker.process_read_dir(|_, _, _, e| {
                 e.retain(|entry| match entry {
                     Ok(v) => !is_hidden(v),
                     _ => true,
