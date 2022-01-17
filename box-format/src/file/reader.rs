@@ -132,6 +132,46 @@ impl BoxFileReader {
     }
 
     #[inline(always)]
+    pub fn extract_recursive<P: AsRef<Path>>(
+        &self,
+        path: &BoxPath,
+        output_path: P,
+    ) -> io::Result<()> {
+        let output_path = output_path.as_ref().canonicalize()?;
+
+        let record = self
+            .meta
+            .inode(path)
+            .and_then(|x| self.meta.record(x))
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::NotFound,
+                    format!("Path not found in archive: {}", path),
+                )
+            })?;
+
+        match record {
+            Record::File(_) | Record::Link(_) => self.extract_inner(path, record, &output_path),
+            Record::Directory(d) => {
+                self.extract_inner(path, record, &output_path)?;
+
+                // TODO: iterate all the things
+                for inode in d.inodes.iter() {
+                    if let Some(record) = self.meta.record(*inode) {
+                        let path = path
+                            .join(record.name())
+                            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+
+                        self.extract_recursive(&path, &output_path)?;
+                    }
+                }
+
+                Ok(())
+            }
+        }
+    }
+
+    #[inline(always)]
     pub fn extract_all<P: AsRef<Path>>(&self, output_path: P) -> io::Result<()> {
         let output_path = output_path.as_ref().canonicalize()?;
         self.meta

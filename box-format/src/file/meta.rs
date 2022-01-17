@@ -23,7 +23,6 @@ pub struct BoxMetadata {
 
     /// The global attributes that apply to this entire box file.
     pub(crate) attrs: AttrMap,
-
     // /// The index of paths to files.
     // pub(crate) index: Option<pathtrie::fst::Fst<u64>>,
 }
