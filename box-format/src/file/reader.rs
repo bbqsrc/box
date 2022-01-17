@@ -108,7 +108,7 @@ impl BoxFileReader {
         let (header, meta) = {
             let mut reader = BufReader::new(&mut file);
             let header = read_header(&mut reader, offset).map_err(OpenError::MissingHeader)?;
-            let ptr = header.trailer.ok_or_else(|| OpenError::MissingTrailer)?;
+            let ptr = header.trailer.ok_or(OpenError::MissingTrailer)?;
             let meta =
                 read_trailer(&mut reader, ptr, &path, offset).map_err(OpenError::InvalidTrailer)?;
 
@@ -178,7 +178,7 @@ impl BoxFileReader {
             .inode(path)
             .and_then(|x| self.meta.record(x))
             .ok_or_else(|| ExtractError::NotFoundInArchive(path.to_path_buf()))?;
-        self.extract_inner(path, record, &output_path)
+        self.extract_inner(path, record, output_path)
     }
 
     #[inline(always)]
@@ -196,7 +196,7 @@ impl BoxFileReader {
         
         Records::new(&self.meta, &[inode], None)
             .try_for_each(|RecordsItem { path, record, .. }| {
-                self.extract_inner(&path, record, &output_path)
+                self.extract_inner(&path, record, output_path)
             })
     }
 
@@ -206,7 +206,7 @@ impl BoxFileReader {
         self.meta
             .iter()
             .try_for_each(|RecordsItem { path, record, .. }| {
-                self.extract_inner(&path, record, &output_path)
+                self.extract_inner(&path, record, output_path)
             })
     }
 
