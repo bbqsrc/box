@@ -162,7 +162,7 @@ impl BoxFileReader {
                             .join(record.name())
                             .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
 
-                        self.extract_recursive(&path, &output_path)?;
+                        self.extract_recursive(&path, &output_path.join(record.name()))?;
                     }
                 }
 
