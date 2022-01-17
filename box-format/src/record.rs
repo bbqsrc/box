@@ -3,7 +3,7 @@ use crate::{compression::Compression, path::BoxPath, AttrMap};
 use crate::file::{BoxMetadata, Inode};
 use std::num::NonZeroU64;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum Record {
     File(FileRecord),
     Directory(DirectoryRecord),
@@ -93,7 +93,7 @@ impl Record {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct LinkRecord {
     pub name: String,
 
@@ -119,7 +119,7 @@ impl LinkRecord {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct DirectoryRecord {
     /// The name of the directory
     pub name: String, // TODO: BoxName
@@ -152,7 +152,7 @@ impl DirectoryRecord {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct FileRecord {
     /// a bytestring representing the type of compression being used, always 8 bytes.
     pub compression: Compression,

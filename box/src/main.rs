@@ -7,6 +7,7 @@ use std::num::NonZeroU64;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
+use box_format::path::IntoBoxPathError;
 use box_format::{
     path::PATH_PLATFORM_SEP, BoxFileReader, BoxFileWriter, BoxPath, Compression, Record,
 };
@@ -60,8 +61,7 @@ fn parse_attrs(
             let key = chunks.next().unwrap();
             println!("{}", key);
             let value: Option<serde_json::Value> = chunks.next().map(|v| {
-                serde_json::from_str(v)
-                    .unwrap_or_else(|_| serde_json::Value::String(v.to_string()))
+                serde_json::from_str(v).unwrap_or_else(|_| serde_json::Value::String(v.to_string()))
             });
             Ok((key.to_string(), value))
         })
@@ -398,7 +398,7 @@ fn list(path: &Path, _selected_files: Vec<PathBuf>, verbose: bool) -> Result<()>
 fn extract(
     path: &Path,
     output_path: &Path,
-    _selected_files: Vec<PathBuf>,
+    selected_files: Vec<PathBuf>,
     _verbose: bool,
 ) -> Result<()> {
     println!("{} {}", path.display(), output_path.display());
@@ -406,8 +406,20 @@ fn extract(
         path: path.to_path_buf(),
         source,
     })?;
-    bf.extract_all(output_path)
-        .map_err(|source| Error::CannotExtractFiles { source })
+
+    if selected_files.is_empty() {
+        bf.extract_all(output_path)
+            .map_err(|source| Error::CannotExtractFiles { source })
+    } else {
+        for path in selected_files {
+            let path =
+                BoxPath::new(&path).map_err(|source| Error::CannotConvertPath { source, path })?;
+            println!("{:?} {:?}", &path, &output_path);
+            bf.extract_recursive(&path, output_path)
+                .map_err(|source| Error::CannotExtractFiles { source })?;
+        }
+        Ok(())
+    }
 }
 
 type ParentDirs = (BoxPath, HashMap<String, Vec<u8>>);
@@ -870,19 +882,19 @@ fn create(mut path: PathBuf, opts: CreateOpts) -> Result<()> {
     Ok(())
 }
 
-fn main() -> Result<()> {
+fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
 
     let opts = CliOpts::from_iter(wild::args_os());
 
     match opts.cmd {
-        Commands::List { path } => list(&path, opts.selected_files, opts.verbose),
-        Commands::Extract { path, output_path } => extract(
+        Commands::List { path } => Ok(list(&path, opts.selected_files, opts.verbose)?),
+        Commands::Extract { path, output_path } => Ok(extract(
             &path,
             &output_path.unwrap_or_else(|| std::env::current_dir().expect("no pwd")),
             opts.selected_files,
             opts.verbose,
-        ),
+        )?),
         Commands::Create {
             path,
             alignment,
@@ -892,7 +904,7 @@ fn main() -> Result<()> {
             attrs,
         } => {
             let attrs = parse_attrs(attrs)?;
-            create(
+            Ok(create(
                 path,
                 CreateOpts {
                     selected_files: opts.selected_files,
@@ -903,7 +915,7 @@ fn main() -> Result<()> {
                     attrs,
                     ..Default::default()
                 },
-            )
+            )?)
         }
         #[cfg(feature = "selfextract")]
         Commands::CreateSelfExtracting {
@@ -912,7 +924,7 @@ fn main() -> Result<()> {
             allow_hidden,
             exec_cmd,
             args_cmd,
-        } => create(
+        } => Ok(create(
             path,
             CreateOpts {
                 selected_files: opts.selected_files,
@@ -924,7 +936,7 @@ fn main() -> Result<()> {
                 args_cmd,
                 ..Default::default()
             },
-        ),
+        )?),
         Commands::Test { .. } => unimplemented!(),
     }
 }
@@ -945,7 +957,7 @@ enum Error {
     CannotOpenArchive {
         path: PathBuf,
         #[source]
-        source: std::io::Error,
+        source: box_format::OpenError,
     },
 
     #[error("Cannot open file `{}`", path.display())]
@@ -1048,7 +1060,7 @@ enum Error {
     #[error("Cannot extract files")]
     CannotExtractFiles {
         #[source]
-        source: std::io::Error,
+        source: box_format::ExtractError,
     },
 
     #[error("Cannot set attribute `{key}` to value `{value:x?}`")]
@@ -1063,5 +1075,12 @@ enum Error {
     CannotGetCurrentDir {
         #[source]
         source: std::io::Error,
+    },
+
+    #[error("Cannot convert path `{}` to a valid Box path", .path.display())]
+    CannotConvertPath {
+        #[source]
+        source: IntoBoxPathError,
+        path: PathBuf,
     },
 }

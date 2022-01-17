@@ -27,6 +27,7 @@ pub struct BoxMetadata {
     // pub(crate) index: Option<pathtrie::fst::Fst<u64>>,
 }
 
+#[derive(Debug)]
 pub struct Records<'a> {
     meta: &'a BoxMetadata,
     inodes: &'a [Inode],
@@ -52,6 +53,7 @@ impl<'a> Records<'a> {
 }
 
 #[non_exhaustive]
+#[derive(Debug)]
 pub struct RecordsItem<'a> {
     pub(crate) inode: Inode,
     pub path: BoxPath,
@@ -103,6 +105,7 @@ impl<'a> Iterator for Records<'a> {
     }
 }
 
+#[derive(Debug)]
 pub struct FindRecord<'a> {
     meta: &'a BoxMetadata,
     query: VecDeque<String>,
@@ -268,6 +271,7 @@ impl BoxMetadata {
     }
 }
 
+#[derive(Debug)]
 pub enum AttrValue<'a> {
     String(&'a str),
     Bytes(&'a [u8]),

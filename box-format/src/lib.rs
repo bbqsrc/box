@@ -18,7 +18,7 @@ pub mod ffi;
 pub use self::file::Inode;
 pub use compression::Compression;
 #[cfg(feature = "reader")]
-pub use file::reader::BoxFileReader;
+pub use file::reader::{BoxFileReader, ExtractError, OpenError};
 #[cfg(feature = "writer")]
 pub use file::writer::BoxFileWriter;
 pub use file::{meta::AttrValue, AttrMap, BoxMetadata};

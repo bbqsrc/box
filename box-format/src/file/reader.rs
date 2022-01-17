@@ -7,7 +7,9 @@ use std::path::{Path, PathBuf};
 use comde::Decompress;
 use memmap2::{Mmap, MmapOptions};
 
+use super::meta::Records;
 use super::{meta::RecordsItem, BoxMetadata};
+use crate::path::IntoBoxPathError;
 use crate::{
     de::DeserializeOwned,
     header::BoxHeader,
@@ -43,41 +45,90 @@ pub(super) fn read_trailer<R: Read + Seek, P: AsRef<Path>>(
     Ok(meta)
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum OpenError {
+    #[error("Could not find trailer (the end of the file is missing).")]
+    MissingTrailer,
+
+    #[error("Invalid trailer data (the data that describes where all the files are is invalid).")]
+    InvalidTrailer(#[source] std::io::Error),
+
+    #[error("Could not read header. Is this a valid Box archive?")]
+    MissingHeader(#[source] std::io::Error),
+
+    #[error("Invalid path to Box file. Path: '{}'", .1.display())]
+    InvalidPath(#[source] std::io::Error, PathBuf),
+
+    #[error("Failed to read Box file. Path: '{}'", .1.display())]
+    ReadFailed(#[source] std::io::Error, PathBuf),
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum ExtractError {
+    #[error("Creating directory failed. Path: '{}'", .1.display())]
+    CreateDirFailed(#[source] std::io::Error, PathBuf),
+
+    #[error("Creating file failed. Path: '{}'", .1.display())]
+    CreateFileFailed(#[source] std::io::Error, PathBuf),
+
+    #[error("Path not found in archive. Path: '{}'", .0.display())]
+    NotFoundInArchive(PathBuf),
+
+    #[error("Decompressing file failed. Path: '{}'", .1.display())]
+    DecompressionFailed(#[source] std::io::Error, PathBuf),
+
+    #[error("Creating link failed. Path: '{}' -> '{}'", .1.display(), .2.display())]
+    CreateLinkFailed(#[source] std::io::Error, PathBuf, PathBuf),
+
+    #[error("Resolving link failed: Path: '{}' -> '{}'", .1.name, .1.target)]
+    ResolveLinkFailed(#[source] std::io::Error, LinkRecord),
+
+    #[error("Could not convert to a valid Box path. Path suffix: '{}'", .1)]
+    ResolveBoxPathFailed(#[source] IntoBoxPathError, String),
+}
+
 impl BoxFileReader {
     /// This will open an existing `.box` file for reading and writing, and error if the file is not valid.
-    pub fn open_at_offset<P: AsRef<Path>>(path: P, offset: u64) -> io::Result<BoxFileReader> {
-        OpenOptions::new()
+    pub fn open_at_offset<P: AsRef<Path>>(
+        path: P,
+        offset: u64,
+    ) -> Result<BoxFileReader, OpenError> {
+        let path = path.as_ref().to_path_buf();
+        let path = path
+            .canonicalize()
+            .map_err(|e| OpenError::InvalidPath(e, path.to_path_buf()))?;
+
+        let mut file = OpenOptions::new()
             .read(true)
-            .open(path.as_ref())
-            .map(|mut file| {
-                // Try to load the header so we can easily rewrite it when saving.
-                // If header is invalid, we're not even loading a .box file.
-                let (header, meta) = {
-                    let mut reader = BufReader::new(&mut file);
-                    let header = read_header(&mut reader, offset)?;
-                    let ptr = header
-                        .trailer
-                        .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "no trailer found"))?;
-                    let meta = read_trailer(&mut reader, ptr, path.as_ref(), offset)?;
+            .open(&path)
+            .map_err(|e| OpenError::ReadFailed(e, path.clone()))?;
 
-                    (header, meta)
-                };
+        // Try to load the header so we can easily rewrite it when saving.
+        // If header is invalid, we're not even loading a .box file.
+        let (header, meta) = {
+            let mut reader = BufReader::new(&mut file);
+            let header = read_header(&mut reader, offset).map_err(OpenError::MissingHeader)?;
+            let ptr = header.trailer.ok_or_else(|| OpenError::MissingTrailer)?;
+            let meta =
+                read_trailer(&mut reader, ptr, &path, offset).map_err(OpenError::InvalidTrailer)?;
 
-                let f = BoxFileReader {
-                    file: BufReader::new(file),
-                    path: path.as_ref().to_path_buf().canonicalize()?,
-                    header,
-                    meta,
-                    offset,
-                };
+            (header, meta)
+        };
 
-                Ok(f)
-            })?
+        let f = BoxFileReader {
+            file: BufReader::new(file),
+            path,
+            header,
+            meta,
+            offset,
+        };
+
+        Ok(f)
     }
 
     /// This will open an existing `.box` file for reading and writing, and error if the file is not valid.
     #[inline]
-    pub fn open<P: AsRef<Path>>(path: P) -> io::Result<BoxFileReader> {
+    pub fn open<P: AsRef<Path>>(path: P) -> Result<BoxFileReader, OpenError> {
         Self::open_at_offset(path, 0)
     }
 
@@ -116,18 +167,17 @@ impl BoxFileReader {
     }
 
     #[inline(always)]
-    pub fn extract<P: AsRef<Path>>(&self, path: &BoxPath, output_path: P) -> io::Result<()> {
-        let output_path = output_path.as_ref().canonicalize()?;
+    pub fn extract<P: AsRef<Path>>(
+        &self,
+        path: &BoxPath,
+        output_path: P,
+    ) -> Result<(), ExtractError> {
+        let output_path = output_path.as_ref();
         let record = self
             .meta
             .inode(path)
             .and_then(|x| self.meta.record(x))
-            .ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::NotFound,
-                    format!("Path not found in archive: {}", path),
-                )
-            })?;
+            .ok_or_else(|| ExtractError::NotFoundInArchive(path.to_path_buf()))?;
         self.extract_inner(path, record, &output_path)
     }
 
@@ -136,44 +186,23 @@ impl BoxFileReader {
         &self,
         path: &BoxPath,
         output_path: P,
-    ) -> io::Result<()> {
-        let output_path = output_path.as_ref().canonicalize()?;
+    ) -> Result<(), ExtractError> {
+        let output_path = output_path.as_ref();
 
-        let record = self
+        let inode = self
             .meta
             .inode(path)
-            .and_then(|x| self.meta.record(x))
-            .ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::NotFound,
-                    format!("Path not found in archive: {}", path),
-                )
-            })?;
-
-        match record {
-            Record::File(_) | Record::Link(_) => self.extract_inner(path, record, &output_path),
-            Record::Directory(d) => {
-                self.extract_inner(path, record, &output_path)?;
-
-                // TODO: iterate all the things
-                for inode in d.inodes.iter() {
-                    if let Some(record) = self.meta.record(*inode) {
-                        let path = path
-                            .join(record.name())
-                            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
-
-                        self.extract_recursive(&path, &output_path.join(record.name()))?;
-                    }
-                }
-
-                Ok(())
-            }
-        }
+            .ok_or_else(|| ExtractError::NotFoundInArchive(path.to_path_buf()))?;
+        
+        Records::new(&self.meta, &[inode], None)
+            .try_for_each(|RecordsItem { path, record, .. }| {
+                self.extract_inner(&path, record, &output_path)
+            })
     }
 
     #[inline(always)]
-    pub fn extract_all<P: AsRef<Path>>(&self, output_path: P) -> io::Result<()> {
-        let output_path = output_path.as_ref().canonicalize()?;
+    pub fn extract_all<P: AsRef<Path>>(&self, output_path: P) -> Result<(), ExtractError> {
+        let output_path = output_path.as_ref();
         self.meta
             .iter()
             .try_for_each(|RecordsItem { path, record, .. }| {
@@ -218,12 +247,20 @@ impl BoxFileReader {
     }
 
     #[inline(always)]
-    fn extract_inner(&self, path: &BoxPath, record: &Record, output_path: &Path) -> io::Result<()> {
-        // println!("{} -> {}: {:?}", path, output_path.display(), record);
+    fn extract_inner(
+        &self,
+        path: &BoxPath,
+        record: &Record,
+        output_path: &Path,
+    ) -> Result<(), ExtractError> {
+        println!("{} -> {}: {:?}", path, output_path.display(), record);
         match record {
             Record::File(file) => {
+                fs::create_dir_all(&output_path)
+                    .map_err(|e| ExtractError::CreateDirFailed(e, output_path.to_path_buf()))?;
                 let out_path = output_path.join(path.to_path_buf());
                 let mut out_file = std::fs::OpenOptions::new();
+
                 #[cfg(unix)]
                 {
                     use std::os::unix::fs::OpenOptionsExt;
@@ -237,34 +274,52 @@ impl BoxFileReader {
                         out_file.mode(mode);
                     }
                 }
-                let out_file = out_file.create(true).write(true).open(&out_path)?;
+
+                let out_file = out_file
+                    .create(true)
+                    .write(true)
+                    .open(&out_path)
+                    .map_err(|e| ExtractError::CreateFileFailed(e, out_path.to_path_buf()))?;
 
                 let out_file = BufWriter::new(out_file);
-                self.decompress(file, out_file)?;
+                self.decompress(file, out_file)
+                    .map_err(|e| ExtractError::DecompressionFailed(e, path.to_path_buf()))?;
 
                 Ok(())
             }
-            Record::Directory(_dir) => fs::create_dir_all(output_path.join(path.to_path_buf())),
+            Record::Directory(_dir) => {
+                fs::create_dir_all(&output_path)
+                    .map_err(|e| ExtractError::CreateDirFailed(e, output_path.to_path_buf()))?;
+                let new_dir = output_path.join(path.to_path_buf());
+                fs::create_dir(&new_dir).map_err(|e| ExtractError::CreateDirFailed(e, new_dir))
+            }
             #[cfg(unix)]
             Record::Link(link) => {
-                let link_target = self.resolve_link(link)?;
+                let link_target = self
+                    .resolve_link(link)
+                    .map_err(|e| ExtractError::ResolveLinkFailed(e, link.clone()))?;
 
                 let source = output_path.join(path.to_path_buf());
                 let destination = output_path.join(link_target.path.to_path_buf());
 
                 std::os::unix::fs::symlink(&source, &destination)
+                    .map_err(|e| ExtractError::CreateLinkFailed(e, source, destination))
             }
             #[cfg(windows)]
             Record::Link(link) => {
-                let link_target = self.resolve_link(link)?;
+                let link_target = self
+                    .resolve_link(link)
+                    .map_err(|e| ExtractError::ResolveLinkFailed(e, link.clone()))?;
 
                 let source = output_path.join(path.to_path_buf());
                 let destination = output_path.join(link_target.path.to_path_buf());
 
                 if link_target.record.as_directory().is_some() {
                     std::os::windows::fs::symlink_dir(&source, &destination)
+                        .map_err(|e| ExtractError::CreateLinkFailed(e, source, destination))
                 } else {
                     std::os::windows::fs::symlink_file(&source, &destination)
+                        .map_err(|e| ExtractError::CreateLinkFailed(e, source, destination))
                 }
             }
         }

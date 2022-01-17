@@ -21,7 +21,7 @@ crc32fast = "1.2.0"
 jwalk = "0.5.1"
 rayon = "1.5.0"
 thiserror = "1.0.21"
-anyhow = "1.0.32"
+anyhow = "1.0.52"
 tracing = "0.1.19"
 tracing-subscriber = { version = "0.2.11", features = ["fmt"] }
 wild = "2.0.4"
