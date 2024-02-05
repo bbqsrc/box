@@ -167,6 +167,16 @@ impl BoxFileReader {
     }
 
     #[inline(always)]
+    pub fn find(&self, path: &BoxPath) -> Result<&Record, ExtractError> {
+        let record = self
+            .meta
+            .inode(path)
+            .and_then(|x| self.meta.record(x))
+            .ok_or_else(|| ExtractError::NotFoundInArchive(path.to_path_buf()))?;
+        Ok(record)
+    }
+
+    #[inline(always)]
     pub fn extract<P: AsRef<Path>>(
         &self,
         path: &BoxPath,
