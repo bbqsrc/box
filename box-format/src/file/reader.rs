@@ -265,7 +265,7 @@ impl BoxFileReader {
         // println!("{} -> {}: {:?}", path, output_path.display(), record);
         match record {
             Record::File(file) => {
-                fs::create_dir_all(&output_path)
+                fs::create_dir_all(output_path)
                     .map_err(|e| ExtractError::CreateDirFailed(e, output_path.to_path_buf()))?;
                 let out_path = output_path.join(path.to_path_buf());
                 let mut out_file = std::fs::OpenOptions::new();
@@ -297,7 +297,7 @@ impl BoxFileReader {
                 Ok(())
             }
             Record::Directory(_dir) => {
-                fs::create_dir_all(&output_path)
+                fs::create_dir_all(output_path)
                     .map_err(|e| ExtractError::CreateDirFailed(e, output_path.to_path_buf()))?;
                 let new_dir = output_path.join(path.to_path_buf());
                 fs::create_dir(&new_dir).map_err(|e| ExtractError::CreateDirFailed(e, new_dir))

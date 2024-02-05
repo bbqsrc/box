@@ -566,7 +566,7 @@ fn process_files<I: Iterator<Item = PathBuf>>(
     mut known_files: HashSet<BoxPath>,
 ) -> Result<()> {
     let iter = iter.flat_map(|path| {
-        let mut walker = jwalk::WalkDir::new(&path).sort(true);
+        let mut walker = jwalk::WalkDir::new(path).sort(true);
         if !recursive {
             walker = walker.parallelism(jwalk::Parallelism::Serial).max_depth(0);
         }

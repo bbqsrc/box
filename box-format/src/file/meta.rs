@@ -91,7 +91,7 @@ impl<'a> Iterator for Records<'a> {
         if let Record::Directory(record) = record {
             self.cur_dir = Some(Box::new(Records::new(
                 self.meta,
-                &*record.inodes,
+                &record.inodes,
                 Some(base_path.clone()),
             )));
         }
@@ -153,7 +153,7 @@ impl<'a> Iterator for FindRecord<'a> {
                 } else if let Record::Directory(record) = v.1 {
                     let mut tmp = VecDeque::new();
                     std::mem::swap(&mut self.query, &mut tmp);
-                    let result = FindRecord::new(self.meta, tmp, &*record.inodes).next();
+                    let result = FindRecord::new(self.meta, tmp, &record.inodes).next();
                     log::debug!("FindRecord result: {:?}", &result);
                     result
                 } else {
@@ -168,7 +168,7 @@ impl<'a> Iterator for FindRecord<'a> {
 impl BoxMetadata {
     #[inline(always)]
     pub fn iter(&self) -> Records {
-        Records::new(self, &*self.root, None)
+        Records::new(self, &self.root, None)
     }
 
     #[inline(always)]
@@ -196,7 +196,7 @@ impl BoxMetadata {
         //     return Inode::new(inode).ok();
         // };
 
-        FindRecord::new(self, path.iter().map(str::to_string).collect(), &*self.root).next()
+        FindRecord::new(self, path.iter().map(str::to_string).collect(), &self.root).next()
     }
 
     #[inline(always)]

@@ -33,7 +33,7 @@ impl Serialize for String {
 impl Serialize for Vec<u8> {
     fn write<W: Write + Seek>(&self, writer: &mut W) -> std::io::Result<()> {
         writer.write_vu64(self.len() as u64)?;
-        writer.write_all(&*self)
+        writer.write_all(self)
     }
 }
 
@@ -42,7 +42,7 @@ impl Serialize for AttrMap {
         // Write the length in bytes so implementations can skip the entire map if they so choose.
 
         // Write it as u64::MAX, then seek back
-        let size_index = writer.seek(SeekFrom::Current(0))?;
+        let size_index = writer.stream_position()?;
         writer.write_u64::<LittleEndian>(std::u64::MAX)?;
         writer.write_vu64(self.len() as u64)?;
 
@@ -52,7 +52,7 @@ impl Serialize for AttrMap {
         }
 
         // Go back and write size
-        let cur_index = writer.seek(SeekFrom::Current(0))?;
+        let cur_index = writer.stream_position()?;
         writer.seek(SeekFrom::Start(size_index))?;
         writer.write_u64::<LittleEndian>(cur_index - size_index)?;
         writer.seek(SeekFrom::Start(cur_index))?;

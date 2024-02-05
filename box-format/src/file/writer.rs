@@ -49,7 +49,7 @@ impl BoxFileWriter {
         self.file.seek(SeekFrom::Start(pos))?;
         self.meta.write(&mut self.file)?;
 
-        let new_pos = self.file.seek(SeekFrom::Current(0))?;
+        let new_pos = self.file.stream_position()?;
         let file = self.file.get_mut();
         file.set_len(new_pos)?;
         Ok(new_pos)
@@ -181,7 +181,7 @@ impl BoxFileWriter {
 
     #[inline(always)]
     fn iter(&self) -> super::meta::Records {
-        super::meta::Records::new(self.metadata(), &*self.metadata().root, None)
+        super::meta::Records::new(self.metadata(), &self.metadata().root, None)
     }
 
     #[inline(always)]

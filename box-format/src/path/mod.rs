@@ -109,7 +109,7 @@ impl BoxPath {
     }
 
     pub fn join<P: AsRef<Path>>(&self, tail: P) -> std::result::Result<BoxPath, IntoBoxPathError> {
-        Self::new(&self.to_path_buf().join(tail))
+        Self::new(self.to_path_buf().join(tail))
     }
 
     pub(crate) fn join_unchecked(&self, tail: &str) -> BoxPath {

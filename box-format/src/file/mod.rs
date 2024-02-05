@@ -66,16 +66,13 @@ mod tests {
     #[test]
     fn read_garbage() {
         let filename = "./read_garbage.box";
-        create_test_box(&filename);
+        create_test_box(filename);
 
-        let bf = BoxFileReader::open(&filename).unwrap();
+        let bf = BoxFileReader::open(filename).unwrap();
         let trailer = bf.metadata();
         println!("{:?}", bf.header);
         println!("{:?}", &trailer);
-        let file_data = unsafe {
-            bf.memory_map(&trailer.inodes[0].as_file().unwrap())
-                .unwrap()
-        };
+        let file_data = unsafe { bf.memory_map(trailer.inodes[0].as_file().unwrap()).unwrap() };
         println!("{:?}", &*file_data);
         assert_eq!(&*file_data, b"hello\0\0\0")
     }
@@ -83,23 +80,23 @@ mod tests {
     #[test]
     fn create_garbage() {
         let filename = "./create_garbage.box";
-        let _ = std::fs::remove_file(&filename);
-        let bf = BoxFileWriter::create(&filename).expect("Mah box");
+        let _ = std::fs::remove_file(filename);
+        let bf = BoxFileWriter::create(filename).expect("Mah box");
         bf.finish().unwrap();
     }
 
     #[test]
     fn read_bytes() {
         let filename = "./read_bytes.box";
-        create_test_box(&filename);
-        let bf = BoxFileReader::open(&filename).unwrap();
+        create_test_box(filename);
+        let bf = BoxFileReader::open(filename).unwrap();
         let record = bf
             .metadata()
             .inodes
             .first()
             .map(|f| f.as_file().unwrap())
             .unwrap();
-        let mut reader = bf.read_bytes(&record).unwrap();
+        let mut reader = bf.read_bytes(record).unwrap();
         let mut vec = vec![];
         reader.read_to_end(&mut vec).unwrap();
         assert_eq!(vec, b"hello\0\0\0")
@@ -109,7 +106,7 @@ mod tests {
     where
         F: Fn(&str) -> BoxFileWriter,
     {
-        let _ = std::fs::remove_file(&filename);
+        let _ = std::fs::remove_file(filename);
         let v =
             "This, this, this, this, this is a compressable string string string string string.\n"
                 .to_string();
@@ -152,17 +149,17 @@ mod tests {
             bf.finish().unwrap();
         }
 
-        let bf = BoxFileReader::open(&filename).expect("Mah box");
+        let bf = BoxFileReader::open(filename).expect("Mah box");
         println!("{:#?}", &bf);
 
         assert_eq!(
             v,
-            bf.decompress_value::<String>(&bf.meta.inodes[1].as_file().unwrap())
+            bf.decompress_value::<String>(bf.meta.inodes[1].as_file().unwrap())
                 .unwrap()
         );
         assert_eq!(
             v,
-            bf.decompress_value::<String>(&bf.meta.inodes[2].as_file().unwrap())
+            bf.decompress_value::<String>(bf.meta.inodes[2].as_file().unwrap())
                 .unwrap()
         );
     }

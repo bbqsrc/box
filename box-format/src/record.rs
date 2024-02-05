@@ -62,9 +62,9 @@ impl Record {
     #[inline(always)]
     pub fn name(&self) -> &str {
         match self {
-            Record::File(file) => &*file.name,
-            Record::Directory(dir) => &*dir.name,
-            Record::Link(link) => &*link.name,
+            Record::File(file) => &file.name,
+            Record::Directory(dir) => &dir.name,
+            Record::Link(link) => &link.name,
         }
     }
 
