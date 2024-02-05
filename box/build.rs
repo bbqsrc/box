@@ -34,7 +34,7 @@ fn main() {
         let xargo = cargo_install_dir().join("xargo");
 
         assert!(Command::new(xargo)
-            .args(&["build", "--release", "--target"])
+            .args(["build", "--release", "--target"])
             .arg(&target)
             .current_dir(cwd)
             .status()
