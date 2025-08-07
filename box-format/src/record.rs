@@ -1,4 +1,4 @@
-use crate::{compression::Compression, path::BoxPath, AttrMap};
+use crate::{AttrMap, compression::Compression, path::BoxPath};
 
 use crate::file::{BoxMetadata, Inode};
 use std::num::NonZeroU64;

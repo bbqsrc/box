@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::default::Default;
 use std::fs::File;
 use std::fs::OpenOptions;
-use std::io::{prelude::*, BufReader, BufWriter, Result, SeekFrom};
+use std::io::{BufReader, BufWriter, Result, SeekFrom, prelude::*};
 use std::num::NonZeroU64;
 use std::path::{Path, PathBuf};
 
@@ -17,8 +17,8 @@ use crate::{
 };
 
 use super::{
-    reader::{read_header, read_trailer},
     BoxMetadata,
+    reader::{read_header, read_trailer},
 };
 
 pub struct BoxFileWriter {
@@ -356,9 +356,11 @@ impl BoxFileWriter {
 
     #[inline(always)]
     unsafe fn read_data(&self, header: &FileRecord) -> std::io::Result<Mmap> {
-        MmapOptions::new()
-            .offset(header.data.get())
-            .len(header.length as usize)
-            .map(self.file.get_ref())
+        unsafe {
+            MmapOptions::new()
+                .offset(header.data.get())
+                .len(header.length as usize)
+                .map(self.file.get_ref())
+        }
     }
 }

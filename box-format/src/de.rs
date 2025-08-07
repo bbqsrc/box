@@ -6,8 +6,8 @@ use byteorder::{LittleEndian, ReadBytesExt};
 use fastvlq::ReadVu64Ext as _;
 
 use crate::{
-    file::Inode, AttrMap, BoxHeader, BoxMetadata, BoxPath, Compression, DirectoryRecord,
-    FileRecord, LinkRecord, Record,
+    AttrMap, BoxHeader, BoxMetadata, BoxPath, Compression, DirectoryRecord, FileRecord, LinkRecord,
+    Record, file::Inode,
 };
 
 use crate::compression::constants::*;

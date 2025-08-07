@@ -12,8 +12,8 @@ use comde::xz::{XzCompressor, XzDecompressor};
 #[cfg(feature = "zstd")]
 use comde::zstd::{ZstdCompressor, ZstdDecompressor};
 use comde::{
-    stored::{StoredCompressor, StoredDecompressor},
     ByteCount, Compressor, Decompress, Decompressor,
+    stored::{StoredCompressor, StoredDecompressor},
 };
 
 pub mod constants {

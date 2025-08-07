@@ -21,7 +21,7 @@ pub use compression::Compression;
 pub use file::reader::{BoxFileReader, ExtractError, OpenError};
 #[cfg(feature = "writer")]
 pub use file::writer::BoxFileWriter;
-pub use file::{meta::AttrValue, AttrMap, BoxMetadata};
+pub use file::{AttrMap, BoxMetadata, meta::AttrValue};
 use header::BoxHeader;
 pub use path::BoxPath;
 pub use record::{DirectoryRecord, FileRecord, LinkRecord, Record};

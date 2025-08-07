@@ -1,6 +1,6 @@
 use std::fs::File;
 use std::fs::{self, OpenOptions};
-use std::io::{self, prelude::*, BufReader, BufWriter, SeekFrom};
+use std::io::{self, BufReader, BufWriter, SeekFrom, prelude::*};
 use std::num::NonZeroU64;
 use std::path::{Path, PathBuf};
 
@@ -8,7 +8,7 @@ use comde::Decompress;
 use memmap2::{Mmap, MmapOptions};
 
 use super::meta::Records;
-use super::{meta::RecordsItem, BoxMetadata};
+use super::{BoxMetadata, meta::RecordsItem};
 use crate::path::IntoBoxPathError;
 use crate::{
     de::DeserializeOwned,

@@ -1,11 +1,11 @@
-use std::io::{prelude::*, SeekFrom};
+use std::io::{SeekFrom, prelude::*};
 
 use byteorder::{LittleEndian, WriteBytesExt};
 use fastvlq::WriteVu64Ext;
 
 use crate::{
-    file::Inode, AttrMap, BoxHeader, BoxMetadata, BoxPath, Compression, DirectoryRecord,
-    FileRecord, LinkRecord, Record,
+    AttrMap, BoxHeader, BoxMetadata, BoxPath, Compression, DirectoryRecord, FileRecord, LinkRecord,
+    Record, file::Inode,
 };
 
 pub(crate) trait Serialize {

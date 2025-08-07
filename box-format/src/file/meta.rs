@@ -1,8 +1,8 @@
 use super::AttrMap;
+use crate::Record;
 use crate::file::Inode;
 use crate::path::BoxPath;
 use crate::record::DirectoryRecord;
-use crate::Record;
 use std::{
     borrow::Cow,
     collections::{BTreeMap, VecDeque},
