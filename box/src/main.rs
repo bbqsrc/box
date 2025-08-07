@@ -9,11 +9,11 @@ use std::time::SystemTime;
 
 use box_format::path::IntoBoxPathError;
 use box_format::{
-    path::PATH_PLATFORM_SEP, BoxFileReader, BoxFileWriter, BoxPath, Compression, Record,
+    BoxFileReader, BoxFileWriter, BoxPath, Compression, Record, path::PATH_PLATFORM_SEP,
 };
 use byteorder::{LittleEndian, ReadBytesExt};
 use jwalk::{ClientState, DirEntry};
-use structopt::{clap::AppSettings::*, StructOpt};
+use structopt::{StructOpt, clap::AppSettings::*};
 
 type Result<T> = std::result::Result<T, Error>;
 
@@ -44,7 +44,7 @@ fn parse_compression(src: &str) -> std::result::Result<Compression, Error> {
         _ => {
             return Err(Error::UnknownCompressionFormat {
                 name: src.to_string(),
-            })
+            });
         }
     };
 
@@ -295,7 +295,7 @@ fn unix_acl(attr: Option<&[u8]>) -> String {
 }
 
 fn list(path: &Path, _selected_files: Vec<PathBuf>, verbose: bool) -> Result<()> {
-    use humansize::{file_size_opts as options, FileSize};
+    use humansize::{FileSize, file_size_opts as options};
 
     let bf = BoxFileReader::open(path).map_err(|source| Error::CannotOpenArchive {
         path: path.to_path_buf(),
@@ -318,9 +318,15 @@ fn list(path: &Path, _selected_files: Vec<PathBuf>, verbose: bool) -> Result<()>
     } else {
         println!(")");
     }
-    println!("--------  -------------  -------------  ---------------------  ----------  ---------  --------");
-    println!(" Method    Compressed     Length         Created                Attrs       CRC32      Path");
-    println!("--------  -------------  -------------  ---------------------  ----------  ---------  --------");
+    println!(
+        "--------  -------------  -------------  ---------------------  ----------  ---------  --------"
+    );
+    println!(
+        " Method    Compressed     Length         Created                Attrs       CRC32      Path"
+    );
+    println!(
+        "--------  -------------  -------------  ---------------------  ----------  ---------  --------"
+    );
     for result in bf.metadata().iter() {
         let record = result.record;
 
