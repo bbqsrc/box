@@ -68,7 +68,7 @@ impl Serialize for AttrMap {
 
         // Write it as u64::MAX, then seek back
         let size_index = writer.stream_position().await?;
-        write_u64_le(writer, std::u64::MAX).await?;
+        write_u64_le(writer, u64::MAX).await?;
         writer.write_vu64(self.len() as u64).await?;
 
         for (key, value) in self.iter() {

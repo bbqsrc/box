@@ -69,9 +69,10 @@ mod tests {
         let trailer = bf.metadata();
         println!("{:?}", bf.header);
         println!("{:?}", &trailer);
-        let file_data = bf.memory_map(trailer.inodes[0].as_file().unwrap()).unwrap();
+        let segment = bf.memory_map(trailer.inodes[0].as_file().unwrap()).unwrap();
+        let file_data = segment.as_slice().unwrap();
         println!("{:?}", &file_data);
-        assert_eq!(&file_data[..], b"hello\0\0\0")
+        assert_eq!(file_data, b"hello\0\0\0")
     }
 
     #[tokio::test]

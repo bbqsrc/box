@@ -78,10 +78,7 @@ impl<'a> Iterator for Records<'a> {
             None => return None,
         };
 
-        let record = match self.meta.record(inode) {
-            Some(v) => v,
-            None => return None,
-        };
+        let record = self.meta.record(inode)?;
 
         let base_path = match self.base_path.as_ref() {
             Some(x) => x.join_unchecked(record.name()),
@@ -132,10 +129,7 @@ impl<'a> Iterator for FindRecord<'a> {
     type Item = Inode;
 
     fn next(&mut self) -> Option<Self::Item> {
-        let candidate_name = match self.query.pop_front() {
-            Some(v) => v,
-            None => return None,
-        };
+        let candidate_name = self.query.pop_front()?;
 
         log::debug!("candidate_name: {}", &candidate_name);
 

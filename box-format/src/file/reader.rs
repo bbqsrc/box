@@ -3,6 +3,7 @@ use std::num::NonZeroU64;
 use std::path::{Path, PathBuf};
 
 use mmap_io::MemoryMappedFile;
+use mmap_io::segment::Segment;
 use tokio::fs::{self, File, OpenOptions};
 use tokio::io::{AsyncReadExt, AsyncSeekExt, BufReader};
 
@@ -156,7 +157,8 @@ impl BoxFileReader {
         record: &FileRecord,
         dest: W,
     ) -> std::io::Result<()> {
-        let data = self.memory_map(record)?;
+        let segment = self.memory_map(record)?;
+        let data = segment.as_slice().map_err(std::io::Error::other)?;
         let cursor = std::io::Cursor::new(data);
         let buf_reader = tokio::io::BufReader::new(cursor);
         record.compression.decompress_write(buf_reader, dest).await
@@ -235,15 +237,11 @@ impl BoxFileReader {
         Ok(file.take(record.length))
     }
 
-    /// Read the compressed data for the given file record into memory
-    pub fn memory_map(&self, record: &FileRecord) -> std::io::Result<Vec<u8>> {
-        let mmap = MemoryMappedFile::open_ro(&self.path)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+    /// Memory-map the file and return a segment for the record's data.
+    pub fn memory_map(&self, record: &FileRecord) -> std::io::Result<Segment> {
+        let mmap = MemoryMappedFile::open_ro(&self.path).map_err(std::io::Error::other)?;
         let offset = self.offset + record.data.get();
-        let slice = mmap
-            .as_slice(offset, record.length)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
-        Ok(slice.to_vec())
+        Segment::new(mmap.into(), offset, record.length).map_err(std::io::Error::other)
     }
 
     async fn extract_inner(

@@ -104,7 +104,7 @@ impl BoxFileWriter {
         let header = read_header(&mut reader, 0).await?;
         let ptr = header
             .trailer
-            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::Other, "no trailer found"))?;
+            .ok_or_else(|| std::io::Error::other("no trailer found"))?;
         let meta = read_trailer(&mut reader, ptr, 0).await?;
 
         // Get the file back from the BufReader
@@ -195,10 +195,10 @@ impl BoxFileWriter {
 
                 match self.meta.inode(&parent_path) {
                     None => {
-                        let err = std::io::Error::new(
-                            std::io::ErrorKind::Other,
-                            format!("No inode found for path: {:?}", parent_path),
-                        );
+                        let err = std::io::Error::other(format!(
+                            "No inode found for path: {:?}",
+                            parent_path
+                        ));
                         Err(err)
                     }
                     Some(parent_inode) => {

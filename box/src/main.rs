@@ -2,7 +2,6 @@
 // Licensed under the EUPL 1.2 or later. See LICENSE file.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::io::Read;
 use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
@@ -50,6 +49,32 @@ fn parse_compression(src: &str) -> std::result::Result<Compression, Error> {
     };
 
     Ok(compression)
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+enum Checksum {
+    #[default]
+    Crc32,
+    Blake3,
+}
+
+impl Checksum {
+    fn attr_name(&self) -> &'static str {
+        match self {
+            Checksum::Crc32 => "crc32",
+            Checksum::Blake3 => "blake3",
+        }
+    }
+}
+
+fn parse_checksum(src: &str) -> std::result::Result<Checksum, Error> {
+    match src {
+        "crc32" => Ok(Checksum::Crc32),
+        "blake3" => Ok(Checksum::Blake3),
+        _ => Err(Error::UnknownChecksumFormat {
+            name: src.to_string(),
+        }),
+    }
 }
 
 fn parse_attrs(
@@ -148,6 +173,16 @@ enum Commands {
             help = "Compression to be used for a file [default: stored]"
         )]
         compression: Compression,
+
+        #[structopt(
+            short = "c",
+            long,
+            parse(try_from_str = parse_checksum),
+            default_value = "crc32",
+            possible_values = &["crc32", "blake3"],
+            help = "Checksum algorithm to use [default: crc32]"
+        )]
+        checksum: Checksum,
 
         #[structopt(short, long, help = "Recursively handle provided paths")]
         recursive: bool,
@@ -322,13 +357,13 @@ async fn list(path: &Path, _selected_files: Vec<PathBuf>, verbose: bool) -> Resu
         println!(")");
     }
     println!(
-        "--------  -------------  -------------  ---------------------  ----------  ---------  --------"
+        "--------  -------------  -------------  ---------------------  ----------  ----------------  --------"
     );
     println!(
-        " Method    Compressed     Length         Created                Attrs       CRC32      Path"
+        " Method    Compressed     Length         Created                Attrs             Checksum   Path"
     );
     println!(
-        "--------  -------------  -------------  ---------------------  ----------  ---------  --------"
+        "--------  -------------  -------------  ---------------------  ----------  ----------------  --------"
     );
     for result in bf.metadata().iter() {
         let record = result.record;
@@ -360,21 +395,39 @@ async fn list(path: &Path, _selected_files: Vec<PathBuf>, verbose: bool) -> Resu
             Record::File(record) => {
                 let length = record.length.format_size(BINARY);
                 let decompressed_length = record.decompressed_length.format_size(BINARY);
-                let crc32 = record
-                    .attr(bf.metadata(), "crc32")
-                    .map(|x| Some(u32::from_le_bytes([x[0], x[1], x[2], x[3]])))
-                    .unwrap_or(None)
-                    .map(|x| format!("{:x}", x))
-                    .unwrap_or_else(|| "-".to_string());
+                let checksum = if let Some(blake3_bytes) = record.attr(bf.metadata(), "blake3") {
+                    // Blake3 is 32 bytes, display first 8 bytes as hex
+                    blake3_bytes
+                        .iter()
+                        .take(8)
+                        .map(|b| format!("{:02x}", b))
+                        .collect::<String>()
+                } else if let Some(crc32_bytes) = record.attr(bf.metadata(), "crc32") {
+                    if crc32_bytes.len() >= 4 {
+                        format!(
+                            "{:08x}",
+                            u32::from_le_bytes([
+                                crc32_bytes[0],
+                                crc32_bytes[1],
+                                crc32_bytes[2],
+                                crc32_bytes[3]
+                            ])
+                        )
+                    } else {
+                        "-".to_string()
+                    }
+                } else {
+                    "-".to_string()
+                };
 
                 println!(
-                    "{:8}  {:>12}   {:>12}   {:<20}   {:<9}   {:>8}   {}",
+                    "{:8}  {:>12}   {:>12}   {:<20}   {:<9}   {:>16}   {}",
                     format!("{}", record.compression),
                     length,
                     decompressed_length,
                     time,
                     acl,
-                    crc32,
+                    checksum,
                     path,
                 );
             }
@@ -538,31 +591,6 @@ async fn is_hidden(entry: &DirEntry) -> bool {
     }
 }
 
-struct Crc32Reader<R: Read> {
-    inner: R,
-    hasher: crc32fast::Hasher,
-}
-
-impl<R: Read> Crc32Reader<R> {
-    pub fn new(inner: R) -> Crc32Reader<R> {
-        Crc32Reader {
-            inner,
-            hasher: crc32fast::Hasher::new(),
-        }
-    }
-
-    pub fn finalize(self) -> u32 {
-        self.hasher.finalize()
-    }
-}
-
-impl<R: Read> Read for Crc32Reader<R> {
-    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        self.hasher.update(buf);
-        self.inner.read(buf)
-    }
-}
-
 #[allow(clippy::too_many_arguments)]
 #[inline(always)]
 async fn process_files<I: Iterator<Item = PathBuf>>(
@@ -571,6 +599,7 @@ async fn process_files<I: Iterator<Item = PathBuf>>(
     allow_hidden: bool,
     verbose: bool,
     compression: Compression,
+    checksum: Checksum,
     mut bf: BoxFileWriter,
     mut known_dirs: HashSet<BoxPath>,
     mut known_files: HashSet<BoxPath>,
@@ -746,9 +775,14 @@ async fn process_files<I: Iterator<Item = PathBuf>>(
                         source,
                     })?;
 
-                let mut hasher = crc32fast::Hasher::new();
-                hasher.update(&contents);
-                let crc32 = hasher.finalize();
+                let checksum_bytes: Vec<u8> = match checksum {
+                    Checksum::Crc32 => {
+                        let mut hasher = crc32fast::Hasher::new();
+                        hasher.update(&contents);
+                        hasher.finalize().to_le_bytes().to_vec()
+                    }
+                    Checksum::Blake3 => blake3::hash(&contents).as_bytes().to_vec(),
+                };
 
                 let cursor = std::io::Cursor::new(contents);
                 let mut buf_reader = tokio::io::BufReader::new(cursor);
@@ -769,7 +803,7 @@ async fn process_files<I: Iterator<Item = PathBuf>>(
                     println!("{} (compressed {:.*}%)", &file_path.display(), 2, len);
                 }
 
-                bf.set_attr(&box_path, "crc32", crc32.to_le_bytes().to_vec())
+                bf.set_attr(&box_path, checksum.attr_name(), checksum_bytes)
                     .map_err(|source| Error::CannotAddChecksum {
                         path: file_path,
                         source,
@@ -791,6 +825,7 @@ async fn process_files<I: Iterator<Item = PathBuf>>(
 struct CreateOpts {
     selected_files: Vec<PathBuf>,
     compression: Compression,
+    checksum: Checksum,
     recursive: bool,
     allow_hidden: bool,
     verbose: bool,
@@ -805,6 +840,7 @@ async fn create(mut path: PathBuf, opts: CreateOpts) -> Result<()> {
     let CreateOpts {
         selected_files,
         compression,
+        checksum,
         recursive,
         allow_hidden,
         verbose,
@@ -869,6 +905,7 @@ async fn create(mut path: PathBuf, opts: CreateOpts) -> Result<()> {
         allow_hidden,
         verbose,
         compression,
+        checksum,
         bf,
         HashSet::new(),
         HashSet::new(),
@@ -942,6 +979,7 @@ async fn main() -> anyhow::Result<()> {
             path,
             alignment,
             compression,
+            checksum,
             recursive,
             allow_hidden,
             attrs,
@@ -952,6 +990,7 @@ async fn main() -> anyhow::Result<()> {
                 CreateOpts {
                     selected_files: opts.selected_files,
                     compression,
+                    checksum,
                     recursive,
                     allow_hidden,
                     alignment,
@@ -990,6 +1029,9 @@ async fn main() -> anyhow::Result<()> {
 enum Error {
     #[error("Unknown compression method `{name}`")]
     UnknownCompressionFormat { name: String },
+
+    #[error("Unknown checksum algorithm `{name}`")]
+    UnknownChecksumFormat { name: String },
 
     #[error("Cannot handle path `{}`", .path.display())]
     CannotHandlePath {
@@ -1112,12 +1154,6 @@ enum Error {
     CannotSetAttribute {
         key: String,
         value: Vec<u8>,
-        #[source]
-        source: std::io::Error,
-    },
-
-    #[error("Cannot get current directory")]
-    CannotGetCurrentDir {
         #[source]
         source: std::io::Error,
     },
