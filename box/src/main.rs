@@ -2,17 +2,18 @@
 // Licensed under the EUPL 1.2 or later. See LICENSE file.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::io::{BufReader, Read};
-use std::num::NonZeroU64;
+use std::io::Read;
+use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
+use async_walkdir::{DirEntry, WalkDir};
 use box_format::path::IntoBoxPathError;
 use box_format::{
     BoxFileReader, BoxFileWriter, BoxPath, Compression, Record, path::PATH_PLATFORM_SEP,
 };
 use byteorder::{LittleEndian, ReadBytesExt};
-use jwalk::{ClientState, DirEntry};
+use futures::StreamExt;
 use structopt::{StructOpt, clap::AppSettings::*};
 
 type Result<T> = std::result::Result<T, Error>;
@@ -133,9 +134,9 @@ enum Commands {
         #[structopt(
             short = "a",
             long,
-            help = "Align inserted records by specified bytes [unsigned 64-bit int, default: none]"
+            help = "Align inserted records by specified bytes [unsigned 32-bit int, default: none]"
         )]
-        alignment: Option<NonZeroU64>,
+        alignment: Option<NonZeroU32>,
 
         #[structopt(
             short = "C",
@@ -294,13 +295,15 @@ fn unix_acl(attr: Option<&[u8]>) -> String {
         .unwrap_or_else(|| "-".into())
 }
 
-fn list(path: &Path, _selected_files: Vec<PathBuf>, verbose: bool) -> Result<()> {
-    use humansize::{FileSize, file_size_opts as options};
+async fn list(path: &Path, _selected_files: Vec<PathBuf>, verbose: bool) -> Result<()> {
+    use humansize::{BINARY, FormatSize};
 
-    let bf = BoxFileReader::open(path).map_err(|source| Error::CannotOpenArchive {
-        path: path.to_path_buf(),
-        source,
-    })?;
+    let bf = BoxFileReader::open(path)
+        .await
+        .map_err(|source| Error::CannotOpenArchive {
+            path: path.to_path_buf(),
+            source,
+        })?;
     let metadata = bf.metadata();
 
     if verbose {
@@ -355,11 +358,8 @@ fn list(path: &Path, _selected_files: Vec<PathBuf>, verbose: bool) -> Result<()>
                 );
             }
             Record::File(record) => {
-                let length = record.length.file_size(options::BINARY).unwrap();
-                let decompressed_length = record
-                    .decompressed_length
-                    .file_size(options::BINARY)
-                    .unwrap();
+                let length = record.length.format_size(BINARY);
+                let decompressed_length = record.decompressed_length.format_size(BINARY);
                 let crc32 = record
                     .attr(bf.metadata(), "crc32")
                     .map(|x| Some(u32::from_le_bytes([x[0], x[1], x[2], x[3]])))
@@ -402,20 +402,23 @@ fn list(path: &Path, _selected_files: Vec<PathBuf>, verbose: bool) -> Result<()>
     Ok(())
 }
 
-fn extract(
+async fn extract(
     path: &Path,
     output_path: &Path,
     selected_files: Vec<PathBuf>,
     _verbose: bool,
 ) -> Result<()> {
     println!("{} {}", path.display(), output_path.display());
-    let bf = BoxFileReader::open(path).map_err(|source| Error::CannotOpenArchive {
-        path: path.to_path_buf(),
-        source,
-    })?;
+    let bf = BoxFileReader::open(path)
+        .await
+        .map_err(|source| Error::CannotOpenArchive {
+            path: path.to_path_buf(),
+            source,
+        })?;
 
     if selected_files.is_empty() {
         bf.extract_all(output_path)
+            .await
             .map_err(|source| Error::CannotExtractFiles { source })
     } else {
         for path in selected_files {
@@ -423,6 +426,7 @@ fn extract(
                 BoxPath::new(&path).map_err(|source| Error::CannotConvertPath { source, path })?;
             println!("{:?} {:?}", &path, &output_path);
             bf.extract_recursive(&path, output_path)
+                .await
                 .map_err(|source| Error::CannotExtractFiles { source })?;
         }
         Ok(())
@@ -517,9 +521,9 @@ fn metadata(meta: &std::fs::Metadata) -> HashMap<String, Vec<u8>> {
 
 #[inline(always)]
 #[cfg(not(windows))]
-fn is_hidden<C: ClientState>(entry: &DirEntry<C>) -> bool {
+fn is_hidden(entry: &DirEntry) -> bool {
     entry
-        .file_name
+        .file_name()
         .to_str()
         .map(|s| s.starts_with('.'))
         .unwrap_or(false)
@@ -527,8 +531,8 @@ fn is_hidden<C: ClientState>(entry: &DirEntry<C>) -> bool {
 
 #[inline(always)]
 #[cfg(windows)]
-fn is_hidden<C: ClientState>(entry: &DirEntry<C>) -> bool {
-    match entry.metadata().ok() {
+async fn is_hidden(entry: &DirEntry) -> bool {
+    match entry.metadata().await.ok() {
         Some(m) => (m.file_attributes() & winapi::FILE_ATTRIBUTE_HIDDEN) != 0,
         None => false,
     }
@@ -561,7 +565,7 @@ impl<R: Read> Read for Crc32Reader<R> {
 
 #[allow(clippy::too_many_arguments)]
 #[inline(always)]
-fn process_files<I: Iterator<Item = PathBuf>>(
+async fn process_files<I: Iterator<Item = PathBuf>>(
     iter: I,
     recursive: bool,
     allow_hidden: bool,
@@ -571,103 +575,118 @@ fn process_files<I: Iterator<Item = PathBuf>>(
     mut known_dirs: HashSet<BoxPath>,
     mut known_files: HashSet<BoxPath>,
 ) -> Result<()> {
-    let iter = iter.flat_map(|path| {
-        let mut walker = jwalk::WalkDir::new(path).sort(true);
-        if !recursive {
-            walker = walker.parallelism(jwalk::Parallelism::Serial).max_depth(0);
-        }
-        if !allow_hidden {
-            walker = walker.process_read_dir(|_, _, _, e| {
-                e.retain(|entry| match entry {
-                    Ok(v) => !is_hidden(v),
-                    _ => true,
-                });
-            });
-        }
-        walker.into_iter()
-    });
+    for path in iter {
+        let mut walker = WalkDir::new(&path);
 
-    for entry in iter {
-        let entry = entry.map_err(|source| Error::CannotProcessDirEntry { source })?;
-        let file_type = entry.file_type;
-        let file_path = entry.parent_path.join(&entry.file_name);
-        let meta = entry
-            .metadata()
-            .map_err(|source| Error::CannotProcessFile {
+        while let Some(entry) = walker.next().await {
+            let entry = entry.map_err(|e| Error::CannotProcessDirEntry { source: e.into() })?;
+
+            // Skip hidden files if not allowed
+            if !allow_hidden && is_hidden(&entry) {
+                continue;
+            }
+
+            let file_path = entry.path();
+            let file_type = entry
+                .file_type()
+                .await
+                .map_err(|source| Error::CannotProcessFile {
+                    path: file_path.to_path_buf(),
+                    source,
+                })?;
+            let meta = entry
+                .metadata()
+                .await
+                .map_err(|source| Error::CannotProcessFile {
+                    path: file_path.to_path_buf(),
+                    source,
+                })?;
+
+            // Skip non-recursive if not at top level
+            if !recursive && file_path != path && file_type.is_dir() {
+                continue;
+            }
+
+            tracing::debug!("File Path: {:?}", &file_path);
+            let canonical_path = tokio::fs::canonicalize(&file_path)
+                .await
+                .map_err(|source| Error::CannotCanonicalizePath {
+                    path: file_path.to_path_buf(),
+                    source,
+                })?;
+            tracing::debug!("Canonical Path: {:?}", &canonical_path);
+
+            if bf.path() == canonical_path {
+                continue;
+            }
+
+            let parents = collect_parent_directories(&file_path)
+                .map_err(Box::new)
+                .map_err(|source| Error::CannotProcessParents {
+                    path: file_path.clone(),
+                    source,
+                })?;
+            let box_path = BoxPath::new(&file_path).map_err(|source| Error::CannotHandlePath {
                 path: file_path.to_path_buf(),
                 source,
             })?;
-        tracing::debug!("File Path: {:?}", &file_path);
-        let canonical_dir = std::env::current_dir()
-            .map_err(|source| Error::CannotGetCurrentDir { source })
-            .and_then(|p| {
-                p.join(&entry.parent_path).canonicalize().map_err(|source| {
-                    Error::CannotCanonicalizePath {
+
+            for (parent, meta) in parents.into_iter() {
+                if !known_dirs.contains(&parent) {
+                    bf.mkdir(parent.clone(), meta).map_err(|source| {
+                        Error::CannotCreateDirectory {
+                            path: parent.clone(),
+                            source,
+                        }
+                    })?;
+                    known_dirs.insert(parent);
+                }
+            }
+
+            if file_type.is_symlink() {
+                let target_path = tokio::fs::read_link(&file_path).await.map_err(|source| {
+                    Error::CannotReadLink {
                         path: file_path.to_path_buf(),
                         source,
                     }
-                })
-            })?;
-        let canonical_path = canonical_dir.join(&entry.file_name);
-        tracing::debug!("Canonical Path: {:?}", &canonical_path);
+                })?;
+                tracing::trace!("XXX {:?}", &target_path);
 
-        if bf.path() == canonical_path {
-            continue;
-        }
+                // Get relative path from current ref
+                let parent_path = file_path.parent().unwrap_or(Path::new(""));
+                let target_path = parent_path.join(&target_path);
+                tracing::trace!("{:?}", &target_path);
 
-        let parents = collect_parent_directories(&*file_path)
-            .map_err(Box::new)
-            .map_err(|source| Error::CannotProcessParents {
-                path: file_path.clone(),
-                source,
-            })?;
-        let box_path = BoxPath::new(&file_path).map_err(|source| Error::CannotHandlePath {
-            path: file_path.to_path_buf(),
-            source,
-        })?;
-
-        for (parent, meta) in parents.into_iter() {
-            if !known_dirs.contains(&parent) {
-                bf.mkdir(parent.clone(), meta)
-                    .map_err(|source| Error::CannotCreateDirectory {
-                        path: parent.clone(),
+                // Ensure it's not also a symlink
+                let _ = tokio::fs::canonicalize(&target_path)
+                    .await
+                    .map_err(|source| Error::CannotCanonicalizePath {
+                        path: file_path.to_path_buf(),
                         source,
                     })?;
-                known_dirs.insert(parent);
-            }
-        }
+                tracing::trace!("{:?} {:?}", &target_path, &canonical_path);
 
-        if file_type.is_symlink() {
-            let target_path =
-                std::fs::read_link(&file_path).map_err(|source| Error::CannotReadLink {
-                    path: file_path.to_path_buf(),
-                    source,
-                })?;
-            tracing::trace!("XXX {:?}", &target_path);
+                let target_path =
+                    BoxPath::new(&target_path).map_err(|source| Error::CannotHandlePath {
+                        path: target_path.to_path_buf(),
+                        source,
+                    })?;
 
-            // Get relative path from current ref
-            let target_path = entry.parent_path.join(&target_path);
-            tracing::trace!("{:?}", &target_path);
+                tracing::trace!("XXX {:?}", &target_path);
 
-            // Ensure it's not also a symlink
-            let _ = std::fs::canonicalize(&target_path).map_err(|source| {
-                Error::CannotCanonicalizePath {
-                    path: file_path.to_path_buf(),
-                    source,
-                }
-            })?;
-            tracing::trace!("{:?} {:?}", &target_path, &canonical_path);
-
-            let target_path =
-                BoxPath::new(&target_path).map_err(|source| Error::CannotHandlePath {
-                    path: target_path.to_path_buf(),
-                    source,
-                })?;
-
-            tracing::trace!("XXX {:?}", &target_path);
-
-            if file_type.is_dir() {
-                if !known_dirs.contains(&box_path) {
+                if file_type.is_dir() {
+                    if !known_dirs.contains(&box_path) {
+                        if verbose {
+                            println!("{} -> {} (link)", &file_path.display(), &target_path);
+                        }
+                        bf.link(box_path.clone(), target_path, metadata(&meta))
+                            .map_err(|source| Error::CannotCreateLink {
+                                path: box_path.clone(),
+                                source,
+                            })?;
+                        known_dirs.insert(box_path);
+                    }
+                } else if !known_files.contains(&box_path) {
                     if verbose {
                         println!("{} -> {} (link)", &file_path.display(), &target_path);
                     }
@@ -676,82 +695,94 @@ fn process_files<I: Iterator<Item = PathBuf>>(
                             path: box_path.clone(),
                             source,
                         })?;
+                    known_files.insert(box_path);
+                }
+            } else if file_type.is_dir() {
+                if !known_dirs.contains(&box_path) {
+                    if verbose {
+                        println!("{} (directory)", &file_path.display());
+                    }
+                    #[allow(unused_mut)]
+                    let mut dir_meta = metadata(&meta);
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::fs::MetadataExt;
+                        dir_meta
+                            .insert("unix.mode".to_string(), meta.mode().to_le_bytes().to_vec());
+                    }
+                    bf.mkdir(box_path.clone(), dir_meta).map_err(|source| {
+                        Error::CannotCreateDirectory {
+                            path: box_path.clone(),
+                            source,
+                        }
+                    })?;
                     known_dirs.insert(box_path);
                 }
             } else if !known_files.contains(&box_path) {
-                if verbose {
-                    println!("{} -> {} (link)", &file_path.display(), &target_path);
-                }
-                bf.link(box_path.clone(), target_path, metadata(&meta))
-                    .map_err(|source| Error::CannotCreateLink {
-                        path: box_path.clone(),
-                        source,
-                    })?;
-                known_files.insert(box_path);
-            }
-        } else if file_type.is_dir() {
-            if !known_dirs.contains(&box_path) {
-                if verbose {
-                    println!("{} (directory)", &file_path.display());
-                }
-                #[allow(unused_mut)]
-                let mut dir_meta = metadata(&meta);
-                #[cfg(unix)]
-                {
-                    let mode = std::fs::metadata(file_path).unwrap().mode();
-                    dir_meta.insert("unix.mode".to_string(), mode.to_le_bytes().to_vec());
-                }
-                bf.mkdir(box_path.clone(), dir_meta).map_err(|source| {
-                    Error::CannotCreateDirectory {
-                        path: box_path.clone(),
+                // Read file and compute CRC32
+                use tokio::io::AsyncReadExt;
+                let mut file = tokio::fs::File::open(&file_path).await.map_err(|source| {
+                    Error::CannotOpenFile {
+                        path: file_path.to_path_buf(),
                         source,
                     }
                 })?;
-                known_dirs.insert(box_path);
+
+                #[allow(unused_mut)]
+                let mut file_meta = metadata(&meta);
+
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::MetadataExt;
+                    file_meta.insert("unix.mode".to_string(), meta.mode().to_le_bytes().to_vec());
+                }
+
+                // Read file contents for CRC32 calculation
+                let mut contents = Vec::new();
+                file.read_to_end(&mut contents)
+                    .await
+                    .map_err(|source| Error::CannotOpenFile {
+                        path: file_path.to_path_buf(),
+                        source,
+                    })?;
+
+                let mut hasher = crc32fast::Hasher::new();
+                hasher.update(&contents);
+                let crc32 = hasher.finalize();
+
+                let cursor = std::io::Cursor::new(contents);
+                let mut buf_reader = tokio::io::BufReader::new(cursor);
+
+                let record = bf
+                    .insert(compression, box_path.clone(), &mut buf_reader, file_meta)
+                    .await
+                    .map_err(|source| Error::CannotAddFile {
+                        path: file_path.to_path_buf(),
+                        source,
+                    })?;
+                if verbose {
+                    let len = if record.decompressed_length == 0 {
+                        100.0f64
+                    } else {
+                        100.0 - (record.length as f64 / record.decompressed_length as f64 * 100.0)
+                    };
+                    println!("{} (compressed {:.*}%)", &file_path.display(), 2, len);
+                }
+
+                bf.set_attr(&box_path, "crc32", crc32.to_le_bytes().to_vec())
+                    .map_err(|source| Error::CannotAddChecksum {
+                        path: file_path,
+                        source,
+                    })?;
+
+                known_files.insert(box_path);
             }
-        } else if !known_files.contains(&box_path) {
-            let file = std::fs::File::open(&file_path).map_err(|source| Error::CannotOpenFile {
-                path: file_path.to_path_buf(),
-                source,
-            })?;
-            #[allow(unused_mut)]
-            let mut file_meta = metadata(&meta);
-
-            #[cfg(unix)]
-            {
-                let mode = file.metadata().unwrap().mode();
-                file_meta.insert("unix.mode".to_string(), mode.to_le_bytes().to_vec());
-            }
-
-            let mut file = BufReader::new(Crc32Reader::new(file));
-            let record = bf
-                .insert(compression, box_path.clone(), &mut file, file_meta)
-                .map_err(|source| Error::CannotAddFile {
-                    path: file_path.to_path_buf(),
-                    source,
-                })?;
-            if verbose {
-                let len = if record.decompressed_length == 0 {
-                    100.0f64
-                } else {
-                    100.0 - (record.length as f64 / record.decompressed_length as f64 * 100.0)
-                };
-                println!("{} (compressed {:.*}%)", &file_path.display(), 2, len);
-            }
-
-            let hash = file.into_inner().finalize().to_le_bytes().to_vec();
-            bf.set_attr(&box_path, "crc32", hash)
-                .map_err(|source| Error::CannotAddChecksum {
-                    path: file_path,
-                    source,
-                })?;
-
-            known_files.insert(box_path);
         }
     }
 
     let path = bf.path().to_path_buf();
     bf.finish()
+        .await
         .map_err(|source| Error::CannotCreateFile { path, source })
         .map(|_| {})
 }
@@ -763,14 +794,14 @@ struct CreateOpts {
     recursive: bool,
     allow_hidden: bool,
     verbose: bool,
-    alignment: Option<NonZeroU64>,
+    alignment: Option<NonZeroU32>,
     attrs: BTreeMap<String, Option<serde_json::Value>>,
     exec_cmd: Option<String>,
     args_cmd: Option<String>,
     is_self_extracting: bool,
 }
 
-fn create(mut path: PathBuf, opts: CreateOpts) -> Result<()> {
+async fn create(mut path: PathBuf, opts: CreateOpts) -> Result<()> {
     let CreateOpts {
         selected_files,
         compression,
@@ -793,8 +824,8 @@ fn create(mut path: PathBuf, opts: CreateOpts) -> Result<()> {
     // }
 
     let mut bf = match alignment {
-        None => BoxFileWriter::create(&path),
-        Some(alignment) => BoxFileWriter::create_with_alignment(&path, alignment.get()),
+        None => BoxFileWriter::create(&path).await,
+        Some(alignment) => BoxFileWriter::create_with_alignment(&path, alignment.get()).await,
     }
     .map_err(|source| Error::CannotCreateArchive {
         path: path.to_path_buf(),
@@ -842,6 +873,7 @@ fn create(mut path: PathBuf, opts: CreateOpts) -> Result<()> {
         HashSet::new(),
         HashSet::new(),
     )
+    .await
     .map_err(Box::new)
     .map_err(|source| Error::CannotAddFiles {
         path: path.to_path_buf(),
@@ -849,7 +881,7 @@ fn create(mut path: PathBuf, opts: CreateOpts) -> Result<()> {
     })?;
 
     if !is_self_extracting {
-        std::fs::rename(path, original_path).unwrap();
+        tokio::fs::rename(path, original_path).await.unwrap();
         return Ok(());
     }
 
@@ -891,19 +923,21 @@ fn create(mut path: PathBuf, opts: CreateOpts) -> Result<()> {
     Ok(())
 }
 
-fn main() -> anyhow::Result<()> {
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
 
     let opts = CliOpts::from_iter(wild::args_os());
 
     match opts.cmd {
-        Commands::List { path } => Ok(list(&path, opts.selected_files, opts.verbose)?),
+        Commands::List { path } => Ok(list(&path, opts.selected_files, opts.verbose).await?),
         Commands::Extract { path, output_path } => Ok(extract(
             &path,
             &output_path.unwrap_or_else(|| std::env::current_dir().expect("no pwd")),
             opts.selected_files,
             opts.verbose,
-        )?),
+        )
+        .await?),
         Commands::Create {
             path,
             alignment,
@@ -924,7 +958,8 @@ fn main() -> anyhow::Result<()> {
                     attrs,
                     ..Default::default()
                 },
-            )?)
+            )
+            .await?)
         }
         #[cfg(feature = "selfextract")]
         Commands::CreateSelfExtracting {
@@ -945,7 +980,8 @@ fn main() -> anyhow::Result<()> {
                 args_cmd,
                 ..Default::default()
             },
-        )?),
+        )
+        .await?),
         Commands::Test { .. } => unimplemented!(),
     }
 }
@@ -1039,17 +1075,17 @@ enum Error {
         source: Box<Error>,
     },
 
-    #[error("Cannot directory entry")]
+    #[error("Cannot process directory entry")]
     CannotProcessDirEntry {
         #[source]
-        source: jwalk::Error,
+        source: std::io::Error,
     },
 
     #[error("Cannot process file `{}`", .path.display())]
     CannotProcessFile {
         path: PathBuf,
         #[source]
-        source: jwalk::Error,
+        source: std::io::Error,
     },
 
     #[error("Cannot canonicalize path `{}`", .path.display())]

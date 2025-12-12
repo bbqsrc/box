@@ -2,7 +2,7 @@
 name = "box-selfextract"
 version = "0.0.0"
 authors = ["Brendan Molloy <brendan@bbqsrc.net>"]
-edition = "2018"
+edition = "2024"
 
 [[bin]]
 name = "selfextract"
@@ -10,7 +10,8 @@ path = "src/main.rs"
 
 [dependencies]
 box-format = { path = "../box-format", default-features = false, features = ["reader", "zstd"] }
-memmap2 = "*"
+tokio = { version = "1", features = ["rt", "macros", "fs", "process"] }
+mmap-io = { version = "0.9.4", features = ["async"] }
 twoway = "0.2.1"
 gumdrop = "0.8.0"
 tempfile = "3.1.0"

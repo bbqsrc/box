@@ -16,7 +16,7 @@ mod ser;
 pub mod ffi;
 
 pub use self::file::Inode;
-pub use compression::Compression;
+pub use compression::{ByteCount, Compression};
 #[cfg(feature = "reader")]
 pub use file::reader::{BoxFileReader, ExtractError, OpenError};
 #[cfg(feature = "writer")]
@@ -25,6 +25,3 @@ pub use file::{AttrMap, BoxMetadata, meta::AttrValue};
 use header::BoxHeader;
 pub use path::BoxPath;
 pub use record::{DirectoryRecord, FileRecord, LinkRecord, Record};
-
-#[doc(hidden)]
-pub use comde;

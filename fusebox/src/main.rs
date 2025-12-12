@@ -9,10 +9,15 @@ use fuser::{
 };
 use libc::{ENOENT, ENOSYS};
 use structopt::StructOpt;
+use tokio::runtime::Runtime;
 
 use box_format::{BoxFileReader, BoxMetadata, Inode};
 
-struct BoxFs(BoxFileReader, HashMap<Inode, Vec<u8>>);
+struct BoxFs {
+    reader: BoxFileReader,
+    cache: HashMap<Inode, Vec<u8>>,
+    runtime: Runtime,
+}
 
 const TTL: Duration = Duration::from_secs(1);
 
@@ -142,11 +147,11 @@ impl Filesystem for BoxFs {
 
         let records = match inode(parent) {
             Some(inode) => match self
-                .0
+                .reader
                 .metadata()
                 .record(inode)
                 .and_then(|x| x.as_directory())
-                .map(|x| self.0.metadata().records(x))
+                .map(|x| self.reader.metadata().records(x))
             {
                 Some(v) => v,
                 None => {
@@ -154,7 +159,7 @@ impl Filesystem for BoxFs {
                     return;
                 }
             },
-            None => self.0.metadata().root_records(),
+            None => self.reader.metadata().root_records(),
         };
 
         match records
@@ -162,7 +167,11 @@ impl Filesystem for BoxFs {
             .find(|(_inode, record)| record.name() == name)
         {
             Some((inode, record)) => {
-                reply.entry(&TTL, &record.fuse_file_attr(self.0.metadata(), *inode), 0);
+                reply.entry(
+                    &TTL,
+                    &record.fuse_file_attr(self.reader.metadata(), *inode),
+                    0,
+                );
             }
             None => {
                 reply.error(ENOENT);
@@ -192,12 +201,17 @@ impl Filesystem for BoxFs {
         let offset = offset as usize;
         let size = size as usize;
 
-        if let Some(cached) = self.1.get(&inode) {
+        if let Some(cached) = self.cache.get(&inode) {
             reply.data(&(&*cached)[offset..size + offset]);
             return;
         }
 
-        let record = match self.0.metadata().record(inode).and_then(|x| x.as_file()) {
+        let record = match self
+            .reader
+            .metadata()
+            .record(inode)
+            .and_then(|x| x.as_file())
+        {
             Some(v) => v,
             None => {
                 reply.error(ENOENT);
@@ -206,10 +220,13 @@ impl Filesystem for BoxFs {
         };
 
         let mut buf = Vec::with_capacity(size as usize);
-        match self.0.decompress(record, &mut buf) {
+        match self
+            .runtime
+            .block_on(self.reader.decompress(record, &mut buf))
+        {
             Ok(_) => {
                 reply.data(&(&*buf)[offset..size + offset]);
-                self.1.insert(inode, buf);
+                self.cache.insert(inode, buf);
             }
             Err(_) => {
                 reply.error(ENOENT);
@@ -228,18 +245,18 @@ impl Filesystem for BoxFs {
         reply: ReplyEmpty,
     ) {
         if let Some(inode) = inode(ino) {
-            self.1.remove(&inode);
+            self.cache.remove(&inode);
             reply.ok();
         } else {
             reply.error(ENOENT);
         }
     }
 
-    fn getattr(&mut self, _req: &Request, ino: u64, reply: ReplyAttr) {
+    fn getattr(&mut self, _req: &Request, ino: u64, _fh: Option<u64>, reply: ReplyAttr) {
         match inode(ino) {
-            Some(inode) => match self.0.metadata().record(inode) {
+            Some(inode) => match self.reader.metadata().record(inode) {
                 Some(record) => {
-                    let file_attr = record.fuse_file_attr(self.0.metadata(), inode);
+                    let file_attr = record.fuse_file_attr(self.reader.metadata(), inode);
                     reply.attr(&TTL, &file_attr);
                 }
                 None => {
@@ -247,7 +264,7 @@ impl Filesystem for BoxFs {
                 }
             },
             None => {
-                reply.attr(&TTL, &root_dir_attr(self.0.metadata()));
+                reply.attr(&TTL, &root_dir_attr(self.reader.metadata()));
                 return;
             }
         }
@@ -263,11 +280,11 @@ impl Filesystem for BoxFs {
     ) {
         let records = match inode(ino) {
             Some(inode) => match self
-                .0
+                .reader
                 .metadata()
                 .record(inode)
                 .and_then(|x| x.as_directory())
-                .map(|x| self.0.metadata().records(x))
+                .map(|x| self.reader.metadata().records(x))
             {
                 Some(v) => v,
                 None => {
@@ -275,7 +292,7 @@ impl Filesystem for BoxFs {
                     return;
                 }
             },
-            None => self.0.metadata().root_records(),
+            None => self.reader.metadata().root_records(),
         };
 
         for (i, (inode, record)) in records.iter().enumerate().skip(offset as usize) {
@@ -313,11 +330,23 @@ struct Options {
 fn main() {
     env_logger::init();
     let opts = Options::from_args();
-    let bf = BoxFileReader::open(opts.box_file).unwrap();
+
+    let runtime = Runtime::new().expect("Failed to create tokio runtime");
+    let bf = runtime
+        .block_on(BoxFileReader::open(opts.box_file))
+        .unwrap();
     log::info!("{:?}", &bf);
+
     let mount_opts = &[
         MountOption::RO,
         MountOption::FSName(bf.path().to_string_lossy().to_string()),
     ];
-    fuser::mount2(BoxFs(bf, HashMap::new()), &opts.mountpoint, mount_opts).unwrap();
+
+    let boxfs = BoxFs {
+        reader: bf,
+        cache: HashMap::new(),
+        runtime,
+    };
+
+    fuser::mount2(boxfs, &opts.mountpoint, mount_opts).unwrap();
 }

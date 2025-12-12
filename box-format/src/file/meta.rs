@@ -167,7 +167,7 @@ impl<'a> Iterator for FindRecord<'a> {
 
 impl BoxMetadata {
     #[inline(always)]
-    pub fn iter(&self) -> Records {
+    pub fn iter(&self) -> Records<'_> {
         Records::new(self, &self.root, None)
     }
 
@@ -192,10 +192,6 @@ impl BoxMetadata {
 
     #[inline(always)]
     pub fn inode(&self, path: &BoxPath) -> Option<Inode> {
-        // if let Some(inode) = self.index.as_ref().and_then(|x| x.get(path)) {
-        //     return Inode::new(inode).ok();
-        // };
-
         FindRecord::new(self, path.iter().map(str::to_string).collect(), &self.root).next()
     }
 

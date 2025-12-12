@@ -1,10 +1,11 @@
 #![windows_subsystem = "windows"]
 
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
-use memmap2::Mmap;
+use mmap_io::MemoryMappedFile;
 use box_format::BoxFileReader;
 use gumdrop::Options;
+use tokio::process::Command;
 
 const DIVIDER_UUID: u128 = 0xaae8ea9c35484ee4bf28f1a25a6b3c6c;
 
@@ -23,12 +24,13 @@ struct Args {
     output: Option<std::path::PathBuf>,
 }
 
-fn main() {
+#[tokio::main]
+async fn main() {
     let args = Args::parse_args_default_or_exit();
-    std::process::exit(run(args));
+    std::process::exit(run(args).await);
 }
 
-fn open_box_segment() -> Result<BoxFileReader, i32> {
+async fn open_box_segment() -> Result<BoxFileReader, i32> {
     let path = match std::env::current_exe() {
         Ok(path) => path,
         Err(e) => {
@@ -38,16 +40,7 @@ fn open_box_segment() -> Result<BoxFileReader, i32> {
         }
     };
 
-    let file = match std::fs::File::open(&path) {
-        Ok(v) => v,
-        Err(e) => {
-            eprintln!("ERROR: Could not access self-extractor for opening!");
-            eprintln!("{:?}", e);
-            return Err(2);
-        }
-    };
-
-    let mmap = match unsafe { Mmap::map(&file) } {
+    let mmap = match MemoryMappedFile::open_ro(&path) {
         Ok(v) => v,
         Err(e) => {
             eprintln!("ERROR: Could not access self-extractor for opening!");
@@ -56,7 +49,16 @@ fn open_box_segment() -> Result<BoxFileReader, i32> {
         }
     };
 
-    let boundary = twoway::find_bytes(&mmap[..], &DIVIDER_UUID.to_le_bytes());
+    let mmap_slice = match mmap.as_slice(0, mmap.len()) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("ERROR: Could not read self-extractor!");
+            eprintln!("{:?}", e);
+            return Err(3);
+        }
+    };
+
+    let boundary = twoway::find_bytes(mmap_slice, &DIVIDER_UUID.to_le_bytes());
     let offset = match boundary {
         Some(v) => v + std::mem::size_of::<u128>(),
         None => {
@@ -65,7 +67,7 @@ fn open_box_segment() -> Result<BoxFileReader, i32> {
         }
     };
 
-    let bf = match box_format::BoxFileReader::open_at_offset(path, offset as u64) {
+    let bf = match box_format::BoxFileReader::open_at_offset(path, offset as u64).await {
         Ok(v) => v,
         Err(e) => {
             eprintln!("ERROR: Could not read .box data!");
@@ -77,7 +79,7 @@ fn open_box_segment() -> Result<BoxFileReader, i32> {
     Ok(bf)
 }
 
-fn process(bf: &BoxFileReader, path: Option<&std::path::Path>, _is_verbose: bool) -> i32 {
+async fn process(bf: &BoxFileReader, path: Option<&std::path::Path>, _is_verbose: bool) -> i32 {
     let path = match path {
         Some(v) => v.to_path_buf(),
         None => match std::env::current_dir() {
@@ -90,7 +92,7 @@ fn process(bf: &BoxFileReader, path: Option<&std::path::Path>, _is_verbose: bool
         },
     };
 
-    match std::fs::create_dir_all(&path) {
+    match tokio::fs::create_dir_all(&path).await {
         Ok(_) => {}
         Err(e) => {
             eprintln!("ERROR: Could not create output directory!");
@@ -99,7 +101,7 @@ fn process(bf: &BoxFileReader, path: Option<&std::path::Path>, _is_verbose: bool
         }
     }
 
-    match bf.extract_all(&path) {
+    match bf.extract_all(&path).await {
         Ok(_) => {}
         Err(e) => {
             eprintln!(
@@ -114,7 +116,7 @@ fn process(bf: &BoxFileReader, path: Option<&std::path::Path>, _is_verbose: bool
     0
 }
 
-fn process_exec(bf: &BoxFileReader, exec: &str, args: &[&str], is_verbose: bool) -> i32 {
+async fn process_exec(bf: &BoxFileReader, exec: &str, args: &[&str], is_verbose: bool) -> i32 {
     let tempdir = match tempfile::tempdir() {
         Ok(v) => v,
         Err(e) => {
@@ -124,7 +126,7 @@ fn process_exec(bf: &BoxFileReader, exec: &str, args: &[&str], is_verbose: bool)
         }
     };
 
-    match bf.extract_all(tempdir.path()) {
+    match bf.extract_all(tempdir.path()).await {
         Ok(_) => {}
         Err(e) => {
             eprintln!(
@@ -136,10 +138,10 @@ fn process_exec(bf: &BoxFileReader, exec: &str, args: &[&str], is_verbose: bool)
         }
     }
 
-    run_shell_exec(exec, args, tempdir.path(), is_verbose)
+    run_shell_exec(exec, args, tempdir.path(), is_verbose).await
 }
 
-fn run_shell_exec(input: &str, args: &[&str], cwd: &std::path::Path, is_verbose: bool) -> i32 {
+async fn run_shell_exec(input: &str, args: &[&str], cwd: &std::path::Path, is_verbose: bool) -> i32 {
     if is_verbose {
         println!(
             "TRACE: Running `{} {}` in '{}'...",
@@ -149,7 +151,7 @@ fn run_shell_exec(input: &str, args: &[&str], cwd: &std::path::Path, is_verbose:
         );
     }
 
-    let exec = match cwd.join(input).canonicalize() {
+    let exec = match tokio::fs::canonicalize(cwd.join(input)).await {
         Ok(v) => v,
         Err(e) => {
             eprintln!("ERROR: Running exec script failed!");
@@ -172,6 +174,7 @@ fn run_shell_exec(input: &str, args: &[&str], cwd: &std::path::Path, is_verbose:
             Stdio::null()
         })
         .status()
+        .await
     {
         Ok(v) => v,
         Err(e) => {
@@ -185,8 +188,8 @@ fn run_shell_exec(input: &str, args: &[&str], cwd: &std::path::Path, is_verbose:
 }
 
 #[inline(always)]
-fn run(args: Args) -> i32 {
-    let bf = match open_box_segment() {
+async fn run(args: Args) -> i32 {
+    let bf = match open_box_segment().await {
         Ok(v) => v,
         Err(e) => return e,
     };
@@ -224,8 +227,8 @@ fn run(args: Args) -> i32 {
                 }
             };
 
-            process_exec(&bf, exec_str, &args_attr.iter().map(|s| &**s).collect::<Vec<_>>(), args.verbose)
+            process_exec(&bf, exec_str, &args_attr.iter().map(|s| &**s).collect::<Vec<_>>(), args.verbose).await
         }
-        _ => process(&bf, args.output.as_ref().map(|x| &**x), args.verbose),
+        _ => process(&bf, args.output.as_ref().map(|x| &**x), args.verbose).await,
     }
 }

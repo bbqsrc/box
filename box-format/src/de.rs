@@ -1,9 +1,8 @@
 use std::collections::HashMap;
-use std::io::prelude::*;
 use std::num::NonZeroU64;
 
-use byteorder::{LittleEndian, ReadBytesExt};
-use fastvlq::ReadVu64Ext as _;
+use fastvlq::AsyncReadVlqExt;
+use tokio::io::{AsyncRead, AsyncReadExt};
 
 use crate::{
     AttrMap, BoxHeader, BoxMetadata, BoxPath, Compression, DirectoryRecord, FileRecord, LinkRecord,
@@ -12,46 +11,62 @@ use crate::{
 
 use crate::compression::constants::*;
 
-pub(crate) trait DeserializeOwned {
-    fn deserialize_owned<R: Read>(reader: &mut R) -> std::io::Result<Self>
+/// Read a u64 in little-endian format
+async fn read_u64_le<R: AsyncRead + Unpin>(reader: &mut R) -> std::io::Result<u64> {
+    let mut buf = [0u8; 8];
+    reader.read_exact(&mut buf).await?;
+    Ok(u64::from_le_bytes(buf))
+}
+
+/// Read a u32 in little-endian format
+async fn read_u32_le<R: AsyncRead + Unpin>(reader: &mut R) -> std::io::Result<u32> {
+    let mut buf = [0u8; 4];
+    reader.read_exact(&mut buf).await?;
+    Ok(u32::from_le_bytes(buf))
+}
+
+pub(crate) trait DeserializeOwned: Send {
+    fn deserialize_owned<R: AsyncRead + Unpin + Send>(
+        reader: &mut R,
+    ) -> impl std::future::Future<Output = std::io::Result<Self>> + Send
     where
         Self: Sized;
 }
 
 impl<T: DeserializeOwned> DeserializeOwned for Vec<T> {
-    fn deserialize_owned<R: Read>(reader: &mut R) -> std::io::Result<Self>
+    async fn deserialize_owned<R: AsyncRead + Unpin + Send>(reader: &mut R) -> std::io::Result<Self>
     where
         Self: Sized,
     {
-        let len: u64 = reader.read_vu64()?;
+        let len = reader.read_vu64().await?;
         let mut buf = Vec::with_capacity(len as usize);
         for _ in 0..len {
-            buf.push(T::deserialize_owned(reader)?);
+            buf.push(T::deserialize_owned(reader).await?);
         }
         Ok(buf)
     }
 }
 
 impl DeserializeOwned for BoxPath {
-    fn deserialize_owned<R: Read>(reader: &mut R) -> std::io::Result<Self>
+    async fn deserialize_owned<R: AsyncRead + Unpin + Send>(reader: &mut R) -> std::io::Result<Self>
     where
         Self: Sized,
     {
-        Ok(BoxPath(String::deserialize_owned(reader)?))
+        Ok(BoxPath(String::deserialize_owned(reader).await?))
     }
 }
 
 impl DeserializeOwned for AttrMap {
-    fn deserialize_owned<R: Read>(reader: &mut R) -> std::io::Result<Self>
+    async fn deserialize_owned<R: AsyncRead + Unpin + Send>(reader: &mut R) -> std::io::Result<Self>
     where
         Self: Sized,
     {
-        let _byte_count = reader.read_u64::<LittleEndian>()?;
-        let len: u64 = reader.read_vu64()?;
-        let mut buf = HashMap::with_capacity(len as usize);
+        let _byte_count = read_u64_le(reader).await?;
+        let len = reader.read_vu64().await?;
+        let mut buf: HashMap<usize, Vec<u8>> = HashMap::with_capacity(len as usize);
         for _ in 0..len {
-            let key = reader.read_vu64()?;
-            let value = Vec::deserialize_owned(reader)?;
+            let key = reader.read_vu64().await?;
+            let value = <Vec<u8>>::deserialize_owned(reader).await?;
             buf.insert(key as usize, value);
         }
         Ok(buf)
@@ -59,13 +74,15 @@ impl DeserializeOwned for AttrMap {
 }
 
 impl DeserializeOwned for FileRecord {
-    fn deserialize_owned<R: Read>(reader: &mut R) -> std::io::Result<Self> {
-        let compression = Compression::deserialize_owned(reader)?;
-        let length = reader.read_u64::<LittleEndian>()?;
-        let decompressed_length = reader.read_u64::<LittleEndian>()?;
-        let data = reader.read_u64::<LittleEndian>()?;
-        let name = String::deserialize_owned(reader)?; //BoxPath::deserialize_owned(reader)?;
-        let attrs = HashMap::deserialize_owned(reader)?;
+    async fn deserialize_owned<R: AsyncRead + Unpin + Send>(
+        reader: &mut R,
+    ) -> std::io::Result<Self> {
+        let compression = Compression::deserialize_owned(reader).await?;
+        let length = read_u64_le(reader).await?;
+        let decompressed_length = read_u64_le(reader).await?;
+        let data = read_u64_le(reader).await?;
+        let name = String::deserialize_owned(reader).await?;
+        let attrs = <HashMap<usize, Vec<u8>>>::deserialize_owned(reader).await?;
 
         Ok(FileRecord {
             compression,
@@ -79,23 +96,28 @@ impl DeserializeOwned for FileRecord {
 }
 
 impl DeserializeOwned for Inode {
-    fn deserialize_owned<R: Read>(reader: &mut R) -> std::io::Result<Self> {
-        reader.read_vu64().and_then(Inode::new)
+    async fn deserialize_owned<R: AsyncRead + Unpin + Send>(
+        reader: &mut R,
+    ) -> std::io::Result<Self> {
+        let value = reader.read_vu64().await?;
+        Inode::new(value)
     }
 }
 
 impl DeserializeOwned for DirectoryRecord {
-    fn deserialize_owned<R: Read>(reader: &mut R) -> std::io::Result<Self> {
-        let name = String::deserialize_owned(reader)?;
+    async fn deserialize_owned<R: AsyncRead + Unpin + Send>(
+        reader: &mut R,
+    ) -> std::io::Result<Self> {
+        let name = String::deserialize_owned(reader).await?;
 
         // Inodes vec
-        let len = reader.read_vu64()? as usize;
+        let len = reader.read_vu64().await? as usize;
         let mut inodes = Vec::with_capacity(len);
         for _ in 0..len {
-            inodes.push(Inode::deserialize_owned(reader)?);
+            inodes.push(Inode::deserialize_owned(reader).await?);
         }
 
-        let attrs = HashMap::deserialize_owned(reader)?;
+        let attrs = <HashMap<usize, Vec<u8>>>::deserialize_owned(reader).await?;
 
         Ok(DirectoryRecord {
             name,
@@ -106,10 +128,12 @@ impl DeserializeOwned for DirectoryRecord {
 }
 
 impl DeserializeOwned for LinkRecord {
-    fn deserialize_owned<R: Read>(reader: &mut R) -> std::io::Result<Self> {
-        let name = String::deserialize_owned(reader)?;
-        let target = BoxPath::deserialize_owned(reader)?;
-        let attrs = HashMap::deserialize_owned(reader)?;
+    async fn deserialize_owned<R: AsyncRead + Unpin + Send>(
+        reader: &mut R,
+    ) -> std::io::Result<Self> {
+        let name = String::deserialize_owned(reader).await?;
+        let target = BoxPath::deserialize_owned(reader).await?;
+        let attrs = <HashMap<usize, Vec<u8>>>::deserialize_owned(reader).await?;
 
         Ok(LinkRecord {
             name,
@@ -120,14 +144,16 @@ impl DeserializeOwned for LinkRecord {
 }
 
 impl DeserializeOwned for Record {
-    fn deserialize_owned<R: Read>(reader: &mut R) -> std::io::Result<Self> {
-        let ty = reader.read_u8()?;
+    async fn deserialize_owned<R: AsyncRead + Unpin + Send>(
+        reader: &mut R,
+    ) -> std::io::Result<Self> {
+        let ty = reader.read_u8().await?;
         match ty {
-            0 => Ok(Record::File(FileRecord::deserialize_owned(reader)?)),
-            1 => Ok(Record::Directory(DirectoryRecord::deserialize_owned(
-                reader,
-            )?)),
-            2 => Ok(Record::Link(LinkRecord::deserialize_owned(reader)?)),
+            0 => Ok(Record::File(FileRecord::deserialize_owned(reader).await?)),
+            1 => Ok(Record::Directory(
+                DirectoryRecord::deserialize_owned(reader).await?,
+            )),
+            2 => Ok(Record::Link(LinkRecord::deserialize_owned(reader).await?)),
             _ => Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
                 format!("invalid or unsupported field type: {}", ty),
@@ -137,8 +163,10 @@ impl DeserializeOwned for Record {
 }
 
 impl DeserializeOwned for BoxHeader {
-    fn deserialize_owned<R: Read>(reader: &mut R) -> std::io::Result<Self> {
-        let magic_bytes = reader.read_u32::<LittleEndian>()?.to_le_bytes();
+    async fn deserialize_owned<R: AsyncRead + Unpin + Send>(
+        reader: &mut R,
+    ) -> std::io::Result<Self> {
+        let magic_bytes = read_u32_le(reader).await?.to_le_bytes();
 
         if &magic_bytes != crate::header::MAGIC_BYTES {
             return Err(std::io::Error::new(
@@ -147,9 +175,11 @@ impl DeserializeOwned for BoxHeader {
             ));
         }
 
-        let version = reader.read_u32::<LittleEndian>()?;
-        let alignment = reader.read_u64::<LittleEndian>()?;
-        let trailer = reader.read_u64::<LittleEndian>()?;
+        let version = reader.read_u8().await?;
+        reader.read_exact(&mut [0u8; 3]).await?; // skip reserved1
+        let alignment = read_u32_le(reader).await?;
+        reader.read_exact(&mut [0u8; 4]).await?; // skip reserved2
+        let trailer = read_u64_le(reader).await?;
 
         Ok(BoxHeader {
             magic_bytes,
@@ -161,28 +191,29 @@ impl DeserializeOwned for BoxHeader {
 }
 
 impl DeserializeOwned for BoxMetadata {
-    fn deserialize_owned<R: Read>(reader: &mut R) -> std::io::Result<Self> {
-        let root = Vec::deserialize_owned(reader)?;
-        let inodes = Vec::deserialize_owned(reader)?;
-        let attr_keys = Vec::deserialize_owned(reader)?;
-        let attrs = HashMap::deserialize_owned(reader)?;
+    async fn deserialize_owned<R: AsyncRead + Unpin + Send>(
+        reader: &mut R,
+    ) -> std::io::Result<Self> {
+        let root = <Vec<Inode>>::deserialize_owned(reader).await?;
+        let inodes = <Vec<Record>>::deserialize_owned(reader).await?;
+        let attr_keys = <Vec<String>>::deserialize_owned(reader).await?;
+        let attrs = <HashMap<usize, Vec<u8>>>::deserialize_owned(reader).await?;
 
         Ok(BoxMetadata {
             root,
             inodes,
             attr_keys,
             attrs,
-            // index: None,
         })
     }
 }
 
 impl DeserializeOwned for Compression {
-    fn deserialize_owned<R: Read>(reader: &mut R) -> std::io::Result<Self>
+    async fn deserialize_owned<R: AsyncRead + Unpin + Send>(reader: &mut R) -> std::io::Result<Self>
     where
         Self: Sized,
     {
-        let id = reader.read_u8()?;
+        let id = reader.read_u8().await?;
 
         use Compression::*;
 
@@ -199,25 +230,25 @@ impl DeserializeOwned for Compression {
 }
 
 impl DeserializeOwned for String {
-    fn deserialize_owned<R: Read>(reader: &mut R) -> std::io::Result<Self>
+    async fn deserialize_owned<R: AsyncRead + Unpin + Send>(reader: &mut R) -> std::io::Result<Self>
     where
         Self: Sized,
     {
-        let len: u64 = reader.read_vu64()?;
-        let mut string = String::with_capacity(len as usize);
-        reader.take(len).read_to_string(&mut string)?;
-        Ok(string)
+        let len = reader.read_vu64().await?;
+        let mut buf = vec![0u8; len as usize];
+        reader.read_exact(&mut buf).await?;
+        String::from_utf8(buf).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
     }
 }
 
 impl DeserializeOwned for Vec<u8> {
-    fn deserialize_owned<R: Read>(reader: &mut R) -> std::io::Result<Self>
+    async fn deserialize_owned<R: AsyncRead + Unpin + Send>(reader: &mut R) -> std::io::Result<Self>
     where
         Self: Sized,
     {
-        let len: u64 = reader.read_vu64()?;
-        let mut buf = Vec::with_capacity(len as usize);
-        reader.take(len).read_to_end(&mut buf)?;
+        let len = reader.read_vu64().await?;
+        let mut buf = vec![0u8; len as usize];
+        reader.read_exact(&mut buf).await?;
         Ok(buf)
     }
 }

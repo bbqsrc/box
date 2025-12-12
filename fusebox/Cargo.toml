@@ -2,10 +2,11 @@
 name = "fusebox"
 version = "0.1.0"
 authors = ["Brendan Molloy <brendan@bbqsrc.net>"]
-edition = "2018"
+edition = "2024"
 
 [dependencies]
 fuser = { git = "https://github.com/cberner/fuser" }
+tokio = { version = "1", features = ["rt"] }
 structopt = "0.3.17"
 box-format = { path = "../box-format" }
 env_logger = "0.9"

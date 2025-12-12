@@ -35,19 +35,14 @@ pub type AttrMap = HashMap<usize, Vec<u8>>;
 mod tests {
     use crate::{compression::Compression, *};
     use std::collections::HashMap;
-    use std::io::Cursor;
-    use std::io::prelude::*;
     use std::path::Path;
 
-    fn create_test_box<F: AsRef<Path>>(filename: F) {
+    async fn create_test_box<F: AsRef<Path>>(filename: F) {
         let _ = std::fs::remove_file(filename.as_ref());
 
-        let mut cursor: Cursor<Vec<u8>> = Cursor::new(vec![]);
-        let data = b"hello\0\0\0";
-        cursor.write_all(data).unwrap();
-        cursor.seek(std::io::SeekFrom::Start(0)).unwrap();
+        let mut cursor = std::io::Cursor::new(b"hello\0\0\0".to_vec());
 
-        let mut writer = BoxFileWriter::create(filename).unwrap();
+        let mut writer = BoxFileWriter::create(filename).await.unwrap();
         writer
             .insert(
                 Compression::Stored,
@@ -55,58 +50,58 @@ mod tests {
                 &mut cursor,
                 HashMap::new(),
             )
+            .await
             .unwrap();
+        writer.finish().await.unwrap();
     }
 
-    #[test]
-    fn create_box_file() {
-        create_test_box("./smoketest.box");
+    #[tokio::test]
+    async fn create_box_file() {
+        create_test_box("./smoketest.box").await;
     }
 
-    #[test]
-    fn read_garbage() {
+    #[tokio::test]
+    async fn read_garbage() {
         let filename = "./read_garbage.box";
-        create_test_box(filename);
+        create_test_box(filename).await;
 
-        let bf = BoxFileReader::open(filename).unwrap();
+        let bf = BoxFileReader::open(filename).await.unwrap();
         let trailer = bf.metadata();
         println!("{:?}", bf.header);
         println!("{:?}", &trailer);
-        let file_data = unsafe { bf.memory_map(trailer.inodes[0].as_file().unwrap()).unwrap() };
-        println!("{:?}", &*file_data);
-        assert_eq!(&*file_data, b"hello\0\0\0")
+        let file_data = bf.memory_map(trailer.inodes[0].as_file().unwrap()).unwrap();
+        println!("{:?}", &file_data);
+        assert_eq!(&file_data[..], b"hello\0\0\0")
     }
 
-    #[test]
-    fn create_garbage() {
+    #[tokio::test]
+    async fn create_garbage() {
         let filename = "./create_garbage.box";
         let _ = std::fs::remove_file(filename);
-        let bf = BoxFileWriter::create(filename).expect("Mah box");
-        bf.finish().unwrap();
+        let bf = BoxFileWriter::create(filename).await.expect("Mah box");
+        bf.finish().await.unwrap();
     }
 
-    #[test]
-    fn read_bytes() {
+    #[tokio::test]
+    async fn read_bytes() {
         let filename = "./read_bytes.box";
-        create_test_box(filename);
-        let bf = BoxFileReader::open(filename).unwrap();
+        create_test_box(filename).await;
+        let bf = BoxFileReader::open(filename).await.unwrap();
         let record = bf
             .metadata()
             .inodes
             .first()
             .map(|f| f.as_file().unwrap())
             .unwrap();
-        let mut reader = bf.read_bytes(record).unwrap();
+        let mut reader = bf.read_bytes(record).await.unwrap();
         let mut vec = vec![];
-        reader.read_to_end(&mut vec).unwrap();
+        tokio::io::AsyncReadExt::read_to_end(&mut reader, &mut vec)
+            .await
+            .unwrap();
         assert_eq!(vec, b"hello\0\0\0")
     }
 
-    fn insert_impl<F>(filename: &str, f: F)
-    where
-        F: Fn(&str) -> BoxFileWriter,
-    {
-        let _ = std::fs::remove_file(filename);
+    async fn insert_impl(filename: &str, mut bf: BoxFileWriter) {
         let v =
             "This, this, this, this, this is a compressable string string string string string.\n"
                 .to_string();
@@ -118,8 +113,6 @@ mod tests {
                 .unwrap()
                 .as_secs()
                 .to_le_bytes();
-
-            let mut bf = f(filename);
 
             let mut dir_attrs = HashMap::new();
             dir_attrs.insert("created".into(), now.to_vec());
@@ -137,6 +130,7 @@ mod tests {
                 &mut std::io::Cursor::new(v.clone()),
                 attrs.clone(),
             )
+            .await
             .unwrap();
             bf.insert(
                 Compression::Deflate,
@@ -144,37 +138,53 @@ mod tests {
                 &mut std::io::Cursor::new(v.clone()),
                 attrs.clone(),
             )
+            .await
             .unwrap();
-            // println!("{:?}", &bf);
-            bf.finish().unwrap();
+            bf.finish().await.unwrap();
         }
 
-        let bf = BoxFileReader::open(filename).expect("Mah box");
+        let bf = BoxFileReader::open(filename).await.expect("Mah box");
         println!("{:#?}", &bf);
 
-        assert_eq!(
-            v,
-            bf.decompress_value::<String>(bf.meta.inodes[1].as_file().unwrap())
-                .unwrap()
-        );
-        assert_eq!(
-            v,
-            bf.decompress_value::<String>(bf.meta.inodes[2].as_file().unwrap())
-                .unwrap()
-        );
+        let mut buf1 = Vec::new();
+        bf.decompress(bf.meta.inodes[1].as_file().unwrap(), &mut buf1)
+            .await
+            .unwrap();
+        assert_eq!(v, String::from_utf8(buf1).unwrap());
+
+        let mut buf2 = Vec::new();
+        bf.decompress(bf.meta.inodes[2].as_file().unwrap(), &mut buf2)
+            .await
+            .unwrap();
+        assert_eq!(v, String::from_utf8(buf2).unwrap());
     }
 
-    #[test]
-    fn insert() {
-        insert_impl("./insert_garbage.box", |n| {
-            BoxFileWriter::create(n).unwrap()
-        });
-        insert_impl("./insert_garbage_align8.box", |n| {
-            BoxFileWriter::create_with_alignment(n, 8).unwrap()
-        });
-        insert_impl("./insert_garbage_align7.box", |n| {
-            BoxFileWriter::create_with_alignment(n, 7).unwrap()
-        });
+    #[tokio::test]
+    async fn insert() {
+        let _ = std::fs::remove_file("./insert_garbage.box");
+        insert_impl(
+            "./insert_garbage.box",
+            BoxFileWriter::create("./insert_garbage.box").await.unwrap(),
+        )
+        .await;
+
+        let _ = std::fs::remove_file("./insert_garbage_align8.box");
+        insert_impl(
+            "./insert_garbage_align8.box",
+            BoxFileWriter::create_with_alignment("./insert_garbage_align8.box", 8)
+                .await
+                .unwrap(),
+        )
+        .await;
+
+        let _ = std::fs::remove_file("./insert_garbage_align7.box");
+        insert_impl(
+            "./insert_garbage_align7.box",
+            BoxFileWriter::create_with_alignment("./insert_garbage_align7.box", 7)
+                .await
+                .unwrap(),
+        )
+        .await;
     }
 
     // #[test]

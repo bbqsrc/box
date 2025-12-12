@@ -112,10 +112,11 @@ impl LinkRecord {
         let key = metadata.attr_key(key.as_ref())?;
         self.attrs.get(&key).map(|x| &**x)
     }
+}
 
-    #[inline(always)]
-    pub fn upcast(self) -> Record {
-        Record::Link(self)
+impl From<LinkRecord> for Record {
+    fn from(link: LinkRecord) -> Self {
+        Record::Link(link)
     }
 }
 
@@ -145,10 +146,11 @@ impl DirectoryRecord {
         let key = metadata.attr_key(key.as_ref())?;
         self.attrs.get(&key).map(|x| &**x)
     }
+}
 
-    #[inline(always)]
-    pub fn upcast(self) -> Record {
-        Record::Directory(self)
+impl From<DirectoryRecord> for Record {
+    fn from(dir: DirectoryRecord) -> Self {
+        Record::Directory(dir)
     }
 }
 
@@ -184,9 +186,10 @@ impl FileRecord {
         let key = metadata.attr_key(key.as_ref())?;
         self.attrs.get(&key).map(|x| &**x)
     }
+}
 
-    #[inline(always)]
-    pub fn upcast(self) -> Record {
-        Record::File(self)
+impl From<FileRecord> for Record {
+    fn from(file: FileRecord) -> Self {
+        Record::File(file)
     }
 }

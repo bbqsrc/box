@@ -3,8 +3,8 @@ use std::num::NonZeroU64;
 #[derive(Debug)]
 pub(crate) struct BoxHeader {
     pub(crate) magic_bytes: [u8; 4],
-    pub(crate) version: u32,
-    pub(crate) alignment: u64,
+    pub(crate) version: u8,
+    pub(crate) alignment: u32,
     pub(crate) trailer: Option<NonZeroU64>,
 }
 
@@ -16,13 +16,13 @@ impl BoxHeader {
     pub(crate) fn new(trailer: Option<NonZeroU64>) -> BoxHeader {
         BoxHeader {
             magic_bytes: *MAGIC_BYTES,
-            version: 0x0,
+            version: 0,
             alignment: 0,
             trailer,
         }
     }
 
-    pub(crate) fn with_alignment(alignment: u64) -> BoxHeader {
+    pub(crate) fn with_alignment(alignment: u32) -> BoxHeader {
         BoxHeader {
             alignment,
             ..Default::default()
