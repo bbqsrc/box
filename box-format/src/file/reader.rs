@@ -22,7 +22,7 @@ use crate::{
 pub struct BoxFileReader {
     pub(crate) path: PathBuf,
     pub(crate) header: BoxHeader,
-    pub(crate) meta: BoxMetadata,
+    pub(crate) meta: BoxMetadata<'static>,
     pub(crate) offset: u64,
 }
 
@@ -38,7 +38,7 @@ pub(super) async fn read_trailer<R: tokio::io::AsyncRead + tokio::io::AsyncSeek 
     reader: &mut R,
     ptr: NonZeroU64,
     offset: u64,
-) -> std::io::Result<BoxMetadata> {
+) -> std::io::Result<BoxMetadata<'static>> {
     reader.seek(SeekFrom::Start(offset + ptr.get())).await?;
     BoxMetadata::deserialize_owned(reader).await
 }
@@ -79,7 +79,7 @@ pub enum ExtractError {
     CreateLinkFailed(#[source] std::io::Error, PathBuf, PathBuf),
 
     #[error("Resolving link failed: Path: '{}' -> '{}'", .1.name, .1.target)]
-    ResolveLinkFailed(#[source] std::io::Error, LinkRecord),
+    ResolveLinkFailed(#[source] std::io::Error, LinkRecord<'static>),
 
     #[error("Could not convert to a valid Box path. Path suffix: '{}'", .1)]
     ResolveBoxPathFailed(#[source] IntoBoxPathError, String),
@@ -149,17 +149,17 @@ pub enum ExtractProgress {
         total_links: u64,
     },
     /// A directory was created.
-    DirectoryCreated { path: BoxPath },
+    DirectoryCreated { path: BoxPath<'static> },
     /// A file is being extracted.
-    Extracting { path: BoxPath },
+    Extracting { path: BoxPath<'static> },
     /// A file was extracted.
     Extracted {
-        path: BoxPath,
+        path: BoxPath<'static>,
         files_extracted: u64,
         total_files: u64,
     },
     /// A symlink was created.
-    LinkCreated { path: BoxPath },
+    LinkCreated { path: BoxPath<'static> },
     /// All files have been extracted.
     Finished,
 }
@@ -170,10 +170,10 @@ pub enum ValidateProgress {
     /// Validation started.
     Started { total_files: u64 },
     /// A file is being validated.
-    Validating { path: BoxPath },
+    Validating { path: BoxPath<'static> },
     /// A file was validated.
     Validated {
-        path: BoxPath,
+        path: BoxPath<'static>,
         files_checked: u64,
         total_files: u64,
         success: bool,

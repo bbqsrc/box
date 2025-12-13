@@ -1,18 +1,19 @@
-use crate::{AttrMap, compression::Compression, path::BoxPath};
-
-use crate::file::{BoxMetadata, RecordIndex};
+use std::borrow::Cow;
 use std::num::NonZeroU64;
 
+use crate::file::{BoxMetadata, RecordIndex};
+use crate::{AttrMap, compression::Compression, path::BoxPath};
+
 #[derive(Debug, Clone)]
-pub enum Record {
-    File(FileRecord),
-    Directory(DirectoryRecord),
-    Link(LinkRecord),
+pub enum Record<'a> {
+    File(FileRecord<'a>),
+    Directory(DirectoryRecord<'a>),
+    Link(LinkRecord<'a>),
 }
 
-impl Record {
+impl<'a> Record<'a> {
     #[inline(always)]
-    pub fn as_file(&self) -> Option<&FileRecord> {
+    pub fn as_file(&self) -> Option<&FileRecord<'a>> {
         match self {
             Record::File(file) => Some(file),
             _ => None,
@@ -20,7 +21,7 @@ impl Record {
     }
 
     #[inline(always)]
-    pub fn as_file_mut(&mut self) -> Option<&mut FileRecord> {
+    pub fn as_file_mut(&mut self) -> Option<&mut FileRecord<'a>> {
         match self {
             Record::File(file) => Some(file),
             _ => None,
@@ -28,7 +29,7 @@ impl Record {
     }
 
     #[inline(always)]
-    pub fn as_directory(&self) -> Option<&DirectoryRecord> {
+    pub fn as_directory(&self) -> Option<&DirectoryRecord<'a>> {
         match self {
             Record::Directory(dir) => Some(dir),
             _ => None,
@@ -36,7 +37,7 @@ impl Record {
     }
 
     #[inline(always)]
-    pub fn as_directory_mut(&mut self) -> Option<&mut DirectoryRecord> {
+    pub fn as_directory_mut(&mut self) -> Option<&mut DirectoryRecord<'a>> {
         match self {
             Record::Directory(dir) => Some(dir),
             _ => None,
@@ -44,7 +45,7 @@ impl Record {
     }
 
     #[inline(always)]
-    pub fn as_link(&self) -> Option<&LinkRecord> {
+    pub fn as_link(&self) -> Option<&LinkRecord<'a>> {
         match self {
             Record::Link(link) => Some(link),
             _ => None,
@@ -52,7 +53,7 @@ impl Record {
     }
 
     #[inline(always)]
-    pub fn as_link_mut(&mut self) -> Option<&mut LinkRecord> {
+    pub fn as_link_mut(&mut self) -> Option<&mut LinkRecord<'a>> {
         match self {
             Record::Link(link) => Some(link),
             _ => None,
@@ -94,19 +95,19 @@ impl Record {
 }
 
 #[derive(Debug, Clone)]
-pub struct LinkRecord {
-    pub name: String,
+pub struct LinkRecord<'a> {
+    pub name: Cow<'a, str>,
 
     /// The target path of the symbolic link, which is the place the link points to. A path is always relative (no leading separator),
     /// always delimited by a `UNIT SEPARATOR U+001F` (`"\x1f"`), and may not contain
     /// any `.` or `..` path chunks.
-    pub target: BoxPath,
+    pub target: BoxPath<'a>,
 
     /// Optional attributes for the given paths, such as Windows or Unix ACLs, last accessed time, etc.
     pub attrs: AttrMap,
 }
 
-impl LinkRecord {
+impl LinkRecord<'_> {
     #[inline(always)]
     pub fn attr<S: AsRef<str>>(&self, metadata: &BoxMetadata, key: S) -> Option<&[u8]> {
         let key = metadata.attr_key(key.as_ref())?;
@@ -114,16 +115,16 @@ impl LinkRecord {
     }
 }
 
-impl From<LinkRecord> for Record {
-    fn from(link: LinkRecord) -> Self {
+impl<'a> From<LinkRecord<'a>> for Record<'a> {
+    fn from(link: LinkRecord<'a>) -> Self {
         Record::Link(link)
     }
 }
 
 #[derive(Debug, Clone)]
-pub struct DirectoryRecord {
+pub struct DirectoryRecord<'a> {
     /// The name of the directory
-    pub name: String, // TODO: BoxName
+    pub name: Cow<'a, str>,
 
     /// List of child record indices
     pub entries: Vec<RecordIndex>,
@@ -132,15 +133,17 @@ pub struct DirectoryRecord {
     pub attrs: AttrMap,
 }
 
-impl DirectoryRecord {
-    pub fn new(name: String) -> DirectoryRecord {
+impl DirectoryRecord<'static> {
+    pub fn new(name: String) -> DirectoryRecord<'static> {
         DirectoryRecord {
-            name,
+            name: Cow::Owned(name),
             entries: vec![],
             attrs: AttrMap::new(),
         }
     }
+}
 
+impl DirectoryRecord<'_> {
     #[inline(always)]
     pub fn attr<S: AsRef<str>>(&self, metadata: &BoxMetadata, key: S) -> Option<&[u8]> {
         let key = metadata.attr_key(key.as_ref())?;
@@ -148,14 +151,14 @@ impl DirectoryRecord {
     }
 }
 
-impl From<DirectoryRecord> for Record {
-    fn from(dir: DirectoryRecord) -> Self {
+impl<'a> From<DirectoryRecord<'a>> for Record<'a> {
+    fn from(dir: DirectoryRecord<'a>) -> Self {
         Record::Directory(dir)
     }
 }
 
 #[derive(Debug, Clone)]
-pub struct FileRecord {
+pub struct FileRecord<'a> {
     /// a bytestring representing the type of compression being used, always 8 bytes.
     pub compression: Compression,
 
@@ -169,13 +172,13 @@ pub struct FileRecord {
     pub data: NonZeroU64,
 
     /// The name of the file
-    pub name: String, // TODO: add BoxName
+    pub name: Cow<'a, str>,
 
     /// Optional attributes for the given paths, such as Windows or Unix ACLs, last accessed time, etc.
     pub attrs: AttrMap,
 }
 
-impl FileRecord {
+impl FileRecord<'_> {
     #[inline(always)]
     pub fn compression(&self) -> Compression {
         self.compression
@@ -188,8 +191,8 @@ impl FileRecord {
     }
 }
 
-impl From<FileRecord> for Record {
-    fn from(file: FileRecord) -> Self {
+impl<'a> From<FileRecord<'a>> for Record<'a> {
+    fn from(file: FileRecord<'a>) -> Self {
         Record::File(file)
     }
 }

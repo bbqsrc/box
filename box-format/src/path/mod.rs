@@ -1,4 +1,5 @@
 use std::{
+    borrow::Cow,
     fmt,
     path::{Path, PathBuf},
 };
@@ -25,7 +26,7 @@ pub const PATH_BOX_SEP: &str = "\x1f";
 
 #[derive(Debug, Clone, PartialOrd, Ord, PartialEq, Eq, Hash)]
 #[repr(transparent)]
-pub struct BoxPath(pub(crate) String);
+pub struct BoxPath<'a>(pub(crate) Cow<'a, str>);
 
 pub fn sanitize<P: AsRef<Path>>(path: P) -> Option<Vec<String>> {
     use std::path::Component;
@@ -61,39 +62,39 @@ pub fn sanitize<P: AsRef<Path>>(path: P) -> Option<Vec<String>> {
     Some(out)
 }
 
-impl AsRef<[u8]> for BoxPath {
+impl AsRef<[u8]> for BoxPath<'_> {
     #[inline(always)]
     fn as_ref(&self) -> &[u8] {
         self.0.as_bytes()
     }
 }
 
-impl BoxPath {
-    pub fn new<P: AsRef<Path>>(path: P) -> std::result::Result<BoxPath, IntoBoxPathError> {
+impl BoxPath<'static> {
+    pub fn new<P: AsRef<Path>>(path: P) -> std::result::Result<BoxPath<'static>, IntoBoxPathError> {
         let out = sanitize(&path).ok_or(IntoBoxPathError::UnrepresentableStr)?;
 
         if out.is_empty() {
             return Err(IntoBoxPathError::EmptyPath);
         }
 
-        Ok(BoxPath(out.join(PATH_BOX_SEP)))
+        Ok(BoxPath(Cow::Owned(out.join(PATH_BOX_SEP))))
     }
+}
 
+impl<'a> BoxPath<'a> {
     pub fn to_path_buf(&self) -> PathBuf {
         PathBuf::from(self.to_string())
     }
 
-    pub fn parent(&self) -> Option<BoxPath> {
-        let mut parts: Vec<_> = self.iter().collect();
-        if parts.len() == 1 {
-            return None;
+    pub fn parent(&self) -> Option<BoxPath<'_>> {
+        match self.0.rfind(PATH_BOX_SEP) {
+            Some(pos) => Some(BoxPath(Cow::Borrowed(&self.0[..pos]))),
+            None => None,
         }
-        parts.pop();
-        Some(BoxPath(parts.join(PATH_BOX_SEP)))
     }
 
-    pub fn filename(&self) -> String {
-        self.iter().collect::<Vec<_>>().pop().unwrap().to_string()
+    pub fn filename(&self) -> &str {
+        self.iter().last().unwrap()
     }
 
     pub fn depth(&self) -> usize {
@@ -108,20 +109,28 @@ impl BoxPath {
             .any(|(a, b)| a != b)
     }
 
-    pub fn join<P: AsRef<Path>>(&self, tail: P) -> std::result::Result<BoxPath, IntoBoxPathError> {
-        Self::new(self.to_path_buf().join(tail))
+    pub fn join<P: AsRef<Path>>(&self, tail: P) -> std::result::Result<BoxPath<'static>, IntoBoxPathError> {
+        BoxPath::new(self.to_path_buf().join(tail))
     }
 
-    pub(crate) fn join_unchecked(&self, tail: &str) -> BoxPath {
-        BoxPath(format!("{}{}{}", self.0, PATH_BOX_SEP, tail))
+    pub(crate) fn join_unchecked(&self, tail: &str) -> BoxPath<'static> {
+        let mut s = String::with_capacity(self.0.len() + 1 + tail.len());
+        s.push_str(&self.0);
+        s.push_str(PATH_BOX_SEP);
+        s.push_str(tail);
+        BoxPath(Cow::Owned(s))
     }
 
     pub fn iter(&self) -> std::str::Split<'_, &str> {
         self.0.split(PATH_BOX_SEP)
     }
+
+    pub fn into_owned(self) -> BoxPath<'static> {
+        BoxPath(Cow::Owned(self.0.into_owned()))
+    }
 }
 
-impl fmt::Display for BoxPath {
+impl fmt::Display for BoxPath<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let mut iter = self.0.split(PATH_BOX_SEP);
         if let Some(v) = iter.next() {

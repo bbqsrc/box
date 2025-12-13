@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::num::NonZeroU64;
 
@@ -59,7 +60,7 @@ impl<T: DeserializeOwned> DeserializeOwned for Vec<T> {
     }
 }
 
-impl DeserializeOwned for BoxPath {
+impl DeserializeOwned for BoxPath<'static> {
     async fn deserialize_owned<R: AsyncRead + AsyncSeek + Unpin + Send>(
         reader: &mut R,
     ) -> std::io::Result<Self>
@@ -67,7 +68,7 @@ impl DeserializeOwned for BoxPath {
         Self: Sized,
     {
         let start = reader.stream_position().await?;
-        let path = BoxPath(String::deserialize_owned(reader).await?);
+        let path = BoxPath(Cow::Owned(String::deserialize_owned(reader).await?));
         let end = reader.stream_position().await?;
         tracing::debug!(
             start = format_args!("{:#x}", start),
@@ -107,7 +108,7 @@ impl DeserializeOwned for AttrMap {
     }
 }
 
-impl DeserializeOwned for FileRecord {
+impl DeserializeOwned for FileRecord<'static> {
     async fn deserialize_owned<R: AsyncRead + AsyncSeek + Unpin + Send>(
         reader: &mut R,
     ) -> std::io::Result<Self> {
@@ -126,7 +127,7 @@ impl DeserializeOwned for FileRecord {
             compression,
             length,
             decompressed_length,
-            name,
+            name: Cow::Owned(name),
             attrs,
             data: NonZeroU64::new(data).expect("non zero"),
         })
@@ -151,7 +152,7 @@ impl DeserializeOwned for RecordIndex {
     }
 }
 
-impl DeserializeOwned for DirectoryRecord {
+impl DeserializeOwned for DirectoryRecord<'static> {
     async fn deserialize_owned<R: AsyncRead + AsyncSeek + Unpin + Send>(
         reader: &mut R,
     ) -> std::io::Result<Self> {
@@ -171,14 +172,14 @@ impl DeserializeOwned for DirectoryRecord {
         tracing::debug!(start = format_args!("{:#x}", start), end = format_args!("{:#x}", end), bytes = end - start, %name, "deserialized DirectoryRecord");
 
         Ok(DirectoryRecord {
-            name,
+            name: Cow::Owned(name),
             entries,
             attrs,
         })
     }
 }
 
-impl DeserializeOwned for LinkRecord {
+impl DeserializeOwned for LinkRecord<'static> {
     async fn deserialize_owned<R: AsyncRead + AsyncSeek + Unpin + Send>(
         reader: &mut R,
     ) -> std::io::Result<Self> {
@@ -191,14 +192,14 @@ impl DeserializeOwned for LinkRecord {
         tracing::debug!(start = format_args!("{:#x}", start), end = format_args!("{:#x}", end), bytes = end - start, %name, "deserialized LinkRecord");
 
         Ok(LinkRecord {
-            name,
+            name: Cow::Owned(name),
             target,
             attrs,
         })
     }
 }
 
-impl DeserializeOwned for Record {
+impl DeserializeOwned for Record<'static> {
     async fn deserialize_owned<R: AsyncRead + AsyncSeek + Unpin + Send>(
         reader: &mut R,
     ) -> std::io::Result<Self> {
@@ -266,13 +267,13 @@ impl DeserializeOwned for BoxHeader {
     }
 }
 
-impl DeserializeOwned for BoxMetadata {
+impl DeserializeOwned for BoxMetadata<'static> {
     async fn deserialize_owned<R: AsyncRead + AsyncSeek + Unpin + Send>(
         reader: &mut R,
     ) -> std::io::Result<Self> {
         let start = reader.stream_position().await?;
         let root = <Vec<RecordIndex>>::deserialize_owned(reader).await?;
-        let records = <Vec<Record>>::deserialize_owned(reader).await?;
+        let records = <Vec<Record<'static>>>::deserialize_owned(reader).await?;
         let attr_keys = <DefaultStringInterner>::deserialize_owned(reader).await?;
         let attrs = <HashMap<usize, Vec<u8>>>::deserialize_owned(reader).await?;
 

@@ -1,22 +1,24 @@
-use super::AttrMap;
-use crate::Record;
-use crate::file::RecordIndex;
-use crate::path::BoxPath;
-use crate::record::DirectoryRecord;
 use std::{
     borrow::Cow,
     collections::{BTreeMap, VecDeque},
     fmt::Display,
 };
+
 use string_interner::{DefaultStringInterner, Symbol};
 
-pub struct BoxMetadata {
+use super::AttrMap;
+use crate::Record;
+use crate::file::RecordIndex;
+use crate::path::BoxPath;
+use crate::record::DirectoryRecord;
+
+pub struct BoxMetadata<'a> {
     /// Root "directory" keyed by record indices
     pub(crate) root: Vec<RecordIndex>,
 
     /// Keyed by record index (offset by -1). This means if a `RecordIndex` has the value 1, its index in this vector is 0.
     /// This is to provide compatibility with platforms such as Linux, and allow for error checking a box file.
-    pub(crate) records: Vec<Record>,
+    pub(crate) records: Vec<Record<'a>>,
 
     /// Interned attribute keys. Symbol::to_usize() gives the key index.
     pub(crate) attr_keys: DefaultStringInterner,
@@ -25,7 +27,7 @@ pub struct BoxMetadata {
     pub(crate) attrs: AttrMap,
 }
 
-impl std::fmt::Debug for BoxMetadata {
+impl std::fmt::Debug for BoxMetadata<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("BoxMetadata")
             .field("root", &self.root)
@@ -36,7 +38,7 @@ impl std::fmt::Debug for BoxMetadata {
     }
 }
 
-impl Default for BoxMetadata {
+impl Default for BoxMetadata<'static> {
     fn default() -> Self {
         Self {
             root: Vec::new(),
@@ -49,18 +51,18 @@ impl Default for BoxMetadata {
 
 #[derive(Debug)]
 pub struct Records<'a> {
-    meta: &'a BoxMetadata,
+    meta: &'a BoxMetadata<'a>,
     entries: &'a [RecordIndex],
-    base_path: Option<BoxPath>,
+    base_path: Option<BoxPath<'static>>,
     cur_entry: usize,
     cur_dir: Option<Box<Records<'a>>>,
 }
 
 impl<'a> Records<'a> {
     pub(crate) fn new(
-        meta: &'a BoxMetadata,
+        meta: &'a BoxMetadata<'a>,
         entries: &'a [RecordIndex],
-        base_path: Option<BoxPath>,
+        base_path: Option<BoxPath<'static>>,
     ) -> Records<'a> {
         Records {
             meta,
@@ -76,8 +78,8 @@ impl<'a> Records<'a> {
 #[derive(Debug)]
 pub struct RecordsItem<'a> {
     pub(crate) index: RecordIndex,
-    pub path: BoxPath,
-    pub record: &'a Record,
+    pub path: BoxPath<'static>,
+    pub record: &'a Record<'a>,
 }
 
 impl<'a> Iterator for Records<'a> {
@@ -102,7 +104,7 @@ impl<'a> Iterator for Records<'a> {
 
         let base_path = match self.base_path.as_ref() {
             Some(x) => x.join_unchecked(record.name()),
-            None => BoxPath(record.name().to_string()),
+            None => BoxPath(Cow::Owned(record.name().to_string())),
         };
 
         if let Record::Directory(record) = record {
@@ -122,19 +124,18 @@ impl<'a> Iterator for Records<'a> {
     }
 }
 
-#[derive(Debug)]
-pub struct FindRecord<'a> {
-    meta: &'a BoxMetadata,
-    query: VecDeque<String>,
+pub struct FindRecord<'a, 'b> {
+    meta: &'a BoxMetadata<'a>,
+    query: VecDeque<&'b str>,
     entries: &'a [RecordIndex],
 }
 
-impl<'a> FindRecord<'a> {
+impl<'a, 'b> FindRecord<'a, 'b> {
     pub(crate) fn new(
-        meta: &'a BoxMetadata,
-        query: VecDeque<String>,
+        meta: &'a BoxMetadata<'a>,
+        query: VecDeque<&'b str>,
         entries: &'a [RecordIndex],
-    ) -> FindRecord<'a> {
+    ) -> FindRecord<'a, 'b> {
         log::trace!("FindRecord query: {:?}", query);
 
         FindRecord {
@@ -145,13 +146,13 @@ impl<'a> FindRecord<'a> {
     }
 }
 
-impl<'a> Iterator for FindRecord<'a> {
+impl<'a, 'b> Iterator for FindRecord<'a, 'b> {
     type Item = RecordIndex;
 
     fn next(&mut self) -> Option<Self::Item> {
         let candidate_name = self.query.pop_front()?;
 
-        log::trace!("candidate_name: {}", &candidate_name);
+        log::trace!("candidate_name: {}", candidate_name);
 
         let result = self
             .entries
@@ -179,14 +180,14 @@ impl<'a> Iterator for FindRecord<'a> {
     }
 }
 
-impl BoxMetadata {
+impl<'a> BoxMetadata<'a> {
     #[inline(always)]
-    pub fn iter(&self) -> Records<'_> {
+    pub fn iter(&'a self) -> Records<'a> {
         Records::new(self, &self.root, None)
     }
 
     #[inline(always)]
-    pub fn root_records(&self) -> Vec<(RecordIndex, &Record)> {
+    pub fn root_records(&'a self) -> Vec<(RecordIndex, &'a Record<'a>)> {
         self.root
             .iter()
             .copied()
@@ -195,7 +196,7 @@ impl BoxMetadata {
     }
 
     #[inline(always)]
-    pub fn dir_records(&self, dir_record: &DirectoryRecord) -> Vec<(RecordIndex, &Record)> {
+    pub fn dir_records(&'a self, dir_record: &DirectoryRecord) -> Vec<(RecordIndex, &'a Record<'a>)> {
         dir_record
             .entries
             .iter()
@@ -205,28 +206,28 @@ impl BoxMetadata {
     }
 
     #[inline(always)]
-    pub fn index(&self, path: &BoxPath) -> Option<RecordIndex> {
-        FindRecord::new(self, path.iter().map(str::to_string).collect(), &self.root).next()
+    pub fn index(&'a self, path: &BoxPath) -> Option<RecordIndex> {
+        FindRecord::new(self, path.iter().collect(), &self.root).next()
     }
 
     #[inline(always)]
-    pub fn record(&self, index: RecordIndex) -> Option<&Record> {
+    pub fn record(&'a self, index: RecordIndex) -> Option<&'a Record<'a>> {
         self.records.get(index.get() as usize - 1)
     }
 
     #[inline(always)]
-    pub fn record_mut(&mut self, index: RecordIndex) -> Option<&mut Record> {
+    pub fn record_mut(&mut self, index: RecordIndex) -> Option<&mut Record<'a>> {
         self.records.get_mut(index.get() as usize - 1)
     }
 
     #[inline(always)]
-    pub fn insert_record(&mut self, record: Record) -> RecordIndex {
+    pub fn insert_record(&mut self, record: Record<'a>) -> RecordIndex {
         self.records.push(record);
         RecordIndex::new(self.records.len() as u64).unwrap()
     }
 
     #[inline(always)]
-    pub fn attr<S: AsRef<str>>(&self, path: &BoxPath, key: S) -> Option<&[u8]> {
+    pub fn attr<S: AsRef<str>>(&'a self, path: &BoxPath, key: S) -> Option<&[u8]> {
         let key = self.attr_key(key.as_ref())?;
 
         if let Some(record) = self.index(path).and_then(|x| self.record(x)) {
