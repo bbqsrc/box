@@ -50,20 +50,20 @@ impl Default for BoxMetadata<'static> {
 }
 
 #[derive(Debug)]
-pub struct Records<'a> {
-    meta: &'a BoxMetadata<'a>,
+pub struct Records<'a, 'b> {
+    meta: &'a BoxMetadata<'b>,
     entries: &'a [RecordIndex],
     base_path: Option<BoxPath<'static>>,
     cur_entry: usize,
-    cur_dir: Option<Box<Records<'a>>>,
+    cur_dir: Option<Box<Records<'a, 'b>>>,
 }
 
-impl<'a> Records<'a> {
+impl<'a, 'b> Records<'a, 'b> {
     pub(crate) fn new(
-        meta: &'a BoxMetadata<'a>,
+        meta: &'a BoxMetadata<'b>,
         entries: &'a [RecordIndex],
         base_path: Option<BoxPath<'static>>,
-    ) -> Records<'a> {
+    ) -> Records<'a, 'b> {
         Records {
             meta,
             entries,
@@ -76,14 +76,14 @@ impl<'a> Records<'a> {
 
 #[non_exhaustive]
 #[derive(Debug)]
-pub struct RecordsItem<'a> {
+pub struct RecordsItem<'a, 'b> {
     pub(crate) index: RecordIndex,
     pub path: BoxPath<'static>,
-    pub record: &'a Record<'a>,
+    pub record: &'a Record<'b>,
 }
 
-impl<'a> Iterator for Records<'a> {
-    type Item = RecordsItem<'a>;
+impl<'a, 'b> Iterator for Records<'a, 'b> {
+    type Item = RecordsItem<'a, 'b>;
 
     fn next(&mut self) -> Option<Self::Item> {
         // If iterating a child iterator, do it here.
@@ -182,12 +182,12 @@ impl<'a, 'b> Iterator for FindRecord<'a, 'b> {
 
 impl<'a> BoxMetadata<'a> {
     #[inline(always)]
-    pub fn iter(&'a self) -> Records<'a> {
+    pub fn iter(&self) -> Records<'_, 'a> {
         Records::new(self, &self.root, None)
     }
 
     #[inline(always)]
-    pub fn root_records(&'a self) -> Vec<(RecordIndex, &'a Record<'a>)> {
+    pub fn root_records(&self) -> Vec<(RecordIndex, &Record<'a>)> {
         self.root
             .iter()
             .copied()
@@ -196,7 +196,7 @@ impl<'a> BoxMetadata<'a> {
     }
 
     #[inline(always)]
-    pub fn dir_records(&'a self, dir_record: &DirectoryRecord) -> Vec<(RecordIndex, &'a Record<'a>)> {
+    pub fn dir_records(&self, dir_record: &DirectoryRecord<'_>) -> Vec<(RecordIndex, &Record<'a>)> {
         dir_record
             .entries
             .iter()
@@ -206,12 +206,12 @@ impl<'a> BoxMetadata<'a> {
     }
 
     #[inline(always)]
-    pub fn index(&'a self, path: &BoxPath) -> Option<RecordIndex> {
+    pub fn index(&self, path: &BoxPath<'_>) -> Option<RecordIndex> {
         FindRecord::new(self, path.iter().collect(), &self.root).next()
     }
 
     #[inline(always)]
-    pub fn record(&'a self, index: RecordIndex) -> Option<&'a Record<'a>> {
+    pub fn record(&self, index: RecordIndex) -> Option<&Record<'a>> {
         self.records.get(index.get() as usize - 1)
     }
 
@@ -227,7 +227,7 @@ impl<'a> BoxMetadata<'a> {
     }
 
     #[inline(always)]
-    pub fn attr<S: AsRef<str>>(&'a self, path: &BoxPath, key: S) -> Option<&[u8]> {
+    pub fn attr<S: AsRef<str>>(&self, path: &BoxPath<'_>, key: S) -> Option<&[u8]> {
         let key = self.attr_key(key.as_ref())?;
 
         if let Some(record) = self.index(path).and_then(|x| self.record(x)) {

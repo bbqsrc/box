@@ -70,7 +70,7 @@ impl<'a> Record<'a> {
     }
 
     #[inline(always)]
-    pub fn attr<S: AsRef<str>>(&self, metadata: &BoxMetadata, key: S) -> Option<&[u8]> {
+    pub fn attr<S: AsRef<str>>(&self, metadata: &BoxMetadata<'_>, key: S) -> Option<&[u8]> {
         let key = metadata.attr_key(key.as_ref())?;
         self.attrs().get(&key).map(|x| &**x)
     }
@@ -92,6 +92,14 @@ impl<'a> Record<'a> {
             Record::Link(link) => &mut link.attrs,
         }
     }
+
+    pub fn into_owned(self) -> Record<'static> {
+        match self {
+            Record::File(file) => Record::File(file.into_owned()),
+            Record::Directory(dir) => Record::Directory(dir.into_owned()),
+            Record::Link(link) => Record::Link(link.into_owned()),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -109,9 +117,17 @@ pub struct LinkRecord<'a> {
 
 impl LinkRecord<'_> {
     #[inline(always)]
-    pub fn attr<S: AsRef<str>>(&self, metadata: &BoxMetadata, key: S) -> Option<&[u8]> {
+    pub fn attr<S: AsRef<str>>(&self, metadata: &BoxMetadata<'_>, key: S) -> Option<&[u8]> {
         let key = metadata.attr_key(key.as_ref())?;
         self.attrs.get(&key).map(|x| &**x)
+    }
+
+    pub fn into_owned(self) -> LinkRecord<'static> {
+        LinkRecord {
+            name: Cow::Owned(self.name.into_owned()),
+            target: self.target.into_owned(),
+            attrs: self.attrs,
+        }
     }
 }
 
@@ -145,9 +161,17 @@ impl DirectoryRecord<'static> {
 
 impl DirectoryRecord<'_> {
     #[inline(always)]
-    pub fn attr<S: AsRef<str>>(&self, metadata: &BoxMetadata, key: S) -> Option<&[u8]> {
+    pub fn attr<S: AsRef<str>>(&self, metadata: &BoxMetadata<'_>, key: S) -> Option<&[u8]> {
         let key = metadata.attr_key(key.as_ref())?;
         self.attrs.get(&key).map(|x| &**x)
+    }
+
+    pub fn into_owned(self) -> DirectoryRecord<'static> {
+        DirectoryRecord {
+            name: Cow::Owned(self.name.into_owned()),
+            entries: self.entries,
+            attrs: self.attrs,
+        }
     }
 }
 
@@ -185,9 +209,20 @@ impl FileRecord<'_> {
     }
 
     #[inline(always)]
-    pub fn attr<S: AsRef<str>>(&self, metadata: &BoxMetadata, key: S) -> Option<&[u8]> {
+    pub fn attr<S: AsRef<str>>(&self, metadata: &BoxMetadata<'_>, key: S) -> Option<&[u8]> {
         let key = metadata.attr_key(key.as_ref())?;
         self.attrs.get(&key).map(|x| &**x)
+    }
+
+    pub fn into_owned(self) -> FileRecord<'static> {
+        FileRecord {
+            compression: self.compression,
+            length: self.length,
+            decompressed_length: self.decompressed_length,
+            data: self.data,
+            name: Cow::Owned(self.name.into_owned()),
+            attrs: self.attrs,
+        }
     }
 }
 

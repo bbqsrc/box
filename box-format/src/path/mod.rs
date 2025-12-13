@@ -109,7 +109,10 @@ impl<'a> BoxPath<'a> {
             .any(|(a, b)| a != b)
     }
 
-    pub fn join<P: AsRef<Path>>(&self, tail: P) -> std::result::Result<BoxPath<'static>, IntoBoxPathError> {
+    pub fn join<P: AsRef<Path>>(
+        &self,
+        tail: P,
+    ) -> std::result::Result<BoxPath<'static>, IntoBoxPathError> {
         BoxPath::new(self.to_path_buf().join(tail))
     }
 

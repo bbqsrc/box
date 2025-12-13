@@ -12,18 +12,32 @@ use super::meta::Records;
 use super::{BoxMetadata, meta::RecordsItem};
 use crate::path::IntoBoxPathError;
 use crate::{
-    de::DeserializeOwned,
+    de::{DeserializeBorrowed, DeserializeOwned},
     header::BoxHeader,
     path::BoxPath,
     record::{FileRecord, LinkRecord, Record},
 };
 
-#[derive(Debug)]
 pub struct BoxFileReader {
     pub(crate) path: PathBuf,
     pub(crate) header: BoxHeader,
     pub(crate) meta: BoxMetadata<'static>,
     pub(crate) offset: u64,
+    /// Holds the mmapped trailer data. The Arc inside keeps the data alive.
+    /// This must not be dropped before `meta` is dropped.
+    #[allow(dead_code)]
+    pub(crate) trailer_segment: Segment,
+}
+
+impl std::fmt::Debug for BoxFileReader {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BoxFileReader")
+            .field("path", &self.path)
+            .field("header", &self.header)
+            .field("meta", &self.meta)
+            .field("offset", &self.offset)
+            .finish_non_exhaustive()
+    }
 }
 
 pub(super) async fn read_header<R: tokio::io::AsyncRead + tokio::io::AsyncSeek + Unpin + Send>(
@@ -199,26 +213,52 @@ impl BoxFileReader {
             .await
             .map_err(|e| OpenError::ReadFailed(e, path.clone()))?;
 
-        // Try to load the header so we can easily rewrite it when saving.
-        // If header is invalid, we're not even loading a .box file.
-        let (header, meta) = {
+        // Read the header to get the trailer pointer
+        let header = {
             let mut reader = BufReader::new(file);
-            let header = read_header(&mut reader, offset)
+            read_header(&mut reader, offset)
                 .await
-                .map_err(OpenError::MissingHeader)?;
-            let ptr = header.trailer.ok_or(OpenError::MissingTrailer)?;
-            let meta = read_trailer(&mut reader, ptr, offset)
-                .await
-                .map_err(OpenError::InvalidTrailer)?;
-
-            (header, meta)
+                .map_err(OpenError::MissingHeader)?
         };
+
+        let trailer_ptr = header.trailer.ok_or(OpenError::MissingTrailer)?;
+
+        // Memory-map the file and use zero-copy deserialization for the trailer
+        let mmap = MemoryMappedFile::open_ro(&path)
+            .map_err(|e| OpenError::ReadFailed(std::io::Error::other(e), path.clone()))?;
+
+        // Get file size to calculate trailer segment bounds
+        let file_size = std::fs::metadata(&path)
+            .map_err(|e| OpenError::ReadFailed(e, path.clone()))?
+            .len();
+
+        let trailer_offset = offset + trailer_ptr.get();
+        let trailer_len = file_size - trailer_offset;
+
+        let trailer_segment = Segment::new(mmap.into(), trailer_offset, trailer_len)
+            .map_err(|e| OpenError::InvalidTrailer(std::io::Error::other(e)))?;
+
+        let trailer_data = trailer_segment
+            .as_slice()
+            .map_err(|e| OpenError::InvalidTrailer(std::io::Error::other(e)))?;
+
+        // Deserialize with borrowed data from the mmap
+        let mut pos = 0;
+        let meta = BoxMetadata::deserialize_borrowed(trailer_data, &mut pos)
+            .map_err(OpenError::InvalidTrailer)?;
+
+        // Safety: The trailer_segment holds an Arc<MemoryMappedFile> which keeps the
+        // underlying memory alive. As long as BoxFileReader exists, the segment exists,
+        // and the borrowed references in meta remain valid. We transmute to 'static
+        // to express this in the type system.
+        let meta: BoxMetadata<'static> = unsafe { std::mem::transmute(meta) };
 
         let f = BoxFileReader {
             path,
             header,
             meta,
             offset,
+            trailer_segment,
         };
 
         Ok(f)
@@ -246,13 +286,13 @@ impl BoxFileReader {
     }
 
     #[inline(always)]
-    pub fn metadata(&self) -> &BoxMetadata {
+    pub fn metadata(&self) -> &BoxMetadata<'static> {
         &self.meta
     }
 
     pub async fn decompress<W: tokio::io::AsyncWrite + Unpin>(
         &self,
-        record: &FileRecord,
+        record: &FileRecord<'_>,
         dest: W,
     ) -> std::io::Result<()> {
         let segment = self.memory_map(record)?;
@@ -262,7 +302,7 @@ impl BoxFileReader {
         record.compression.decompress_write(buf_reader, dest).await
     }
 
-    pub fn find(&self, path: &BoxPath) -> Result<&Record, ExtractError> {
+    pub fn find(&self, path: &BoxPath<'_>) -> Result<&Record<'static>, ExtractError> {
         let record = self
             .meta
             .index(path)
@@ -273,7 +313,7 @@ impl BoxFileReader {
 
     pub async fn extract<P: AsRef<Path>>(
         &self,
-        path: &BoxPath,
+        path: &BoxPath<'_>,
         output_path: P,
     ) -> Result<(), ExtractError> {
         let output_path = output_path.as_ref();
@@ -287,7 +327,7 @@ impl BoxFileReader {
 
     pub async fn extract_recursive<P: AsRef<Path>>(
         &self,
-        path: &BoxPath,
+        path: &BoxPath<'_>,
         output_path: P,
     ) -> Result<(), ExtractError> {
         self.extract_recursive_with_options(path, output_path, ExtractOptions::default())
@@ -325,7 +365,7 @@ impl BoxFileReader {
     /// Extract a path and all children with options, returning extraction statistics.
     pub async fn extract_recursive_with_options<P: AsRef<Path>>(
         &self,
-        path: &BoxPath,
+        path: &BoxPath<'_>,
         output_path: P,
         options: ExtractOptions,
     ) -> Result<ExtractStats, ExtractError> {
@@ -516,7 +556,7 @@ impl BoxFileReader {
             if let Record::Link(link) = &record {
                 let link_target = self
                     .resolve_link(link)
-                    .map_err(|e| ExtractError::ResolveLinkFailed(e, link.clone()))?;
+                    .map_err(|e| ExtractError::ResolveLinkFailed(e, link.clone().into_owned()))?;
 
                 let source = output_path.join(path.to_path_buf());
                 let destination = output_path.join(link_target.path.to_path_buf());
@@ -726,11 +766,11 @@ impl BoxFileReader {
         Ok(stats)
     }
 
-    pub fn resolve_link(&self, link: &LinkRecord) -> std::io::Result<RecordsItem<'_>> {
+    pub fn resolve_link(&self, link: &LinkRecord<'_>) -> std::io::Result<RecordsItem<'_, 'static>> {
         match self.meta.index(&link.target) {
             Some(index) => Ok(RecordsItem {
                 index,
-                path: link.target.to_owned(),
+                path: link.target.clone().into_owned(),
                 record: self.meta.record(index).unwrap(),
             }),
             None => Err(std::io::Error::new(
@@ -740,7 +780,10 @@ impl BoxFileReader {
         }
     }
 
-    pub async fn read_bytes(&self, record: &FileRecord) -> std::io::Result<tokio::io::Take<File>> {
+    pub async fn read_bytes(
+        &self,
+        record: &FileRecord<'_>,
+    ) -> std::io::Result<tokio::io::Take<File>> {
         let mut file = OpenOptions::new().read(true).open(&self.path).await?;
 
         file.seek(SeekFrom::Start(self.offset + record.data.get()))
@@ -749,7 +792,7 @@ impl BoxFileReader {
     }
 
     /// Memory-map the file and return a segment for the record's data.
-    pub fn memory_map(&self, record: &FileRecord) -> std::io::Result<Segment> {
+    pub fn memory_map(&self, record: &FileRecord<'_>) -> std::io::Result<Segment> {
         let mmap = MemoryMappedFile::open_ro(&self.path).map_err(std::io::Error::other)?;
         let offset = self.offset + record.data.get();
         Segment::new(mmap.into(), offset, record.length).map_err(std::io::Error::other)
@@ -757,8 +800,8 @@ impl BoxFileReader {
 
     async fn extract_inner(
         &self,
-        path: &BoxPath,
-        record: &Record,
+        path: &BoxPath<'_>,
+        record: &Record<'_>,
         output_path: &Path,
     ) -> Result<(), ExtractError> {
         match record {
@@ -807,7 +850,7 @@ impl BoxFileReader {
             Record::Link(link) => {
                 let link_target = self
                     .resolve_link(link)
-                    .map_err(|e| ExtractError::ResolveLinkFailed(e, link.clone()))?;
+                    .map_err(|e| ExtractError::ResolveLinkFailed(e, link.clone().into_owned()))?;
 
                 let source = output_path.join(path.to_path_buf());
                 let destination = output_path.join(link_target.path.to_path_buf());
@@ -820,7 +863,7 @@ impl BoxFileReader {
             Record::Link(link) => {
                 let link_target = self
                     .resolve_link(link)
-                    .map_err(|e| ExtractError::ResolveLinkFailed(e, link.clone()))?;
+                    .map_err(|e| ExtractError::ResolveLinkFailed(e, link.clone().into_owned()))?;
 
                 let source = output_path.join(path.to_path_buf());
                 let destination = output_path.join(link_target.path.to_path_buf());
@@ -840,8 +883,8 @@ impl BoxFileReader {
 
     async fn extract_inner_with_options(
         &self,
-        path: &BoxPath,
-        record: &Record,
+        path: &BoxPath<'_>,
+        record: &Record<'_>,
         output_path: &Path,
         options: &ExtractOptions,
         stats: &mut ExtractStats,
@@ -916,7 +959,7 @@ impl BoxFileReader {
             Record::Link(link) => {
                 let link_target = self
                     .resolve_link(link)
-                    .map_err(|e| ExtractError::ResolveLinkFailed(e, link.clone()))?;
+                    .map_err(|e| ExtractError::ResolveLinkFailed(e, link.clone().into_owned()))?;
 
                 let source = output_path.join(path.to_path_buf());
                 let destination = output_path.join(link_target.path.to_path_buf());
@@ -931,7 +974,7 @@ impl BoxFileReader {
             Record::Link(link) => {
                 let link_target = self
                     .resolve_link(link)
-                    .map_err(|e| ExtractError::ResolveLinkFailed(e, link.clone()))?;
+                    .map_err(|e| ExtractError::ResolveLinkFailed(e, link.clone().into_owned()))?;
 
                 let source = output_path.join(path.to_path_buf());
                 let destination = output_path.join(link_target.path.to_path_buf());
@@ -1012,8 +1055,8 @@ async fn extract_single_file(
     archive_path: &Path,
     archive_offset: u64,
     output_base: &Path,
-    box_path: &BoxPath,
-    record: &FileRecord,
+    box_path: &BoxPath<'_>,
+    record: &FileRecord<'_>,
     verify_checksum: bool,
     expected_hash: Option<&[u8]>,
 ) -> Result<ExtractStats, ExtractError> {
@@ -1110,8 +1153,8 @@ async fn extract_single_file(
 async fn validate_single_file(
     archive_path: &Path,
     archive_offset: u64,
-    box_path: &BoxPath,
-    record: &FileRecord,
+    box_path: &BoxPath<'_>,
+    record: &FileRecord<'_>,
     expected_hash: &[u8],
 ) -> Result<bool, ExtractError> {
     // Memory map the archive for this file's data

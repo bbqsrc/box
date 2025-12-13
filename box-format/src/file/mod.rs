@@ -45,7 +45,7 @@ mod tests {
         let mut writer = BoxFileWriter::create(filename).await.unwrap();
         writer
             .insert(
-                Compression::Stored,
+                &CompressionConfig::new(Compression::Stored),
                 BoxPath::new("hello.txt").unwrap(),
                 &mut cursor,
                 HashMap::new(),
@@ -128,7 +128,7 @@ mod tests {
             bf.mkdir(BoxPath::new("test").unwrap(), dir_attrs).unwrap();
 
             bf.insert(
-                Compression::Zstd,
+                &CompressionConfig::new(Compression::Zstd),
                 BoxPath::new("test/string.txt").unwrap(),
                 &mut std::io::Cursor::new(v.clone()),
                 attrs.clone(),
@@ -136,7 +136,7 @@ mod tests {
             .await
             .unwrap();
             bf.insert(
-                Compression::Deflate,
+                &CompressionConfig::new(Compression::Deflate),
                 BoxPath::new("test/string2.txt").unwrap(),
                 &mut std::io::Cursor::new(v.clone()),
                 attrs.clone(),
@@ -189,14 +189,4 @@ mod tests {
         )
         .await;
     }
-
-    // #[test]
-    // fn read_index() {
-    //     insert_impl("./read_index.box", |n| BoxFileWriter::create(n).unwrap());
-
-    //     let bf = BoxFileReader::open("./read_index.box").unwrap();
-    //     let fst = bf.meta.index.unwrap();
-
-    //     fst.get("nothing");
-    // }
 }

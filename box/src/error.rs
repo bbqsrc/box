@@ -32,14 +32,14 @@ pub enum Error {
 
     #[error("Cannot create directory `{path}`")]
     CreateDirectory {
-        path: BoxPath,
+        path: BoxPath<'static>,
         #[source]
         source: std::io::Error,
     },
 
     #[error("Cannot create link `{path}`")]
     CreateLink {
-        path: BoxPath,
+        path: BoxPath<'static>,
         #[source]
         source: std::io::Error,
     },

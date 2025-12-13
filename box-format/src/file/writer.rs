@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::default::Default;
 use std::io::SeekFrom;
 use std::num::NonZeroU64;
@@ -41,7 +41,7 @@ pub struct FileJob {
     /// Path to the file on the filesystem.
     pub fs_path: PathBuf,
     /// Path within the archive.
-    pub box_path: BoxPath,
+    pub box_path: BoxPath<'static>,
     /// Compression configuration for this file.
     pub config: CompressionConfig,
 }
@@ -53,7 +53,7 @@ pub struct FileJob {
 /// to prevent data races when compressing in parallel.
 pub struct CompressedFile {
     /// The path within the archive.
-    pub box_path: BoxPath,
+    pub box_path: BoxPath<'static>,
     /// The compressed data (in memory or temp file).
     pub data: CompressedData,
     /// The compression algorithm used.
@@ -75,7 +75,7 @@ pub struct BoxFileWriter {
     pub(crate) file: BufWriter<File>,
     pub(crate) path: PathBuf,
     pub(crate) header: BoxHeader,
-    pub(crate) meta: BoxMetadata,
+    pub(crate) meta: BoxMetadata<'static>,
     /// Cached next write position to avoid O(n) scan per write
     next_write_pos: u64,
     /// Current file position (to avoid seek-induced buffer flushes)
@@ -239,11 +239,11 @@ impl BoxFileWriter {
     }
 
     /// Will return the metadata for the `.box` if it has been provided.
-    pub fn metadata(&self) -> &BoxMetadata {
+    pub fn metadata(&self) -> &BoxMetadata<'static> {
         &self.meta
     }
 
-    fn iter(&self) -> super::meta::Records<'_> {
+    fn iter(&self) -> super::meta::Records<'_, 'static> {
         super::meta::Records::new(self.metadata(), &self.metadata().root, None)
     }
 
@@ -254,15 +254,19 @@ impl BoxFileWriter {
             .collect()
     }
 
-    fn insert_inner(&mut self, path: BoxPath, record: Record) -> std::io::Result<RecordIndex> {
+    fn insert_inner(
+        &mut self,
+        path: BoxPath<'_>,
+        record: Record<'static>,
+    ) -> std::io::Result<RecordIndex> {
         self.insert_inner_with_parent(path, record, None)
     }
 
     /// Insert a record with optional pre-computed parent index for O(1) lookup.
     fn insert_inner_with_parent(
         &mut self,
-        path: BoxPath,
-        record: Record,
+        path: BoxPath<'_>,
+        record: Record<'static>,
         cached_parent: Option<RecordIndex>,
     ) -> std::io::Result<RecordIndex> {
         log::trace!("insert_inner path: {:?}", path);
@@ -306,11 +310,15 @@ impl BoxFileWriter {
         }
     }
 
-    pub fn mkdir(&mut self, path: BoxPath, attrs: HashMap<String, Vec<u8>>) -> std::io::Result<()> {
+    pub fn mkdir(
+        &mut self,
+        path: BoxPath<'_>,
+        attrs: HashMap<String, Vec<u8>>,
+    ) -> std::io::Result<()> {
         log::trace!("mkdir: {}", path);
 
         let record = DirectoryRecord {
-            name: path.filename(),
+            name: std::borrow::Cow::Owned(path.filename().to_string()),
             entries: vec![],
             attrs: self.convert_attrs(attrs),
         };
@@ -322,13 +330,13 @@ impl BoxFileWriter {
     /// Create a directory and all its parent directories if they don't exist.
     pub fn mkdir_all(
         &mut self,
-        path: BoxPath,
+        path: BoxPath<'_>,
         attrs: HashMap<String, Vec<u8>>,
     ) -> std::io::Result<()> {
         // First ensure all parent directories exist
         if let Some(parent) = path.parent() {
             if self.meta.index(&parent).is_none() {
-                self.mkdir_all(parent, HashMap::new())?;
+                self.mkdir_all(parent.into_owned(), HashMap::new())?;
             }
         }
 
@@ -342,12 +350,12 @@ impl BoxFileWriter {
 
     pub fn link(
         &mut self,
-        path: BoxPath,
-        target: BoxPath,
+        path: BoxPath<'_>,
+        target: BoxPath<'static>,
         attrs: HashMap<String, Vec<u8>>,
     ) -> std::io::Result<()> {
         let record = LinkRecord {
-            name: path.filename(),
+            name: std::borrow::Cow::Owned(path.filename().to_string()),
             target,
             attrs: self.convert_attrs(attrs),
         };
@@ -359,10 +367,10 @@ impl BoxFileWriter {
     pub async fn insert<R: tokio::io::AsyncBufRead + Unpin>(
         &mut self,
         config: &CompressionConfig,
-        path: BoxPath,
+        path: BoxPath<'_>,
         value: R,
         attrs: HashMap<String, Vec<u8>>,
-    ) -> std::io::Result<&FileRecord> {
+    ) -> std::io::Result<&FileRecord<'static>> {
         let attrs = self.convert_attrs(attrs);
         let next_addr = self.next_write_addr();
         let byte_count = self.write_data(config, next_addr.get(), value).await?;
@@ -374,7 +382,7 @@ impl BoxFileWriter {
             compression: config.compression,
             length: byte_count.write,
             decompressed_length: byte_count.read,
-            name: path.filename(),
+            name: std::borrow::Cow::Owned(path.filename().to_string()),
             data: next_addr,
             attrs,
         };
@@ -395,10 +403,10 @@ impl BoxFileWriter {
     pub async fn insert_streaming<R, C>(
         &mut self,
         config: &CompressionConfig,
-        path: BoxPath,
+        path: BoxPath<'static>,
         reader: R,
         attrs: HashMap<String, Vec<u8>>,
-    ) -> std::io::Result<&FileRecord>
+    ) -> std::io::Result<&FileRecord<'static>>
     where
         R: tokio::io::AsyncRead + Unpin,
         C: Checksum,
@@ -422,7 +430,7 @@ impl BoxFileWriter {
             compression: config.compression,
             length: byte_count.write,
             decompressed_length: byte_count.read,
-            name: path.filename(),
+            name: std::borrow::Cow::Owned(path.filename().to_string()),
             data: next_addr,
             attrs,
         };
@@ -492,7 +500,7 @@ impl BoxFileWriter {
     pub async fn write_precompressed(
         &mut self,
         file: CompressedFile,
-    ) -> std::io::Result<&FileRecord> {
+    ) -> std::io::Result<&FileRecord<'static>> {
         self.write_precompressed_with_parent(file, None).await
     }
 
@@ -501,7 +509,7 @@ impl BoxFileWriter {
         &mut self,
         file: CompressedFile,
         parent_index: Option<RecordIndex>,
-    ) -> std::io::Result<&FileRecord> {
+    ) -> std::io::Result<&FileRecord<'static>> {
         let next_addr = self.next_write_addr();
 
         // Write padding bytes for alignment instead of seeking
@@ -546,7 +554,7 @@ impl BoxFileWriter {
             compression: file.compression,
             length: file.compressed_length,
             decompressed_length: file.decompressed_length,
-            name: file.box_path.filename(),
+            name: std::borrow::Cow::Owned(file.box_path.filename().to_string()),
             data: next_addr,
             attrs,
         };
@@ -568,7 +576,7 @@ impl BoxFileWriter {
 
     pub fn set_attr<S: AsRef<str>>(
         &mut self,
-        path: &BoxPath,
+        path: &BoxPath<'_>,
         key: S,
         value: Vec<u8>,
     ) -> std::io::Result<()> {
@@ -605,10 +613,10 @@ impl BoxFileWriter {
     pub async fn insert_file<P: AsRef<Path>>(
         &mut self,
         fs_path: P,
-        box_path: BoxPath,
+        box_path: BoxPath<'static>,
         config: &CompressionConfig,
         with_checksum: bool,
-    ) -> std::io::Result<&FileRecord> {
+    ) -> std::io::Result<&FileRecord<'static>> {
         let fs_path = fs_path.as_ref();
         let meta = tokio::fs::metadata(fs_path).await?;
         let attrs = crate::fs::metadata_to_attrs(&meta);
@@ -643,8 +651,6 @@ impl BoxFileWriter {
     ) -> std::io::Result<AddStats> {
         let path = path.as_ref();
         let mut stats = AddStats::default();
-        let mut known_dirs: HashSet<BoxPath> = HashSet::new();
-        let mut known_files: HashSet<BoxPath> = HashSet::new();
 
         let path_meta = tokio::fs::metadata(path).await?;
 
@@ -691,9 +697,8 @@ impl BoxFileWriter {
 
             // Ensure parent directories exist
             if let Some(parent) = box_path.parent() {
-                if !known_dirs.contains(&parent) && self.meta.index(&parent).is_none() {
-                    self.mkdir_all(parent.clone(), HashMap::new())?;
-                    known_dirs.insert(parent);
+                if self.meta.index(&parent).is_none() {
+                    self.mkdir_all(parent, HashMap::new())?;
                 }
             }
 
@@ -705,25 +710,22 @@ impl BoxFileWriter {
                     let target_box_path = BoxPath::new(&target_path)?;
                     let link_meta = crate::fs::metadata_to_attrs(&meta);
 
-                    if !known_files.contains(&box_path) && !known_dirs.contains(&box_path) {
-                        self.link(box_path.clone(), target_box_path, link_meta)?;
+                    if self.meta.index(&box_path).is_none() {
+                        self.link(box_path, target_box_path, link_meta)?;
                         if file_type.is_dir() {
-                            known_dirs.insert(box_path);
                             stats.dirs_added += 1;
                         } else {
-                            known_files.insert(box_path);
                             stats.links_added += 1;
                         }
                     }
                 }
             } else if file_type.is_dir() {
-                if !known_dirs.contains(&box_path) {
+                if self.meta.index(&box_path).is_none() {
                     let dir_meta = crate::fs::metadata_to_attrs(&meta);
-                    self.mkdir(box_path.clone(), dir_meta)?;
-                    known_dirs.insert(box_path);
+                    self.mkdir(box_path, dir_meta)?;
                     stats.dirs_added += 1;
                 }
-            } else if !known_files.contains(&box_path) {
+            } else if self.meta.index(&box_path).is_none() {
                 // Regular file
                 let attrs = crate::fs::metadata_to_attrs(&meta);
 
@@ -732,9 +734,8 @@ impl BoxFileWriter {
 
                 // Ensure parent exists
                 if let Some(parent) = box_path.parent() {
-                    if !known_dirs.contains(&parent) && self.meta.index(&parent).is_none() {
-                        self.mkdir_all(parent.clone(), HashMap::new())?;
-                        known_dirs.insert(parent);
+                    if self.meta.index(&parent).is_none() {
+                        self.mkdir_all(parent, HashMap::new())?;
                     }
                 }
 
@@ -742,22 +743,15 @@ impl BoxFileWriter {
                 let reader = tokio::io::BufReader::new(file);
 
                 let record = if options.checksum {
-                    self.insert_streaming::<_, blake3::Hasher>(
-                        &config,
-                        box_path.clone(),
-                        reader,
-                        attrs,
-                    )
-                    .await?
-                } else {
-                    self.insert(&config, box_path.clone(), reader, attrs)
+                    self.insert_streaming::<_, blake3::Hasher>(&config, box_path, reader, attrs)
                         .await?
+                } else {
+                    self.insert(&config, box_path, reader, attrs).await?
                 };
 
                 stats.files_added += 1;
                 stats.bytes_original += record.decompressed_length;
                 stats.bytes_compressed += record.length;
-                known_files.insert(box_path);
             }
         }
 
@@ -824,12 +818,12 @@ impl BoxFileWriter {
         self.meta.records.reserve(total_files as usize);
 
         // Build parent index cache for O(1) lookups (avoids O(depth) path traversal per file)
-        let mut parent_cache: HashMap<BoxPath, RecordIndex> = HashMap::new();
+        let mut parent_cache: HashMap<BoxPath<'static>, RecordIndex> = HashMap::new();
         for job in &files {
             if let Some(parent) = job.box_path.parent() {
                 if !parent_cache.contains_key(&parent) {
                     if let Some(idx) = self.meta.index(&parent) {
-                        parent_cache.insert(parent, idx);
+                        parent_cache.insert(parent.into_owned(), idx);
                     }
                 }
             }
@@ -901,12 +895,13 @@ impl BoxFileWriter {
                     Some(idx) => Some(idx),
                     None => {
                         // Parent not in cache - ensure it exists and cache it
-                        if self.meta.index(&parent).is_none() {
-                            self.mkdir_all(parent.clone(), HashMap::new())?;
+                        let parent_owned = parent.into_owned();
+                        if self.meta.index(&parent_owned).is_none() {
+                            self.mkdir_all(parent_owned.clone(), HashMap::new())?;
                         }
-                        let idx = self.meta.index(&parent);
+                        let idx = self.meta.index(&parent_owned);
                         if let Some(idx) = idx {
-                            parent_cache.insert(parent, idx);
+                            parent_cache.insert(parent_owned, idx);
                         }
                         idx
                     }
@@ -945,12 +940,12 @@ pub enum ParallelProgress {
     /// Compression started.
     Started { total_files: u64 },
     /// A file is being compressed.
-    Compressing { path: BoxPath },
+    Compressing { path: BoxPath<'static> },
     /// A file finished compressing (waiting to be written).
-    Compressed { path: BoxPath },
+    Compressed { path: BoxPath<'static> },
     /// A file was written to the archive.
     Written {
-        path: BoxPath,
+        path: BoxPath<'static>,
         files_written: u64,
         total_files: u64,
     },
@@ -1029,7 +1024,7 @@ pub fn calculate_memory_threshold(concurrency: usize) -> u64 {
 /// The resulting `CompressedFile` can be passed to `BoxFileWriter::write_precompressed`.
 pub async fn compress_file<C: Checksum>(
     fs_path: &Path,
-    box_path: BoxPath,
+    box_path: BoxPath<'static>,
     config: &CompressionConfig,
     memory_threshold: u64,
 ) -> std::io::Result<CompressedFile> {

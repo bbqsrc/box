@@ -40,7 +40,7 @@ impl<T: Serialize> Serialize for Vec<T> {
     }
 }
 
-impl Serialize for String {
+impl Serialize for str {
     async fn write<W: AsyncWrite + AsyncSeek + Unpin + Send>(
         &self,
         writer: &mut W,
@@ -48,6 +48,24 @@ impl Serialize for String {
         writer.write_vu64(self.len() as u64).await?;
         writer.write_all(self.as_bytes()).await?;
         Ok(())
+    }
+}
+
+impl Serialize for String {
+    async fn write<W: AsyncWrite + AsyncSeek + Unpin + Send>(
+        &self,
+        writer: &mut W,
+    ) -> std::io::Result<()> {
+        self.as_str().write(writer).await
+    }
+}
+
+impl<'a> Serialize for std::borrow::Cow<'a, str> {
+    async fn write<W: AsyncWrite + AsyncSeek + Unpin + Send>(
+        &self,
+        writer: &mut W,
+    ) -> std::io::Result<()> {
+        self.as_ref().write(writer).await
     }
 }
 
@@ -104,7 +122,7 @@ impl Serialize for AttrMap {
     }
 }
 
-impl Serialize for BoxPath {
+impl Serialize for BoxPath<'_> {
     async fn write<W: AsyncWrite + AsyncSeek + Unpin + Send>(
         &self,
         writer: &mut W,
@@ -122,7 +140,7 @@ impl Serialize for RecordIndex {
     }
 }
 
-impl Serialize for FileRecord {
+impl Serialize for FileRecord<'_> {
     async fn write<W: AsyncWrite + AsyncSeek + Unpin + Send>(
         &self,
         writer: &mut W,
@@ -139,7 +157,7 @@ impl Serialize for FileRecord {
     }
 }
 
-impl Serialize for DirectoryRecord {
+impl Serialize for DirectoryRecord<'_> {
     async fn write<W: AsyncWrite + AsyncSeek + Unpin + Send>(
         &self,
         writer: &mut W,
@@ -153,7 +171,7 @@ impl Serialize for DirectoryRecord {
     }
 }
 
-impl Serialize for LinkRecord {
+impl Serialize for LinkRecord<'_> {
     async fn write<W: AsyncWrite + AsyncSeek + Unpin + Send>(
         &self,
         writer: &mut W,
@@ -167,7 +185,7 @@ impl Serialize for LinkRecord {
     }
 }
 
-impl Serialize for Record {
+impl Serialize for Record<'_> {
     async fn write<W: AsyncWrite + AsyncSeek + Unpin + Send>(
         &self,
         writer: &mut W,
@@ -195,7 +213,7 @@ impl Serialize for BoxHeader {
     }
 }
 
-impl Serialize for BoxMetadata {
+impl Serialize for BoxMetadata<'_> {
     async fn write<W: AsyncWrite + AsyncSeek + Unpin + Send>(
         &self,
         writer: &mut W,

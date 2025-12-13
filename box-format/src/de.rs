@@ -2,7 +2,7 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 use std::num::NonZeroU64;
 
-use fastvlq::AsyncReadVlqExt;
+use fastvlq::{AsyncReadVlqExt, ReadVlqExt};
 use string_interner::DefaultStringInterner;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeek, AsyncSeekExt};
 
@@ -12,6 +12,257 @@ use crate::{
 };
 
 use crate::compression::constants::*;
+
+// ============================================================================
+// BORROWED DESERIALIZATION (zero-copy from byte slices)
+// ============================================================================
+
+/// Read a VLQ-encoded u64 from a byte slice, advancing the position.
+fn read_vlq_u64(data: &[u8], pos: &mut usize) -> std::io::Result<u64> {
+    let mut cursor = std::io::Cursor::new(&data[*pos..]);
+    let value = ReadVlqExt::read_vu64(&mut cursor)?;
+    *pos += cursor.position() as usize;
+    Ok(value)
+}
+
+/// Read a little-endian u64 from a byte slice, advancing the position.
+fn read_u64_le_slice(data: &[u8], pos: &mut usize) -> std::io::Result<u64> {
+    if *pos + 8 > data.len() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::UnexpectedEof,
+            "unexpected end of data reading u64",
+        ));
+    }
+    let bytes: [u8; 8] = data[*pos..*pos + 8].try_into().unwrap();
+    *pos += 8;
+    Ok(u64::from_le_bytes(bytes))
+}
+
+/// Read a u8 from a byte slice, advancing the position.
+fn read_u8_slice(data: &[u8], pos: &mut usize) -> std::io::Result<u8> {
+    if *pos >= data.len() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::UnexpectedEof,
+            "unexpected end of data reading u8",
+        ));
+    }
+    let byte = data[*pos];
+    *pos += 1;
+    Ok(byte)
+}
+
+/// Trait for deserializing from a borrowed byte slice (zero-copy).
+pub(crate) trait DeserializeBorrowed<'a>: Send {
+    fn deserialize_borrowed(data: &'a [u8], pos: &mut usize) -> std::io::Result<Self>
+    where
+        Self: Sized;
+}
+
+impl<'a> DeserializeBorrowed<'a> for &'a str {
+    fn deserialize_borrowed(data: &'a [u8], pos: &mut usize) -> std::io::Result<Self> {
+        let len = read_vlq_u64(data, pos)? as usize;
+        if *pos + len > data.len() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "unexpected end of data reading string",
+            ));
+        }
+        let bytes = &data[*pos..*pos + len];
+        *pos += len;
+        std::str::from_utf8(bytes)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+    }
+}
+
+impl<'a> DeserializeBorrowed<'a> for Cow<'a, str> {
+    fn deserialize_borrowed(data: &'a [u8], pos: &mut usize) -> std::io::Result<Self> {
+        let s = <&'a str>::deserialize_borrowed(data, pos)?;
+        Ok(Cow::Borrowed(s))
+    }
+}
+
+impl<'a> DeserializeBorrowed<'a> for BoxPath<'a> {
+    fn deserialize_borrowed(data: &'a [u8], pos: &mut usize) -> std::io::Result<Self> {
+        let s = <Cow<'a, str>>::deserialize_borrowed(data, pos)?;
+        Ok(BoxPath(s))
+    }
+}
+
+impl<'a> DeserializeBorrowed<'a> for RecordIndex {
+    fn deserialize_borrowed(data: &'a [u8], pos: &mut usize) -> std::io::Result<Self> {
+        let value = read_vlq_u64(data, pos)?;
+        RecordIndex::new(value)
+    }
+}
+
+impl<'a> DeserializeBorrowed<'a> for Vec<RecordIndex> {
+    fn deserialize_borrowed(data: &'a [u8], pos: &mut usize) -> std::io::Result<Self> {
+        let len = read_vlq_u64(data, pos)? as usize;
+        let mut vec = Vec::with_capacity(len);
+        for _ in 0..len {
+            vec.push(RecordIndex::deserialize_borrowed(data, pos)?);
+        }
+        Ok(vec)
+    }
+}
+
+impl<'a> DeserializeBorrowed<'a> for Vec<u8> {
+    fn deserialize_borrowed(data: &'a [u8], pos: &mut usize) -> std::io::Result<Self> {
+        let len = read_vlq_u64(data, pos)? as usize;
+        if *pos + len > data.len() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "unexpected end of data reading bytes",
+            ));
+        }
+        let bytes = data[*pos..*pos + len].to_vec();
+        *pos += len;
+        Ok(bytes)
+    }
+}
+
+impl<'a> DeserializeBorrowed<'a> for AttrMap {
+    fn deserialize_borrowed(data: &'a [u8], pos: &mut usize) -> std::io::Result<Self> {
+        let _byte_count = read_u64_le_slice(data, pos)?;
+        let len = read_vlq_u64(data, pos)? as usize;
+        let mut map: HashMap<usize, Vec<u8>> = HashMap::with_capacity(len);
+        for _ in 0..len {
+            let key = read_vlq_u64(data, pos)? as usize;
+            let value = <Vec<u8>>::deserialize_borrowed(data, pos)?;
+            map.insert(key, value);
+        }
+        Ok(map)
+    }
+}
+
+impl<'a> DeserializeBorrowed<'a> for Compression {
+    fn deserialize_borrowed(data: &'a [u8], pos: &mut usize) -> std::io::Result<Self> {
+        let id = read_u8_slice(data, pos)?;
+
+        use Compression::*;
+
+        let compression = match id {
+            COMPRESSION_STORED => Stored,
+            COMPRESSION_BROTLI => Brotli,
+            COMPRESSION_DEFLATE => Deflate,
+            COMPRESSION_ZSTD => Zstd,
+            COMPRESSION_XZ => Xz,
+            COMPRESSION_SNAPPY => Snappy,
+            id => Unknown(id),
+        };
+
+        Ok(compression)
+    }
+}
+
+impl<'a> DeserializeBorrowed<'a> for FileRecord<'a> {
+    fn deserialize_borrowed(data: &'a [u8], pos: &mut usize) -> std::io::Result<Self> {
+        let compression = Compression::deserialize_borrowed(data, pos)?;
+        let length = read_u64_le_slice(data, pos)?;
+        let decompressed_length = read_u64_le_slice(data, pos)?;
+        let data_offset = read_u64_le_slice(data, pos)?;
+        let name = <Cow<'a, str>>::deserialize_borrowed(data, pos)?;
+        let attrs = AttrMap::deserialize_borrowed(data, pos)?;
+
+        Ok(FileRecord {
+            compression,
+            length,
+            decompressed_length,
+            name,
+            attrs,
+            data: NonZeroU64::new(data_offset).ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "file data offset must not be zero",
+                )
+            })?,
+        })
+    }
+}
+
+impl<'a> DeserializeBorrowed<'a> for DirectoryRecord<'a> {
+    fn deserialize_borrowed(data: &'a [u8], pos: &mut usize) -> std::io::Result<Self> {
+        let name = <Cow<'a, str>>::deserialize_borrowed(data, pos)?;
+        let entries = <Vec<RecordIndex>>::deserialize_borrowed(data, pos)?;
+        let attrs = AttrMap::deserialize_borrowed(data, pos)?;
+
+        Ok(DirectoryRecord {
+            name,
+            entries,
+            attrs,
+        })
+    }
+}
+
+impl<'a> DeserializeBorrowed<'a> for LinkRecord<'a> {
+    fn deserialize_borrowed(data: &'a [u8], pos: &mut usize) -> std::io::Result<Self> {
+        let name = <Cow<'a, str>>::deserialize_borrowed(data, pos)?;
+        let target = BoxPath::deserialize_borrowed(data, pos)?;
+        let attrs = AttrMap::deserialize_borrowed(data, pos)?;
+
+        Ok(LinkRecord {
+            name,
+            target,
+            attrs,
+        })
+    }
+}
+
+impl<'a> DeserializeBorrowed<'a> for Record<'a> {
+    fn deserialize_borrowed(data: &'a [u8], pos: &mut usize) -> std::io::Result<Self> {
+        let ty = read_u8_slice(data, pos)?;
+        let record = match ty {
+            0 => Record::File(FileRecord::deserialize_borrowed(data, pos)?),
+            1 => Record::Directory(DirectoryRecord::deserialize_borrowed(data, pos)?),
+            2 => Record::Link(LinkRecord::deserialize_borrowed(data, pos)?),
+            _ => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("invalid or unsupported record type: {}", ty),
+                ));
+            }
+        };
+        Ok(record)
+    }
+}
+
+impl<'a> DeserializeBorrowed<'a> for DefaultStringInterner {
+    fn deserialize_borrowed(data: &'a [u8], pos: &mut usize) -> std::io::Result<Self> {
+        let len = read_vlq_u64(data, pos)? as usize;
+        let mut interner = DefaultStringInterner::new();
+        for _ in 0..len {
+            let s = <&'a str>::deserialize_borrowed(data, pos)?;
+            interner.get_or_intern(s);
+        }
+        Ok(interner)
+    }
+}
+
+impl<'a> DeserializeBorrowed<'a> for BoxMetadata<'a> {
+    fn deserialize_borrowed(data: &'a [u8], pos: &mut usize) -> std::io::Result<Self> {
+        let root = <Vec<RecordIndex>>::deserialize_borrowed(data, pos)?;
+
+        let record_count = read_vlq_u64(data, pos)? as usize;
+        let mut records = Vec::with_capacity(record_count);
+        for _ in 0..record_count {
+            records.push(Record::deserialize_borrowed(data, pos)?);
+        }
+
+        let attr_keys = DefaultStringInterner::deserialize_borrowed(data, pos)?;
+        let attrs = AttrMap::deserialize_borrowed(data, pos)?;
+
+        Ok(BoxMetadata {
+            root,
+            records,
+            attr_keys,
+            attrs,
+        })
+    }
+}
+
+// ============================================================================
+// OWNED DESERIALIZATION (async from readers)
+// ============================================================================
 
 /// Read a u64 in little-endian format
 async fn read_u64_le<R: AsyncRead + Unpin>(reader: &mut R) -> std::io::Result<u64> {
@@ -273,7 +524,14 @@ impl DeserializeOwned for BoxMetadata<'static> {
     ) -> std::io::Result<Self> {
         let start = reader.stream_position().await?;
         let root = <Vec<RecordIndex>>::deserialize_owned(reader).await?;
-        let records = <Vec<Record<'static>>>::deserialize_owned(reader).await?;
+
+        // Inline record deserialization to avoid lifetime issues with blanket Vec<T> impl
+        let record_count = reader.read_vu64().await?;
+        let mut records = Vec::with_capacity(record_count as usize);
+        for _ in 0..record_count {
+            records.push(Record::deserialize_owned(reader).await?);
+        }
+
         let attr_keys = <DefaultStringInterner>::deserialize_owned(reader).await?;
         let attrs = <HashMap<usize, Vec<u8>>>::deserialize_owned(reader).await?;
 

@@ -23,7 +23,7 @@ struct TimingStats {
 
 struct CollectedEntry {
     fs_path: PathBuf,
-    box_path: BoxPath,
+    box_path: BoxPath<'static>,
     meta: std::fs::Metadata,
     config: CompressionConfig,
 }
@@ -180,15 +180,16 @@ pub async fn run(args: CreateArgs) -> Result<()> {
     }
 
     // Create directories (must be sequential)
-    let mut created_dirs: HashSet<BoxPath> = HashSet::new();
+    let mut created_dirs: HashSet<BoxPath<'static>> = HashSet::new();
     for dir in directories {
         if !created_dirs.contains(&dir.box_path) && bf.metadata().index(&dir.box_path).is_none() {
             // Ensure parent exists
             if let Some(parent) = dir.box_path.parent() {
                 if !created_dirs.contains(&parent) && bf.metadata().index(&parent).is_none() {
-                    bf.mkdir_all(parent.clone(), std::collections::HashMap::new())
+                    let parent_owned = parent.into_owned();
+                    bf.mkdir_all(parent_owned.clone(), std::collections::HashMap::new())
                         .map_err(|source| Error::CreateDirectory {
-                            path: parent,
+                            path: parent_owned,
                             source,
                         })?;
                 }
@@ -235,12 +236,13 @@ pub async fn run(args: CreateArgs) -> Result<()> {
         // Ensure parent directory exists
         if let Some(parent) = link.box_path.parent() {
             if !created_dirs.contains(&parent) && bf.metadata().index(&parent).is_none() {
-                bf.mkdir_all(parent.clone(), std::collections::HashMap::new())
+                let parent_owned = parent.into_owned();
+                bf.mkdir_all(parent_owned.clone(), std::collections::HashMap::new())
                     .map_err(|source| Error::CreateDirectory {
-                        path: parent.clone(),
+                        path: parent_owned.clone(),
                         source,
                     })?;
-                created_dirs.insert(parent);
+                created_dirs.insert(parent_owned);
             }
         }
 
@@ -279,12 +281,13 @@ pub async fn run(args: CreateArgs) -> Result<()> {
             // Ensure parent directory exists
             if let Some(parent) = file.box_path.parent() {
                 if !created_dirs.contains(&parent) && bf.metadata().index(&parent).is_none() {
-                    bf.mkdir_all(parent.clone(), std::collections::HashMap::new())
+                    let parent_owned = parent.into_owned();
+                    bf.mkdir_all(parent_owned.clone(), std::collections::HashMap::new())
                         .map_err(|source| Error::CreateDirectory {
-                            path: parent.clone(),
+                            path: parent_owned.clone(),
                             source,
                         })?;
-                    created_dirs.insert(parent);
+                    created_dirs.insert(parent_owned);
                 }
             }
 
@@ -338,12 +341,13 @@ pub async fn run(args: CreateArgs) -> Result<()> {
         for file in &files {
             if let Some(parent) = file.box_path.parent() {
                 if !created_dirs.contains(&parent) && bf.metadata().index(&parent).is_none() {
-                    bf.mkdir_all(parent.clone(), std::collections::HashMap::new())
+                    let parent_owned = parent.into_owned();
+                    bf.mkdir_all(parent_owned.clone(), std::collections::HashMap::new())
                         .map_err(|source| Error::CreateDirectory {
-                            path: parent.clone(),
+                            path: parent_owned.clone(),
                             source,
                         })?;
-                    created_dirs.insert(parent);
+                    created_dirs.insert(parent_owned);
                 }
             }
         }
@@ -493,8 +497,8 @@ async fn collect_path(
     archive_canonical: &Path,
     archive_filename: Option<&std::ffi::OsStr>,
     entries: &mut Vec<EntryKind>,
-    known_dirs: &mut HashSet<BoxPath>,
-    known_files: &mut HashSet<BoxPath>,
+    known_dirs: &mut HashSet<BoxPath<'static>>,
+    known_files: &mut HashSet<BoxPath<'static>>,
 ) -> Result<()> {
     let path_meta = tokio::fs::metadata(path)
         .await
