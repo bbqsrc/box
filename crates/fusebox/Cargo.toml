@@ -8,7 +8,7 @@ edition = "2024"
 fuser = { git = "https://github.com/cberner/fuser" }
 tokio = { version = "1", features = ["rt"] }
 structopt = "0.3.17"
-box-format = { path = "../box-format" }
+box-format = { path = "../.." }
 env_logger = "0.9"
 libc = "0.2.76"
 log = "0.4.11"

@@ -1,5 +1,5 @@
 [package]
-name = "box-bin"
+name = "box-cli"
 description = "Box open standard archiver binary."
 version = "0.4.0"
 authors = ["Brendan Molloy <brendan@bbqsrc.net>"]
@@ -12,7 +12,7 @@ name = "box"
 path = "src/main.rs"
 
 [dependencies]
-box-format = { version = "0.4.0", path = "../box-format" }
+box-format = { version = "0.4.0", path = ".." }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs"] }
 async-walkdir = "2.1.0"
 futures = "0.3"
