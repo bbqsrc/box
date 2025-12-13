@@ -2,11 +2,12 @@ use std::collections::HashMap;
 use std::num::NonZeroU64;
 
 use fastvlq::AsyncReadVlqExt;
-use tokio::io::{AsyncRead, AsyncReadExt};
+use string_interner::DefaultStringInterner;
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeek, AsyncSeekExt};
 
 use crate::{
     AttrMap, BoxHeader, BoxMetadata, BoxPath, Compression, DirectoryRecord, FileRecord, LinkRecord,
-    Record, file::Inode,
+    Record, file::RecordIndex,
 };
 
 use crate::compression::constants::*;
@@ -26,7 +27,7 @@ async fn read_u32_le<R: AsyncRead + Unpin>(reader: &mut R) -> std::io::Result<u3
 }
 
 pub(crate) trait DeserializeOwned: Send {
-    fn deserialize_owned<R: AsyncRead + Unpin + Send>(
+    fn deserialize_owned<R: AsyncRead + AsyncSeek + Unpin + Send>(
         reader: &mut R,
     ) -> impl std::future::Future<Output = std::io::Result<Self>> + Send
     where
@@ -34,33 +35,58 @@ pub(crate) trait DeserializeOwned: Send {
 }
 
 impl<T: DeserializeOwned> DeserializeOwned for Vec<T> {
-    async fn deserialize_owned<R: AsyncRead + Unpin + Send>(reader: &mut R) -> std::io::Result<Self>
+    async fn deserialize_owned<R: AsyncRead + AsyncSeek + Unpin + Send>(
+        reader: &mut R,
+    ) -> std::io::Result<Self>
     where
         Self: Sized,
     {
+        let start = reader.stream_position().await?;
         let len = reader.read_vu64().await?;
         let mut buf = Vec::with_capacity(len as usize);
         for _ in 0..len {
             buf.push(T::deserialize_owned(reader).await?);
         }
+        let end = reader.stream_position().await?;
+        tracing::debug!(
+            start = format_args!("{:#x}", start),
+            end = format_args!("{:#x}", end),
+            bytes = end - start,
+            count = len,
+            "deserialized Vec"
+        );
         Ok(buf)
     }
 }
 
 impl DeserializeOwned for BoxPath {
-    async fn deserialize_owned<R: AsyncRead + Unpin + Send>(reader: &mut R) -> std::io::Result<Self>
+    async fn deserialize_owned<R: AsyncRead + AsyncSeek + Unpin + Send>(
+        reader: &mut R,
+    ) -> std::io::Result<Self>
     where
         Self: Sized,
     {
-        Ok(BoxPath(String::deserialize_owned(reader).await?))
+        let start = reader.stream_position().await?;
+        let path = BoxPath(String::deserialize_owned(reader).await?);
+        let end = reader.stream_position().await?;
+        tracing::debug!(
+            start = format_args!("{:#x}", start),
+            end = format_args!("{:#x}", end),
+            bytes = end - start,
+            "deserialized BoxPath"
+        );
+        Ok(path)
     }
 }
 
 impl DeserializeOwned for AttrMap {
-    async fn deserialize_owned<R: AsyncRead + Unpin + Send>(reader: &mut R) -> std::io::Result<Self>
+    async fn deserialize_owned<R: AsyncRead + AsyncSeek + Unpin + Send>(
+        reader: &mut R,
+    ) -> std::io::Result<Self>
     where
         Self: Sized,
     {
+        let start = reader.stream_position().await?;
         let _byte_count = read_u64_le(reader).await?;
         let len = reader.read_vu64().await?;
         let mut buf: HashMap<usize, Vec<u8>> = HashMap::with_capacity(len as usize);
@@ -69,20 +95,32 @@ impl DeserializeOwned for AttrMap {
             let value = <Vec<u8>>::deserialize_owned(reader).await?;
             buf.insert(key as usize, value);
         }
+        let end = reader.stream_position().await?;
+        tracing::debug!(
+            start = format_args!("{:#x}", start),
+            end = format_args!("{:#x}", end),
+            bytes = end - start,
+            count = len,
+            "deserialized AttrMap"
+        );
         Ok(buf)
     }
 }
 
 impl DeserializeOwned for FileRecord {
-    async fn deserialize_owned<R: AsyncRead + Unpin + Send>(
+    async fn deserialize_owned<R: AsyncRead + AsyncSeek + Unpin + Send>(
         reader: &mut R,
     ) -> std::io::Result<Self> {
+        let start = reader.stream_position().await?;
         let compression = Compression::deserialize_owned(reader).await?;
         let length = read_u64_le(reader).await?;
         let decompressed_length = read_u64_le(reader).await?;
         let data = read_u64_le(reader).await?;
         let name = String::deserialize_owned(reader).await?;
         let attrs = <HashMap<usize, Vec<u8>>>::deserialize_owned(reader).await?;
+
+        let end = reader.stream_position().await?;
+        tracing::debug!(start = format_args!("{:#x}", start), end = format_args!("{:#x}", end), bytes = end - start, %name, "deserialized FileRecord");
 
         Ok(FileRecord {
             compression,
@@ -95,45 +133,62 @@ impl DeserializeOwned for FileRecord {
     }
 }
 
-impl DeserializeOwned for Inode {
-    async fn deserialize_owned<R: AsyncRead + Unpin + Send>(
+impl DeserializeOwned for RecordIndex {
+    async fn deserialize_owned<R: AsyncRead + AsyncSeek + Unpin + Send>(
         reader: &mut R,
     ) -> std::io::Result<Self> {
+        let start = reader.stream_position().await?;
         let value = reader.read_vu64().await?;
-        Inode::new(value)
+        let end = reader.stream_position().await?;
+        tracing::debug!(
+            start = format_args!("{:#x}", start),
+            end = format_args!("{:#x}", end),
+            bytes = end - start,
+            value,
+            "deserialized RecordIndex"
+        );
+        RecordIndex::new(value)
     }
 }
 
 impl DeserializeOwned for DirectoryRecord {
-    async fn deserialize_owned<R: AsyncRead + Unpin + Send>(
+    async fn deserialize_owned<R: AsyncRead + AsyncSeek + Unpin + Send>(
         reader: &mut R,
     ) -> std::io::Result<Self> {
+        let start = reader.stream_position().await?;
         let name = String::deserialize_owned(reader).await?;
 
-        // Inodes vec
+        // Entries vec
         let len = reader.read_vu64().await? as usize;
-        let mut inodes = Vec::with_capacity(len);
+        let mut entries = Vec::with_capacity(len);
         for _ in 0..len {
-            inodes.push(Inode::deserialize_owned(reader).await?);
+            entries.push(RecordIndex::deserialize_owned(reader).await?);
         }
 
         let attrs = <HashMap<usize, Vec<u8>>>::deserialize_owned(reader).await?;
 
+        let end = reader.stream_position().await?;
+        tracing::debug!(start = format_args!("{:#x}", start), end = format_args!("{:#x}", end), bytes = end - start, %name, "deserialized DirectoryRecord");
+
         Ok(DirectoryRecord {
             name,
-            inodes,
+            entries,
             attrs,
         })
     }
 }
 
 impl DeserializeOwned for LinkRecord {
-    async fn deserialize_owned<R: AsyncRead + Unpin + Send>(
+    async fn deserialize_owned<R: AsyncRead + AsyncSeek + Unpin + Send>(
         reader: &mut R,
     ) -> std::io::Result<Self> {
+        let start = reader.stream_position().await?;
         let name = String::deserialize_owned(reader).await?;
         let target = BoxPath::deserialize_owned(reader).await?;
         let attrs = <HashMap<usize, Vec<u8>>>::deserialize_owned(reader).await?;
+
+        let end = reader.stream_position().await?;
+        tracing::debug!(start = format_args!("{:#x}", start), end = format_args!("{:#x}", end), bytes = end - start, %name, "deserialized LinkRecord");
 
         Ok(LinkRecord {
             name,
@@ -144,28 +199,39 @@ impl DeserializeOwned for LinkRecord {
 }
 
 impl DeserializeOwned for Record {
-    async fn deserialize_owned<R: AsyncRead + Unpin + Send>(
+    async fn deserialize_owned<R: AsyncRead + AsyncSeek + Unpin + Send>(
         reader: &mut R,
     ) -> std::io::Result<Self> {
+        let start = reader.stream_position().await?;
         let ty = reader.read_u8().await?;
-        match ty {
-            0 => Ok(Record::File(FileRecord::deserialize_owned(reader).await?)),
-            1 => Ok(Record::Directory(
-                DirectoryRecord::deserialize_owned(reader).await?,
-            )),
-            2 => Ok(Record::Link(LinkRecord::deserialize_owned(reader).await?)),
-            _ => Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!("invalid or unsupported field type: {}", ty),
-            )),
-        }
+        let record = match ty {
+            0 => Record::File(FileRecord::deserialize_owned(reader).await?),
+            1 => Record::Directory(DirectoryRecord::deserialize_owned(reader).await?),
+            2 => Record::Link(LinkRecord::deserialize_owned(reader).await?),
+            _ => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("invalid or unsupported field type: {}", ty),
+                ));
+            }
+        };
+        let end = reader.stream_position().await?;
+        tracing::debug!(
+            start = format_args!("{:#x}", start),
+            end = format_args!("{:#x}", end),
+            bytes = end - start,
+            ty,
+            "deserialized Record"
+        );
+        Ok(record)
     }
 }
 
 impl DeserializeOwned for BoxHeader {
-    async fn deserialize_owned<R: AsyncRead + Unpin + Send>(
+    async fn deserialize_owned<R: AsyncRead + AsyncSeek + Unpin + Send>(
         reader: &mut R,
     ) -> std::io::Result<Self> {
+        let start = reader.stream_position().await?;
         let magic_bytes = read_u32_le(reader).await?.to_le_bytes();
 
         if &magic_bytes != crate::header::MAGIC_BYTES {
@@ -181,6 +247,16 @@ impl DeserializeOwned for BoxHeader {
         reader.read_exact(&mut [0u8; 4]).await?; // skip reserved2
         let trailer = read_u64_le(reader).await?;
 
+        let end = reader.stream_position().await?;
+        tracing::debug!(
+            start = format_args!("{:#x}", start),
+            end = format_args!("{:#x}", end),
+            bytes = end - start,
+            version,
+            alignment,
+            "deserialized BoxHeader"
+        );
+
         Ok(BoxHeader {
             magic_bytes,
             version,
@@ -191,17 +267,27 @@ impl DeserializeOwned for BoxHeader {
 }
 
 impl DeserializeOwned for BoxMetadata {
-    async fn deserialize_owned<R: AsyncRead + Unpin + Send>(
+    async fn deserialize_owned<R: AsyncRead + AsyncSeek + Unpin + Send>(
         reader: &mut R,
     ) -> std::io::Result<Self> {
-        let root = <Vec<Inode>>::deserialize_owned(reader).await?;
-        let inodes = <Vec<Record>>::deserialize_owned(reader).await?;
-        let attr_keys = <Vec<String>>::deserialize_owned(reader).await?;
+        let start = reader.stream_position().await?;
+        let root = <Vec<RecordIndex>>::deserialize_owned(reader).await?;
+        let records = <Vec<Record>>::deserialize_owned(reader).await?;
+        let attr_keys = <DefaultStringInterner>::deserialize_owned(reader).await?;
         let attrs = <HashMap<usize, Vec<u8>>>::deserialize_owned(reader).await?;
+
+        let end = reader.stream_position().await?;
+        tracing::debug!(
+            start = format_args!("{:#x}", start),
+            end = format_args!("{:#x}", end),
+            bytes = end - start,
+            records = records.len(),
+            "deserialized BoxMetadata"
+        );
 
         Ok(BoxMetadata {
             root,
-            inodes,
+            records,
             attr_keys,
             attrs,
         })
@@ -209,15 +295,18 @@ impl DeserializeOwned for BoxMetadata {
 }
 
 impl DeserializeOwned for Compression {
-    async fn deserialize_owned<R: AsyncRead + Unpin + Send>(reader: &mut R) -> std::io::Result<Self>
+    async fn deserialize_owned<R: AsyncRead + AsyncSeek + Unpin + Send>(
+        reader: &mut R,
+    ) -> std::io::Result<Self>
     where
         Self: Sized,
     {
+        let start = reader.stream_position().await?;
         let id = reader.read_u8().await?;
 
         use Compression::*;
 
-        Ok(match id {
+        let compression = match id {
             COMPRESSION_STORED => Stored,
             COMPRESSION_BROTLI => Brotli,
             COMPRESSION_DEFLATE => Deflate,
@@ -225,30 +314,90 @@ impl DeserializeOwned for Compression {
             COMPRESSION_XZ => Xz,
             COMPRESSION_SNAPPY => Snappy,
             id => Unknown(id),
-        })
+        };
+
+        let end = reader.stream_position().await?;
+        tracing::debug!(
+            start = format_args!("{:#x}", start),
+            end = format_args!("{:#x}", end),
+            bytes = end - start,
+            id,
+            "deserialized Compression"
+        );
+
+        Ok(compression)
     }
 }
 
 impl DeserializeOwned for String {
-    async fn deserialize_owned<R: AsyncRead + Unpin + Send>(reader: &mut R) -> std::io::Result<Self>
+    async fn deserialize_owned<R: AsyncRead + AsyncSeek + Unpin + Send>(
+        reader: &mut R,
+    ) -> std::io::Result<Self>
     where
         Self: Sized,
     {
+        let start = reader.stream_position().await?;
         let len = reader.read_vu64().await?;
         let mut buf = vec![0u8; len as usize];
         reader.read_exact(&mut buf).await?;
+        let end = reader.stream_position().await?;
+        tracing::debug!(
+            start = format_args!("{:#x}", start),
+            end = format_args!("{:#x}", end),
+            bytes = end - start,
+            len,
+            "deserialized String"
+        );
         String::from_utf8(buf).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
     }
 }
 
 impl DeserializeOwned for Vec<u8> {
-    async fn deserialize_owned<R: AsyncRead + Unpin + Send>(reader: &mut R) -> std::io::Result<Self>
+    async fn deserialize_owned<R: AsyncRead + AsyncSeek + Unpin + Send>(
+        reader: &mut R,
+    ) -> std::io::Result<Self>
     where
         Self: Sized,
     {
+        let start = reader.stream_position().await?;
         let len = reader.read_vu64().await?;
         let mut buf = vec![0u8; len as usize];
         reader.read_exact(&mut buf).await?;
+        let end = reader.stream_position().await?;
+        tracing::debug!(
+            start = format_args!("{:#x}", start),
+            end = format_args!("{:#x}", end),
+            bytes = end - start,
+            len,
+            "deserialized Vec<u8>"
+        );
         Ok(buf)
+    }
+}
+
+impl DeserializeOwned for DefaultStringInterner {
+    async fn deserialize_owned<R: AsyncRead + AsyncSeek + Unpin + Send>(
+        reader: &mut R,
+    ) -> std::io::Result<Self>
+    where
+        Self: Sized,
+    {
+        let start = reader.stream_position().await?;
+        let len = reader.read_vu64().await? as usize;
+        let mut interner = DefaultStringInterner::new();
+        for _ in 0..len {
+            let s = String::deserialize_owned(reader).await?;
+            // Symbols are assigned in order: 0, 1, 2... matching the indices
+            interner.get_or_intern(s);
+        }
+        let end = reader.stream_position().await?;
+        tracing::debug!(
+            start = format_args!("{:#x}", start),
+            end = format_args!("{:#x}", end),
+            bytes = end - start,
+            count = len,
+            "deserialized StringInterner"
+        );
+        Ok(interner)
     }
 }

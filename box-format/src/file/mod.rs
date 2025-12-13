@@ -3,15 +3,15 @@ use std::num::NonZeroU64;
 
 #[repr(transparent)]
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Hash)]
-pub struct Inode(NonZeroU64);
+pub struct RecordIndex(NonZeroU64);
 
-impl Inode {
-    pub fn new(value: u64) -> std::io::Result<Inode> {
+impl RecordIndex {
+    pub fn new(value: u64) -> std::io::Result<RecordIndex> {
         match NonZeroU64::new(value) {
-            Some(v) => Ok(Inode(v)),
+            Some(v) => Ok(RecordIndex(v)),
             None => Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
-                "inode must not be zero",
+                "record index must not be zero",
             )),
         }
     }
@@ -69,7 +69,9 @@ mod tests {
         let trailer = bf.metadata();
         println!("{:?}", bf.header);
         println!("{:?}", &trailer);
-        let segment = bf.memory_map(trailer.inodes[0].as_file().unwrap()).unwrap();
+        let segment = bf
+            .memory_map(trailer.records[0].as_file().unwrap())
+            .unwrap();
         let file_data = segment.as_slice().unwrap();
         println!("{:?}", &file_data);
         assert_eq!(file_data, b"hello\0\0\0")
@@ -90,7 +92,7 @@ mod tests {
         let bf = BoxFileReader::open(filename).await.unwrap();
         let record = bf
             .metadata()
-            .inodes
+            .records
             .first()
             .map(|f| f.as_file().unwrap())
             .unwrap();
@@ -148,13 +150,13 @@ mod tests {
         println!("{:#?}", &bf);
 
         let mut buf1 = Vec::new();
-        bf.decompress(bf.meta.inodes[1].as_file().unwrap(), &mut buf1)
+        bf.decompress(bf.meta.records[1].as_file().unwrap(), &mut buf1)
             .await
             .unwrap();
         assert_eq!(v, String::from_utf8(buf1).unwrap());
 
         let mut buf2 = Vec::new();
-        bf.decompress(bf.meta.inodes[2].as_file().unwrap(), &mut buf2)
+        bf.decompress(bf.meta.records[2].as_file().unwrap(), &mut buf2)
             .await
             .unwrap();
         assert_eq!(v, String::from_utf8(buf2).unwrap());

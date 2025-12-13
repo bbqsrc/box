@@ -1,7 +1,10 @@
+use std::collections::HashMap;
 use std::fmt;
 use std::io::Result;
 
 use tokio::io::{AsyncBufRead, AsyncWrite, AsyncWriteExt};
+
+use crate::counting::CountingWriter;
 
 #[cfg(feature = "brotli")]
 use async_compression::tokio::{bufread::BrotliDecoder, write::BrotliEncoder};
@@ -12,6 +15,14 @@ use async_compression::tokio::{bufread::XzDecoder, write::XzEncoder};
 #[cfg(feature = "zstd")]
 use async_compression::tokio::{bufread::ZstdDecoder, write::ZstdEncoder};
 
+#[cfg(any(
+    feature = "zstd",
+    feature = "brotli",
+    feature = "deflate",
+    feature = "xz"
+))]
+use async_compression::Level;
+
 pub mod constants {
     pub const COMPRESSION_STORED: u8 = 0x00;
     pub const COMPRESSION_DEFLATE: u8 = 0x10;
@@ -19,6 +30,10 @@ pub mod constants {
     pub const COMPRESSION_XZ: u8 = 0x30;
     pub const COMPRESSION_SNAPPY: u8 = 0x40;
     pub const COMPRESSION_BROTLI: u8 = 0x50;
+
+    /// Minimum file size for compression to be worthwhile.
+    /// Files smaller than this will be stored uncompressed.
+    pub const MIN_COMPRESSIBLE_SIZE: u64 = 96;
 }
 
 use self::constants::*;
@@ -52,6 +67,102 @@ impl Default for Compression {
 impl Compression {
     pub const fn available_variants() -> &'static [&'static str] {
         &["stored", "brotli", "deflate", "snappy", "xz", "zstd"]
+    }
+
+    /// Returns the effective compression for a given file size.
+    /// Files smaller than `MIN_COMPRESSIBLE_SIZE` will use `Stored` instead.
+    pub fn for_size(self, size: u64) -> Self {
+        if size < MIN_COMPRESSIBLE_SIZE {
+            Compression::Stored
+        } else {
+            self
+        }
+    }
+}
+
+/// Configuration for compression algorithms with optional parameters.
+#[derive(Clone, Debug, Default)]
+pub struct CompressionConfig {
+    pub compression: Compression,
+    pub options: HashMap<String, String>,
+}
+
+impl CompressionConfig {
+    pub fn new(compression: Compression) -> Self {
+        Self {
+            compression,
+            options: HashMap::new(),
+        }
+    }
+
+    pub fn set_option(&mut self, key: impl Into<String>, value: impl Into<String>) {
+        self.options.insert(key.into(), value.into());
+    }
+
+    pub fn get_i32(&self, key: &str) -> Option<i32> {
+        self.options.get(key).and_then(|v| v.parse().ok())
+    }
+
+    pub fn get_u32(&self, key: &str) -> Option<u32> {
+        self.options.get(key).and_then(|v| v.parse().ok())
+    }
+
+    pub fn get_bool(&self, key: &str) -> Option<bool> {
+        self.options.get(key).and_then(|v| match v.as_str() {
+            "true" | "1" | "yes" => Some(true),
+            "false" | "0" | "no" => Some(false),
+            _ => None,
+        })
+    }
+
+    /// Returns the effective config for a given file size.
+    /// Files smaller than `MIN_COMPRESSIBLE_SIZE` will use `Stored` instead.
+    pub fn for_size(&self, size: u64) -> Self {
+        if size < MIN_COMPRESSIBLE_SIZE {
+            Self::new(Compression::Stored)
+        } else {
+            self.clone()
+        }
+    }
+
+    pub async fn compress<W, R>(&self, writer: W, mut reader: R) -> Result<ByteCount>
+    where
+        W: AsyncWrite + Unpin,
+        R: AsyncBufRead + Unpin,
+    {
+        self.compress_ref(writer, &mut reader).await
+    }
+
+    /// Compress data from a reader reference, allowing caller to retain ownership.
+    pub async fn compress_ref<W, R>(&self, writer: W, reader: &mut R) -> Result<ByteCount>
+    where
+        W: AsyncWrite + Unpin,
+        R: AsyncBufRead + Unpin,
+    {
+        use Compression::*;
+
+        match self.compression {
+            Stored => compress_stored(writer, reader).await,
+            #[cfg(feature = "deflate")]
+            Deflate => compress_deflate(writer, reader, self.get_i32("level")).await,
+            #[cfg(feature = "zstd")]
+            Zstd => compress_zstd(writer, reader, self).await,
+            #[cfg(feature = "xz")]
+            Xz => compress_xz(writer, reader, self.get_i32("level")).await,
+            #[cfg(feature = "snappy")]
+            Snappy => compress_snappy(writer, reader).await,
+            #[cfg(feature = "brotli")]
+            Brotli => compress_brotli(writer, reader, self).await,
+            Unknown(id) => Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("Cannot handle compression with id {}", id),
+            )),
+            #[allow(unreachable_patterns)]
+            missing => Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("Compiled without support for {:?}", missing),
+            )),
+        }
     }
 }
 
@@ -94,35 +205,23 @@ impl Compression {
         }
     }
 
-    pub async fn compress<W, R>(self, writer: W, reader: R) -> Result<ByteCount>
+    pub async fn compress<W, R>(self, writer: W, mut reader: R) -> Result<ByteCount>
     where
         W: AsyncWrite + Unpin,
         R: AsyncBufRead + Unpin,
     {
-        use Compression::*;
+        self.compress_ref(writer, &mut reader).await
+    }
 
-        match self {
-            Stored => compress_stored(writer, reader).await,
-            #[cfg(feature = "deflate")]
-            Deflate => compress_deflate(writer, reader).await,
-            #[cfg(feature = "zstd")]
-            Zstd => compress_zstd(writer, reader).await,
-            #[cfg(feature = "xz")]
-            Xz => compress_xz(writer, reader).await,
-            #[cfg(feature = "snappy")]
-            Snappy => compress_snappy(writer, reader).await,
-            #[cfg(feature = "brotli")]
-            Brotli => compress_brotli(writer, reader).await,
-            Unknown(id) => Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                format!("Cannot handle compression with id {}", id),
-            )),
-            #[allow(unreachable_patterns)]
-            missing => Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                format!("Compiled without support for {:?}", missing),
-            )),
-        }
+    /// Compress data from a reader reference, allowing caller to retain ownership.
+    /// Uses default compression options.
+    pub async fn compress_ref<W, R>(self, writer: W, reader: &mut R) -> Result<ByteCount>
+    where
+        W: AsyncWrite + Unpin,
+        R: AsyncBufRead + Unpin,
+    {
+        let config = CompressionConfig::new(self);
+        config.compress_ref(writer, reader).await
     }
 
     pub async fn decompress_write<R, W>(self, reader: R, writer: W) -> Result<()>
@@ -158,16 +257,17 @@ impl Compression {
 }
 
 // Stored (no compression)
-async fn compress_stored<W, R>(mut writer: W, mut reader: R) -> Result<ByteCount>
+async fn compress_stored<W, R>(writer: W, reader: &mut R) -> Result<ByteCount>
 where
     W: AsyncWrite + Unpin,
     R: AsyncBufRead + Unpin,
 {
-    let written = tokio::io::copy_buf(&mut reader, &mut writer).await?;
-    writer.flush().await?;
+    let mut counting = CountingWriter::new(writer);
+    let read = tokio::io::copy_buf(reader, &mut counting).await?;
+    counting.flush().await?;
     Ok(ByteCount {
-        read: written,
-        write: written,
+        read,
+        write: counting.bytes_written(),
     })
 }
 
@@ -183,36 +283,22 @@ where
 
 // Deflate
 #[cfg(feature = "deflate")]
-async fn compress_deflate<W, R>(writer: W, mut reader: R) -> Result<ByteCount>
+async fn compress_deflate<W, R>(writer: W, reader: &mut R, level: Option<i32>) -> Result<ByteCount>
 where
     W: AsyncWrite + Unpin,
     R: AsyncBufRead + Unpin,
 {
-    use tokio::io::AsyncBufReadExt;
-
-    let mut encoder = DeflateEncoder::new(writer);
-    let mut read_count = 0u64;
-
-    loop {
-        let buf = reader.fill_buf().await?;
-        if buf.is_empty() {
-            break;
-        }
-        let len = buf.len();
-        encoder.write_all(buf).await?;
-        reader.consume(len);
-        read_count += len as u64;
-    }
-
+    let counting = CountingWriter::new(writer);
+    let mut encoder = match level {
+        Some(l) => DeflateEncoder::with_quality(counting, Level::Precise(l)),
+        None => DeflateEncoder::new(counting),
+    };
+    let read = tokio::io::copy_buf(reader, &mut encoder).await?;
     encoder.shutdown().await?;
-    let inner = encoder.into_inner();
-    let _ = inner;
-
-    // We can't easily get the written count from the encoder, so we estimate
-    // In a real implementation, you'd wrap the writer to count bytes
+    let counting = encoder.into_inner();
     Ok(ByteCount {
-        read: read_count,
-        write: read_count, // This is approximate; actual compressed size may differ
+        read,
+        write: counting.bytes_written(),
     })
 }
 
@@ -230,32 +316,59 @@ where
 
 // Zstd
 #[cfg(feature = "zstd")]
-async fn compress_zstd<W, R>(writer: W, mut reader: R) -> Result<ByteCount>
+async fn compress_zstd<W, R>(
+    writer: W,
+    reader: &mut R,
+    config: &CompressionConfig,
+) -> Result<ByteCount>
 where
     W: AsyncWrite + Unpin,
     R: AsyncBufRead + Unpin,
 {
-    use tokio::io::AsyncBufReadExt;
+    use async_compression::zstd::CParameter;
 
-    let mut encoder = ZstdEncoder::new(writer);
-    let mut read_count = 0u64;
+    let counting = CountingWriter::new(writer);
+    let level = config
+        .get_i32("level")
+        .map(Level::Precise)
+        .unwrap_or(Level::Default);
 
-    loop {
-        let buf = reader.fill_buf().await?;
-        if buf.is_empty() {
-            break;
-        }
-        let len = buf.len();
-        encoder.write_all(buf).await?;
-        reader.consume(len);
-        read_count += len as u64;
+    // Build CParameter list from config options
+    let mut params = Vec::new();
+    if let Some(v) = config.get_u32("window_log") {
+        params.push(CParameter::window_log(v));
+    }
+    if let Some(v) = config.get_u32("hash_log") {
+        params.push(CParameter::hash_log(v));
+    }
+    if let Some(v) = config.get_u32("chain_log") {
+        params.push(CParameter::chain_log(v));
+    }
+    if let Some(v) = config.get_u32("search_log") {
+        params.push(CParameter::search_log(v));
+    }
+    if let Some(v) = config.get_u32("min_match") {
+        params.push(CParameter::min_match(v));
+    }
+    if let Some(v) = config.get_u32("target_length") {
+        params.push(CParameter::target_length(v));
+    }
+    if let Some(v) = config.get_bool("checksum") {
+        params.push(CParameter::checksum_flag(v));
     }
 
-    encoder.shutdown().await?;
+    let mut encoder = if params.is_empty() {
+        ZstdEncoder::with_quality(counting, level)
+    } else {
+        ZstdEncoder::with_quality_and_params(counting, level, &params)
+    };
 
+    let read = tokio::io::copy_buf(reader, &mut encoder).await?;
+    encoder.shutdown().await?;
+    let counting = encoder.into_inner();
     Ok(ByteCount {
-        read: read_count,
-        write: read_count,
+        read,
+        write: counting.bytes_written(),
     })
 }
 
@@ -273,32 +386,22 @@ where
 
 // XZ
 #[cfg(feature = "xz")]
-async fn compress_xz<W, R>(writer: W, mut reader: R) -> Result<ByteCount>
+async fn compress_xz<W, R>(writer: W, reader: &mut R, level: Option<i32>) -> Result<ByteCount>
 where
     W: AsyncWrite + Unpin,
     R: AsyncBufRead + Unpin,
 {
-    use tokio::io::AsyncBufReadExt;
-
-    let mut encoder = XzEncoder::new(writer);
-    let mut read_count = 0u64;
-
-    loop {
-        let buf = reader.fill_buf().await?;
-        if buf.is_empty() {
-            break;
-        }
-        let len = buf.len();
-        encoder.write_all(buf).await?;
-        reader.consume(len);
-        read_count += len as u64;
-    }
-
+    let counting = CountingWriter::new(writer);
+    let mut encoder = match level {
+        Some(l) => XzEncoder::with_quality(counting, Level::Precise(l)),
+        None => XzEncoder::new(counting),
+    };
+    let read = tokio::io::copy_buf(reader, &mut encoder).await?;
     encoder.shutdown().await?;
-
+    let counting = encoder.into_inner();
     Ok(ByteCount {
-        read: read_count,
-        write: read_count,
+        read,
+        write: counting.bytes_written(),
     })
 }
 
@@ -316,32 +419,51 @@ where
 
 // Brotli
 #[cfg(feature = "brotli")]
-async fn compress_brotli<W, R>(writer: W, mut reader: R) -> Result<ByteCount>
+async fn compress_brotli<W, R>(
+    writer: W,
+    reader: &mut R,
+    config: &CompressionConfig,
+) -> Result<ByteCount>
 where
     W: AsyncWrite + Unpin,
     R: AsyncBufRead + Unpin,
 {
-    use tokio::io::AsyncBufReadExt;
+    use async_compression::brotli::EncoderParams;
 
-    let mut encoder = BrotliEncoder::new(writer);
-    let mut read_count = 0u64;
+    let counting = CountingWriter::new(writer);
 
-    loop {
-        let buf = reader.fill_buf().await?;
-        if buf.is_empty() {
-            break;
-        }
-        let len = buf.len();
-        encoder.write_all(buf).await?;
-        reader.consume(len);
-        read_count += len as u64;
+    // Build params from config options
+    let mut params = EncoderParams::default();
+    if let Some(v) = config.get_i32("level") {
+        params = params.quality(Level::Precise(v));
+    }
+    if let Some(v) = config.get_i32("window_size") {
+        params = params.window_size(v);
+    }
+    if let Some(v) = config.get_i32("block_size") {
+        params = params.block_size(v);
+    }
+    if config.get_bool("text_mode") == Some(true) {
+        params = params.text_mode();
     }
 
-    encoder.shutdown().await?;
+    let has_params = config.get_i32("level").is_some()
+        || config.get_i32("window_size").is_some()
+        || config.get_i32("block_size").is_some()
+        || config.get_bool("text_mode").is_some();
 
+    let mut encoder = if has_params {
+        BrotliEncoder::with_params(counting, params)
+    } else {
+        BrotliEncoder::new(counting)
+    };
+
+    let read = tokio::io::copy_buf(reader, &mut encoder).await?;
+    encoder.shutdown().await?;
+    let counting = encoder.into_inner();
     Ok(ByteCount {
-        read: read_count,
-        write: read_count,
+        read,
+        write: counting.bytes_written(),
     })
 }
 
@@ -359,33 +481,21 @@ where
 
 // Snappy
 #[cfg(feature = "snappy")]
-async fn compress_snappy<W, R>(writer: W, mut reader: R) -> Result<ByteCount>
+async fn compress_snappy<W, R>(writer: W, reader: &mut R) -> Result<ByteCount>
 where
     W: AsyncWrite + Unpin,
     R: AsyncBufRead + Unpin,
 {
-    use tokio::io::AsyncBufReadExt;
     use tokio_snappy::SnappyIO;
 
-    let mut snappy_writer = SnappyIO::new(writer);
-    let mut read_count = 0u64;
-
-    loop {
-        let buf = reader.fill_buf().await?;
-        if buf.is_empty() {
-            break;
-        }
-        let len = buf.len();
-        snappy_writer.write_all(buf).await?;
-        reader.consume(len);
-        read_count += len as u64;
-    }
-
+    let counting = CountingWriter::new(writer);
+    let mut snappy_writer = SnappyIO::new(counting);
+    let read = tokio::io::copy_buf(reader, &mut snappy_writer).await?;
     snappy_writer.shutdown().await?;
-
+    let counting = snappy_writer.into_inner();
     Ok(ByteCount {
-        read: read_count,
-        write: read_count,
+        read,
+        write: counting.bytes_written(),
     })
 }
 

@@ -3,9 +3,11 @@ use std::io::SeekFrom;
 use fastvlq::AsyncWriteVlqExt;
 use tokio::io::{AsyncSeek, AsyncSeekExt, AsyncWrite, AsyncWriteExt};
 
+use string_interner::DefaultStringInterner;
+
 use crate::{
     AttrMap, BoxHeader, BoxMetadata, BoxPath, Compression, DirectoryRecord, FileRecord, LinkRecord,
-    Record, file::Inode,
+    Record, file::RecordIndex,
 };
 
 /// Write a u32 in little-endian format
@@ -31,7 +33,6 @@ impl<T: Serialize> Serialize for Vec<T> {
         writer: &mut W,
     ) -> std::io::Result<()> {
         writer.write_vu64(self.len() as u64).await?;
-
         for item in self.iter() {
             item.write(writer).await?;
         }
@@ -45,7 +46,8 @@ impl Serialize for String {
         writer: &mut W,
     ) -> std::io::Result<()> {
         writer.write_vu64(self.len() as u64).await?;
-        writer.write_all(self.as_bytes()).await
+        writer.write_all(self.as_bytes()).await?;
+        Ok(())
     }
 }
 
@@ -55,7 +57,24 @@ impl Serialize for Vec<u8> {
         writer: &mut W,
     ) -> std::io::Result<()> {
         writer.write_vu64(self.len() as u64).await?;
-        writer.write_all(self).await
+        writer.write_all(self).await?;
+        Ok(())
+    }
+}
+
+impl Serialize for DefaultStringInterner {
+    async fn write<W: AsyncWrite + AsyncSeek + Unpin + Send>(
+        &self,
+        writer: &mut W,
+    ) -> std::io::Result<()> {
+        // Write as Vec<String> for file format compatibility
+        // StringInterner iterates in symbol order (0, 1, 2, ...)
+        writer.write_vu64(self.len() as u64).await?;
+        for (_sym, string) in self.iter() {
+            writer.write_vu64(string.len() as u64).await?;
+            writer.write_all(string.as_bytes()).await?;
+        }
+        Ok(())
     }
 }
 
@@ -65,9 +84,8 @@ impl Serialize for AttrMap {
         writer: &mut W,
     ) -> std::io::Result<()> {
         // Write the length in bytes so implementations can skip the entire map if they so choose.
-
-        // Write it as u64::MAX, then seek back
-        let size_index = writer.stream_position().await?;
+        // Write it as u64::MAX, then seek back to fill in the actual size.
+        let start = writer.stream_position().await?;
         write_u64_le(writer, u64::MAX).await?;
         writer.write_vu64(self.len() as u64).await?;
 
@@ -77,10 +95,10 @@ impl Serialize for AttrMap {
         }
 
         // Go back and write size
-        let cur_index = writer.stream_position().await?;
-        writer.seek(SeekFrom::Start(size_index)).await?;
-        write_u64_le(writer, cur_index - size_index).await?;
-        writer.seek(SeekFrom::Start(cur_index)).await?;
+        let end = writer.stream_position().await?;
+        writer.seek(SeekFrom::Start(start)).await?;
+        write_u64_le(writer, end - start).await?;
+        writer.seek(SeekFrom::Start(end)).await?;
 
         Ok(())
     }
@@ -95,7 +113,7 @@ impl Serialize for BoxPath {
     }
 }
 
-impl Serialize for Inode {
+impl Serialize for RecordIndex {
     async fn write<W: AsyncWrite + AsyncSeek + Unpin + Send>(
         &self,
         writer: &mut W,
@@ -111,14 +129,13 @@ impl Serialize for FileRecord {
     ) -> std::io::Result<()> {
         // Record id - 0 for file
         writer.write_u8(0x0).await?;
-
         writer.write_u8(self.compression.id()).await?;
         write_u64_le(writer, self.length).await?;
         write_u64_le(writer, self.decompressed_length).await?;
         write_u64_le(writer, self.data.get()).await?;
-
         self.name.write(writer).await?;
-        self.attrs.write(writer).await
+        self.attrs.write(writer).await?;
+        Ok(())
     }
 }
 
@@ -129,10 +146,10 @@ impl Serialize for DirectoryRecord {
     ) -> std::io::Result<()> {
         // Record id - 1 for directory
         writer.write_u8(0x1).await?;
-
         self.name.write(writer).await?;
-        self.inodes.write(writer).await?;
-        self.attrs.write(writer).await
+        self.entries.write(writer).await?;
+        self.attrs.write(writer).await?;
+        Ok(())
     }
 }
 
@@ -143,10 +160,10 @@ impl Serialize for LinkRecord {
     ) -> std::io::Result<()> {
         // Record id - 2 for symlink
         writer.write_u8(0x2).await?;
-
         self.name.write(writer).await?;
         self.target.write(writer).await?;
-        self.attrs.write(writer).await
+        self.attrs.write(writer).await?;
+        Ok(())
     }
 }
 
@@ -173,7 +190,8 @@ impl Serialize for BoxHeader {
         writer.write_all(&[0u8; 3]).await?; // reserved1
         write_u32_le(writer, self.alignment).await?;
         writer.write_all(&[0u8; 4]).await?; // reserved2
-        write_u64_le(writer, self.trailer.map(|x| x.get()).unwrap_or(0)).await
+        write_u64_le(writer, self.trailer.map(|x| x.get()).unwrap_or(0)).await?;
+        Ok(())
     }
 }
 
@@ -183,7 +201,7 @@ impl Serialize for BoxMetadata {
         writer: &mut W,
     ) -> std::io::Result<()> {
         self.root.write(writer).await?;
-        self.inodes.write(writer).await?;
+        self.records.write(writer).await?;
         self.attr_keys.write(writer).await?;
         self.attrs.write(writer).await?;
         Ok(())

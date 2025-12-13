@@ -1,6 +1,6 @@
 use crate::{AttrMap, compression::Compression, path::BoxPath};
 
-use crate::file::{BoxMetadata, Inode};
+use crate::file::{BoxMetadata, RecordIndex};
 use std::num::NonZeroU64;
 
 #[derive(Debug, Clone)]
@@ -125,8 +125,8 @@ pub struct DirectoryRecord {
     /// The name of the directory
     pub name: String, // TODO: BoxName
 
-    /// List of inodes
-    pub inodes: Vec<Inode>,
+    /// List of child record indices
+    pub entries: Vec<RecordIndex>,
 
     /// Optional attributes for the given paths, such as Windows or Unix ACLs, last accessed time, etc.
     pub attrs: AttrMap,
@@ -136,7 +136,7 @@ impl DirectoryRecord {
     pub fn new(name: String) -> DirectoryRecord {
         DirectoryRecord {
             name,
-            inodes: vec![],
+            entries: vec![],
             attrs: AttrMap::new(),
         }
     }

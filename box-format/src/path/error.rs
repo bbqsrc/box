@@ -29,3 +29,9 @@ impl IntoBoxPathError {
         Error::new(ErrorKind::InvalidInput, self.as_str())
     }
 }
+
+impl From<IntoBoxPathError> for std::io::Error {
+    fn from(err: IntoBoxPathError) -> Self {
+        err.as_io_error()
+    }
+}

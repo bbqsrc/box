@@ -1,6 +1,6 @@
 use super::AttrMap;
 use crate::Record;
-use crate::file::Inode;
+use crate::file::RecordIndex;
 use crate::path::BoxPath;
 use crate::record::DirectoryRecord;
 use std::{
@@ -8,45 +8,65 @@ use std::{
     collections::{BTreeMap, VecDeque},
     fmt::Display,
 };
+use string_interner::{DefaultStringInterner, Symbol};
 
-#[derive(Debug, Default)]
 pub struct BoxMetadata {
-    /// Root "directory" keyed by inodes
-    pub(crate) root: Vec<Inode>,
+    /// Root "directory" keyed by record indices
+    pub(crate) root: Vec<RecordIndex>,
 
-    /// Keyed by inode index (offset by -1). This means if an `Inode` has the value 1, its index in this vector is 0.
+    /// Keyed by record index (offset by -1). This means if a `RecordIndex` has the value 1, its index in this vector is 0.
     /// This is to provide compatibility with platforms such as Linux, and allow for error checking a box file.
-    pub(crate) inodes: Vec<Record>,
+    pub(crate) records: Vec<Record>,
 
-    /// The index of the attribute key is its interned identifier throughout this file.
-    pub(crate) attr_keys: Vec<String>,
+    /// Interned attribute keys. Symbol::to_usize() gives the key index.
+    pub(crate) attr_keys: DefaultStringInterner,
 
     /// The global attributes that apply to this entire box file.
     pub(crate) attrs: AttrMap,
-    // /// The index of paths to files.
-    // pub(crate) index: Option<pathtrie::fst::Fst<u64>>,
+}
+
+impl std::fmt::Debug for BoxMetadata {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BoxMetadata")
+            .field("root", &self.root)
+            .field("records", &self.records)
+            .field("attr_keys", &self.attr_keys.len())
+            .field("attrs", &self.attrs)
+            .finish()
+    }
+}
+
+impl Default for BoxMetadata {
+    fn default() -> Self {
+        Self {
+            root: Vec::new(),
+            records: Vec::new(),
+            attr_keys: DefaultStringInterner::default(),
+            attrs: AttrMap::new(),
+        }
+    }
 }
 
 #[derive(Debug)]
 pub struct Records<'a> {
     meta: &'a BoxMetadata,
-    inodes: &'a [Inode],
+    entries: &'a [RecordIndex],
     base_path: Option<BoxPath>,
-    cur_inode: usize,
+    cur_entry: usize,
     cur_dir: Option<Box<Records<'a>>>,
 }
 
 impl<'a> Records<'a> {
     pub(crate) fn new(
         meta: &'a BoxMetadata,
-        inodes: &'a [Inode],
+        entries: &'a [RecordIndex],
         base_path: Option<BoxPath>,
     ) -> Records<'a> {
         Records {
             meta,
-            inodes,
+            entries,
             base_path,
-            cur_inode: 0,
+            cur_entry: 0,
             cur_dir: None,
         }
     }
@@ -55,7 +75,7 @@ impl<'a> Records<'a> {
 #[non_exhaustive]
 #[derive(Debug)]
 pub struct RecordsItem<'a> {
-    pub(crate) inode: Inode,
+    pub(crate) index: RecordIndex,
     pub path: BoxPath,
     pub record: &'a Record,
 }
@@ -73,12 +93,12 @@ impl<'a> Iterator for Records<'a> {
             // If nothing left, clear it here.
             self.cur_dir = None;
         }
-        let inode = match self.inodes.get(self.cur_inode) {
+        let index = match self.entries.get(self.cur_entry) {
             Some(i) => *i,
             None => return None,
         };
 
-        let record = self.meta.record(inode)?;
+        let record = self.meta.record(index)?;
 
         let base_path = match self.base_path.as_ref() {
             Some(x) => x.join_unchecked(record.name()),
@@ -88,14 +108,14 @@ impl<'a> Iterator for Records<'a> {
         if let Record::Directory(record) = record {
             self.cur_dir = Some(Box::new(Records::new(
                 self.meta,
-                &record.inodes,
+                &record.entries,
                 Some(base_path.clone()),
             )));
         }
 
-        self.cur_inode += 1;
+        self.cur_entry += 1;
         Some(RecordsItem {
-            inode,
+            index,
             path: base_path,
             record,
         })
@@ -106,49 +126,49 @@ impl<'a> Iterator for Records<'a> {
 pub struct FindRecord<'a> {
     meta: &'a BoxMetadata,
     query: VecDeque<String>,
-    inodes: &'a [Inode],
+    entries: &'a [RecordIndex],
 }
 
 impl<'a> FindRecord<'a> {
     pub(crate) fn new(
         meta: &'a BoxMetadata,
         query: VecDeque<String>,
-        inodes: &'a [Inode],
+        entries: &'a [RecordIndex],
     ) -> FindRecord<'a> {
-        log::debug!("FindRecord query: {:?}", query);
+        log::trace!("FindRecord query: {:?}", query);
 
         FindRecord {
             meta,
             query,
-            inodes,
+            entries,
         }
     }
 }
 
 impl<'a> Iterator for FindRecord<'a> {
-    type Item = Inode;
+    type Item = RecordIndex;
 
     fn next(&mut self) -> Option<Self::Item> {
         let candidate_name = self.query.pop_front()?;
 
-        log::debug!("candidate_name: {}", &candidate_name);
+        log::trace!("candidate_name: {}", &candidate_name);
 
         let result = self
-            .inodes
+            .entries
             .iter()
-            .map(|inode| (*inode, self.meta.record(*inode).unwrap()))
+            .map(|index| (*index, self.meta.record(*index).unwrap()))
             .find(|x| x.1.name() == candidate_name);
 
         match result {
             Some(v) => {
-                log::debug!("{:?}", v);
+                log::trace!("{:?}", v);
                 if self.query.is_empty() {
                     Some(v.0)
                 } else if let Record::Directory(record) = v.1 {
                     let mut tmp = VecDeque::new();
                     std::mem::swap(&mut self.query, &mut tmp);
-                    let result = FindRecord::new(self.meta, tmp, &record.inodes).next();
-                    log::debug!("FindRecord result: {:?}", &result);
+                    let result = FindRecord::new(self.meta, tmp, &record.entries).next();
+                    log::trace!("FindRecord result: {:?}", &result);
                     result
                 } else {
                     None
@@ -166,7 +186,7 @@ impl BoxMetadata {
     }
 
     #[inline(always)]
-    pub fn root_records(&self) -> Vec<(Inode, &Record)> {
+    pub fn root_records(&self) -> Vec<(RecordIndex, &Record)> {
         self.root
             .iter()
             .copied()
@@ -175,9 +195,9 @@ impl BoxMetadata {
     }
 
     #[inline(always)]
-    pub fn records(&self, dir_record: &DirectoryRecord) -> Vec<(Inode, &Record)> {
+    pub fn dir_records(&self, dir_record: &DirectoryRecord) -> Vec<(RecordIndex, &Record)> {
         dir_record
-            .inodes
+            .entries
             .iter()
             .copied()
             .filter_map(|x| self.record(x).map(|r| (x, r)))
@@ -185,31 +205,31 @@ impl BoxMetadata {
     }
 
     #[inline(always)]
-    pub fn inode(&self, path: &BoxPath) -> Option<Inode> {
+    pub fn index(&self, path: &BoxPath) -> Option<RecordIndex> {
         FindRecord::new(self, path.iter().map(str::to_string).collect(), &self.root).next()
     }
 
     #[inline(always)]
-    pub fn record(&self, inode: Inode) -> Option<&Record> {
-        self.inodes.get(inode.get() as usize - 1)
+    pub fn record(&self, index: RecordIndex) -> Option<&Record> {
+        self.records.get(index.get() as usize - 1)
     }
 
     #[inline(always)]
-    pub fn record_mut(&mut self, inode: Inode) -> Option<&mut Record> {
-        self.inodes.get_mut(inode.get() as usize - 1)
+    pub fn record_mut(&mut self, index: RecordIndex) -> Option<&mut Record> {
+        self.records.get_mut(index.get() as usize - 1)
     }
 
     #[inline(always)]
-    pub fn insert_record(&mut self, record: Record) -> Inode {
-        self.inodes.push(record);
-        Inode::new(self.inodes.len() as u64).unwrap()
+    pub fn insert_record(&mut self, record: Record) -> RecordIndex {
+        self.records.push(record);
+        RecordIndex::new(self.records.len() as u64).unwrap()
     }
 
     #[inline(always)]
     pub fn attr<S: AsRef<str>>(&self, path: &BoxPath, key: S) -> Option<&[u8]> {
         let key = self.attr_key(key.as_ref())?;
 
-        if let Some(record) = self.inode(path).and_then(|x| self.record(x)) {
+        if let Some(record) = self.index(path).and_then(|x| self.record(x)) {
             record.attrs().get(&key).map(|x| &**x)
         } else {
             None
@@ -219,8 +239,8 @@ impl BoxMetadata {
     pub fn file_attrs(&self) -> BTreeMap<&str, AttrValue<'_>> {
         let mut map = BTreeMap::new();
 
-        for key in self.attr_keys.iter() {
-            let k = self.attr_key(key).unwrap();
+        for (sym, key) in self.attr_keys.iter() {
+            let k = sym.to_usize();
             if let Some(v) = self.attrs.get(&k) {
                 let value = std::str::from_utf8(v)
                     .map(|v| {
@@ -229,7 +249,7 @@ impl BoxMetadata {
                             .unwrap_or(AttrValue::String(v))
                     })
                     .unwrap_or(AttrValue::Bytes(v));
-                map.insert(&**key, value);
+                map.insert(key, value);
             }
         }
 
@@ -243,21 +263,16 @@ impl BoxMetadata {
         self.attrs.get(&key)
     }
 
+    /// O(1) lookup of attribute key index.
     #[inline(always)]
     pub fn attr_key(&self, key: &str) -> Option<usize> {
-        self.attr_keys.iter().position(|r| r == key)
+        self.attr_keys.get(key).map(|sym| sym.to_usize())
     }
 
+    /// O(1) lookup or insert of attribute key index.
     #[inline(always)]
     pub fn attr_key_or_create(&mut self, key: &str) -> usize {
-        match self.attr_keys.iter().position(|r| r == key) {
-            Some(v) => v,
-            None => {
-                let len = self.attr_keys.len();
-                self.attr_keys.push(key.to_string());
-                len
-            }
-        }
+        self.attr_keys.get_or_intern(key).to_usize()
     }
 }
 
