@@ -191,7 +191,7 @@ impl<'a, 'b> FindRecord<'a, 'b> {
         query: VecDeque<&'b str>,
         entries: &'a [RecordIndex],
     ) -> FindRecord<'a, 'b> {
-        log::trace!("FindRecord query: {:?}", query);
+        tracing::trace!("FindRecord query: {:?}", query);
 
         FindRecord {
             meta,
@@ -207,7 +207,7 @@ impl<'a, 'b> Iterator for FindRecord<'a, 'b> {
     fn next(&mut self) -> Option<Self::Item> {
         let candidate_name = self.query.pop_front()?;
 
-        log::trace!("candidate_name: {}", candidate_name);
+        tracing::trace!("candidate_name: {}", candidate_name);
 
         let result = self
             .entries
@@ -217,14 +217,14 @@ impl<'a, 'b> Iterator for FindRecord<'a, 'b> {
 
         match result {
             Some(v) => {
-                log::trace!("{:?}", v);
+                tracing::trace!("{:?}", v);
                 if self.query.is_empty() {
                     Some(v.0)
                 } else if let Record::Directory(record) = v.1 {
                     let mut tmp = VecDeque::new();
                     std::mem::swap(&mut self.query, &mut tmp);
                     let result = FindRecord::new(self.meta, tmp, &record.entries).next();
-                    log::trace!("FindRecord result: {:?}", &result);
+                    tracing::trace!("FindRecord result: {:?}", &result);
                     result
                 } else {
                     None

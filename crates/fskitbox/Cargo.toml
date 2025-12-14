@@ -1,0 +1,28 @@
+[package]
+name = "fskitbox"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0 OR MIT"
+description = "FSKit-based filesystem driver for Box archives"
+
+[lib]
+crate-type = ["staticlib", "rlib"]
+
+[dependencies]
+box-format.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "sync"] }
+tracing.workspace = true
+thiserror.workspace = true
+fastvlq.workspace = true
+libc.workspace = true
+
+# Objective-C interop
+objc2.workspace = true
+objc2-foundation.workspace = true
+block2.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# FSKit is macOS-only
+
+[build-dependencies]
+# For linking FSKit.framework

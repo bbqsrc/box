@@ -27,7 +27,6 @@ unic-normal.workspace = true
 unic-ucd.workspace = true
 relative-path.workspace = true
 fastvlq = { workspace = true, features = ["async-tokio"] }
-log.workspace = true
 tracing.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
@@ -70,10 +69,8 @@ thiserror = "2"
 miette = { version = "7", features = ["fancy"] }
 
 # Logging/tracing
-log = "0.4"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
-env_logger = "0.9"
 
 # Crypto/hashing
 blake3 = "1"
@@ -110,7 +107,11 @@ digest = "0.10"
 string-interner = "0.19"
 smallvec = "1.13"
 fuser = { git = "https://github.com/cberner/fuser" }
-structopt = "0.3"
+
+# objc2 for macOS framework bindings
+objc2 = "0.6"
+objc2-foundation = "0.3"
+block2 = "0.6"
 
 # Workspace crates
 box-format = { version = "0.4.0", path = "." }

@@ -88,7 +88,7 @@ impl Drop for BoxFileWriter {
     fn drop(&mut self) {
         if !self.finished {
             // Can't do async in Drop, so we warn if not finished
-            log::warn!(
+            tracing::warn!(
                 "BoxFileWriter dropped without calling finish(). \
                  Archive at {:?} may be incomplete.",
                 self.path
@@ -388,10 +388,10 @@ impl BoxFileWriter {
         record: Record<'static>,
         cached_parent: Option<RecordIndex>,
     ) -> std::io::Result<RecordIndex> {
-        log::trace!("insert_inner path: {:?}", path);
+        tracing::trace!("insert_inner path: {:?}", path);
         match path.parent() {
             Some(parent_path) => {
-                log::trace!("insert_inner parent: {:?}", parent_path);
+                tracing::trace!("insert_inner parent: {:?}", parent_path);
 
                 // Use cached parent index if provided, otherwise do lookup
                 let parent_index = match cached_parent {
@@ -404,13 +404,13 @@ impl BoxFileWriter {
                     })?,
                 };
 
-                log::trace!(
+                tracing::trace!(
                     "Inserting record into parent {:?}: {:?}",
                     &parent_index,
                     &record
                 );
                 let new_index = self.meta.insert_record(record);
-                log::trace!("Inserted with index: {:?}", &new_index);
+                tracing::trace!("Inserted with index: {:?}", &new_index);
                 let parent = self
                     .meta
                     .record_mut(parent_index)
@@ -421,7 +421,7 @@ impl BoxFileWriter {
                 Ok(new_index)
             }
             None => {
-                log::trace!("Inserting record into root: {:?}", &record);
+                tracing::trace!("Inserting record into root: {:?}", &record);
                 let new_index = self.meta.insert_record(record);
                 self.meta.root.push(new_index);
                 Ok(new_index)
@@ -434,7 +434,7 @@ impl BoxFileWriter {
         path: BoxPath<'_>,
         attrs: HashMap<String, Vec<u8>>,
     ) -> std::io::Result<()> {
-        log::trace!("mkdir: {}", path);
+        tracing::trace!("mkdir: {}", path);
 
         let record = DirectoryRecord {
             name: std::borrow::Cow::Owned(path.filename().to_string()),

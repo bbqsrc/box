@@ -508,6 +508,12 @@ impl BoxFileReader {
                 fs::set_permissions(&new_dir, permissions).await.ok();
             }
 
+            #[cfg(windows)]
+            {
+                // Windows does not have unix-style permissions
+                let _ = record;
+            }
+
             stats.dirs_created += 1;
 
             if let Some(ref p) = progress {

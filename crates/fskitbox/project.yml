@@ -1,0 +1,70 @@
+# XcodeGen project specification for fskitbox
+# Generate with: xcodegen generate
+
+name: fskitbox
+options:
+  bundleIdPrefix: net.bbqsrc
+  deploymentTarget:
+    macOS: "15.4"
+  xcodeVersion: "16.0"
+  generateEmptyDirectories: true
+
+settings:
+  base:
+    MACOSX_DEPLOYMENT_TARGET: "15.4"
+    SWIFT_VERSION: "5.0"
+
+targets:
+  # Host application (required for app extension)
+  fskitbox-host:
+    type: application
+    platform: macOS
+    sources:
+      - path: host
+        createIntermediateGroups: true
+    settings:
+      PRODUCT_BUNDLE_IDENTIFIER: net.bbqsrc.fskitbox
+      INFOPLIST_FILE: host/Info.plist
+      CODE_SIGN_ENTITLEMENTS: host/fskitbox-host.entitlements
+      PRODUCT_NAME: fskitbox
+    dependencies:
+      - target: fskitbox-ext
+        embed: true
+        codeSign: true
+
+  # FSKit filesystem extension
+  fskitbox-ext:
+    type: app-extension
+    platform: macOS
+    sources:
+      - path: extension
+        createIntermediateGroups: true
+    settings:
+      PRODUCT_BUNDLE_IDENTIFIER: net.bbqsrc.fskitbox.filesystem
+      INFOPLIST_FILE: Info.plist
+      CODE_SIGN_ENTITLEMENTS: fskitbox.entitlements
+      PRODUCT_NAME: fskitbox-filesystem
+      LIBRARY_SEARCH_PATHS:
+        - $(inherited)
+        - $(PROJECT_DIR)/../../target/release
+        - $(PROJECT_DIR)/../../target/debug
+      OTHER_LDFLAGS:
+        - -lfskitbox
+        - -framework FSKit
+        - -framework Foundation
+      SKIP_INSTALL: YES
+      LD_RUNPATH_SEARCH_PATHS:
+        - $(inherited)
+        - "@executable_path/../Frameworks"
+        - "@executable_path/../../../../Frameworks"
+
+schemes:
+  fskitbox:
+    build:
+      targets:
+        fskitbox-host: all
+        fskitbox-ext: all
+    run:
+      config: Debug
+    archive:
+      config: Release

@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 
-use fastvlq::{Vi64, Vu32};
+use fastvlq::Vi64;
 
 /// Box epoch: 2020-01-01 00:00:00 UTC (seconds since Unix epoch)
 pub const BOX_EPOCH_UNIX: i64 = 1577836800;
@@ -48,12 +48,21 @@ pub fn metadata_to_attrs(
         DEFAULT_FILE_MODE
     };
     if mode != default_mode {
-        attrs.insert("unix.mode".into(), Vu32::new(mode).as_slice().to_vec());
+        attrs.insert(
+            "unix.mode".into(),
+            fastvlq::Vu32::new(mode).as_slice().to_vec(),
+        );
     }
 
     if ownership {
-        attrs.insert("unix.uid".into(), Vu32::new(meta.uid()).as_slice().to_vec());
-        attrs.insert("unix.gid".into(), Vu32::new(meta.gid()).as_slice().to_vec());
+        attrs.insert(
+            "unix.uid".into(),
+            fastvlq::Vu32::new(meta.uid()).as_slice().to_vec(),
+        );
+        attrs.insert(
+            "unix.gid".into(),
+            fastvlq::Vu32::new(meta.gid()).as_slice().to_vec(),
+        );
     }
 
     attrs

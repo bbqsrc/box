@@ -9,7 +9,7 @@ box-format.workspace = true
 fastvlq.workspace = true
 fuser.workspace = true
 tokio = { workspace = true, features = ["rt"] }
-structopt.workspace = true
-env_logger.workspace = true
+clap = { workspace = true, features = ["derive"] }
+tracing.workspace = true
+tracing-subscriber.workspace = true
 libc.workspace = true
-log.workspace = true
