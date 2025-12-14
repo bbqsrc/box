@@ -1,8 +1,5 @@
 use crate::error::FstError;
-use crate::node::{
-    FOOTER_SIZE, Footer, HEADER_SIZE, INDEX_ENTRY_SIZE, NodeIndex, NodeRef, read_footer,
-    read_header,
-};
+use crate::node::{HEADER_SIZE, Header, INDEX_ENTRY_SIZE, NodeIndex, NodeRef, read_header};
 
 /// Prefetch memory for read.
 #[inline(always)]
@@ -105,8 +102,7 @@ struct EachState {
 /// Generic over `D: AsRef<[u8]>` to support zero-copy from memory-mapped data.
 pub struct Fst<D> {
     data: D,
-    footer: Footer,
-    len: u64,
+    header: Header,
 }
 
 impl<D: AsRef<[u8]>> Fst<D> {
@@ -114,14 +110,13 @@ impl<D: AsRef<[u8]>> Fst<D> {
     pub fn new(data: D) -> Result<Self, FstError> {
         let bytes = data.as_ref();
 
-        if bytes.len() < HEADER_SIZE + FOOTER_SIZE {
+        if bytes.len() < HEADER_SIZE {
             return Err(FstError::TooShort);
         }
 
-        let len = read_header(bytes)?;
-        let footer = read_footer(bytes).ok_or(FstError::TooShort)?;
+        let header = read_header(bytes)?;
 
-        Ok(Self { data, footer, len })
+        Ok(Self { data, header })
     }
 
     /// Get node index entry by node ID.
@@ -138,8 +133,8 @@ impl<D: AsRef<[u8]>> Fst<D> {
         let bytes = self.data.as_ref();
         let idx = self.get_node_index(node_id);
 
-        let hot_start = self.footer.hot_start as usize + idx.hot_offset as usize;
-        let cold_start = self.footer.cold_start as usize + idx.cold_offset as usize;
+        let hot_start = self.header.hot_offset() + idx.hot_offset as usize;
+        let cold_start = self.header.cold_offset as usize + idx.cold_offset as usize;
 
         let hot_data = &bytes[hot_start..];
         let cold_data = &bytes[cold_start..];
@@ -150,7 +145,7 @@ impl<D: AsRef<[u8]>> Fst<D> {
     /// Get the value for an exact key match.
     pub fn get(&self, key: &[u8]) -> Option<u64> {
         let bytes = self.data.as_ref();
-        let mut current_node_id = self.footer.root_node_id;
+        let mut current_node_id = 0u32; // Root is always node 0
         let mut remaining = key;
         let mut output_sum: u64 = 0;
 
@@ -165,7 +160,7 @@ impl<D: AsRef<[u8]>> Fst<D> {
             prefetch_read(
                 bytes
                     .as_ptr()
-                    .wrapping_add(self.footer.hot_start as usize + next_idx.hot_offset as usize),
+                    .wrapping_add(self.header.hot_offset() + next_idx.hot_offset as usize),
             );
 
             // Check if edge label matches
@@ -198,12 +193,12 @@ impl<D: AsRef<[u8]>> Fst<D> {
 
     /// Number of entries in the FST.
     pub fn len(&self) -> u64 {
-        self.len
+        self.header.entry_count
     }
 
     /// Check if the FST is empty.
     pub fn is_empty(&self) -> bool {
-        self.len == 0
+        self.header.entry_count == 0
     }
 
     /// Iterate all entries with a given prefix.
@@ -269,9 +264,9 @@ impl<D: AsRef<[u8]>> Fst<D> {
                 // Prefetch child node
                 let child_idx = self.get_node_index(child_node_id);
                 prefetch_read(
-                    bytes.as_ptr().wrapping_add(
-                        self.footer.hot_start as usize + child_idx.hot_offset as usize,
-                    ),
+                    bytes
+                        .as_ptr()
+                        .wrapping_add(self.header.hot_offset() + child_idx.hot_offset as usize),
                 );
 
                 key_buffer.extend_from_slice(edge.label);
@@ -296,7 +291,7 @@ impl<D: AsRef<[u8]>> Fst<D> {
     /// Navigate to prefix node.
     fn navigate_to_prefix(&self, prefix: &[u8], key_buffer: &mut Vec<u8>) -> Option<(u32, u64)> {
         let bytes = self.data.as_ref();
-        let mut current_node_id = self.footer.root_node_id;
+        let mut current_node_id = 0u32; // Root is always node 0
         let mut remaining = prefix;
         let mut output_sum: u64 = 0;
 
@@ -324,7 +319,7 @@ impl<D: AsRef<[u8]>> Fst<D> {
             prefetch_read(
                 bytes
                     .as_ptr()
-                    .wrapping_add(self.footer.hot_start as usize + next_idx.hot_offset as usize),
+                    .wrapping_add(self.header.hot_offset() + next_idx.hot_offset as usize),
             );
 
             if match_len >= remaining.len() {
@@ -387,7 +382,7 @@ impl<'a, D: AsRef<[u8]>> PrefixIter<'a, D> {
 
     fn navigate_to_prefix(&mut self, prefix: &[u8]) -> Option<(u32, u64)> {
         let bytes = self.fst.data.as_ref();
-        let mut current_node_id = self.fst.footer.root_node_id;
+        let mut current_node_id = 0u32; // Root is always node 0
         let mut remaining = prefix;
         let mut output_sum: u64 = 0;
 
@@ -413,9 +408,9 @@ impl<'a, D: AsRef<[u8]>> PrefixIter<'a, D> {
             // Prefetch next node
             let next_idx = self.fst.get_node_index(edge.target_node_id);
             prefetch_read(
-                bytes.as_ptr().wrapping_add(
-                    self.fst.footer.hot_start as usize + next_idx.hot_offset as usize,
-                ),
+                bytes
+                    .as_ptr()
+                    .wrapping_add(self.fst.header.hot_offset() + next_idx.hot_offset as usize),
             );
 
             if match_len >= remaining.len() {
@@ -467,9 +462,11 @@ impl<D: AsRef<[u8]>> Iterator for PrefixIter<'_, D> {
 
                 // Prefetch child node
                 let child_idx = self.fst.get_node_index(child_node_id);
-                prefetch_read(bytes.as_ptr().wrapping_add(
-                    self.fst.footer.hot_start as usize + child_idx.hot_offset as usize,
-                ));
+                prefetch_read(
+                    bytes
+                        .as_ptr()
+                        .wrapping_add(self.fst.header.hot_offset() + child_idx.hot_offset as usize),
+                );
 
                 self.key_buffer.extend_from_slice(edge.label);
                 let child_key_len = self.key_buffer.len();

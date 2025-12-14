@@ -1,7 +1,7 @@
 use crate::error::BuildError;
 use crate::node::{
-    EdgeData, FOOTER_SIZE, Footer, HEADER_SIZE, INDEX_ENTRY_SIZE, INDEXED_THRESHOLD, NodeData,
-    NodeIndex, write_footer, write_header, write_node_cold, write_node_hot,
+    EdgeData, HEADER_SIZE, Header, INDEX_ENTRY_SIZE, INDEXED_THRESHOLD, NodeData, NodeIndex,
+    write_header, write_node_cold, write_node_hot,
 };
 use fastvlq::encode_vu64;
 
@@ -74,14 +74,13 @@ impl FstBuilder {
 
         // Step 1: Assign node IDs and collect NodeData (depth-first)
         let mut nodes: Vec<NodeData> = Vec::new();
-        let root_id = self.collect_nodes(&self.root, &mut nodes);
+        let _root_id = self.collect_nodes(&self.root, &mut nodes);
 
         let node_count = nodes.len() as u32;
 
         // Step 2: Calculate layout
-        let index_start = HEADER_SIZE;
         let index_size = node_count as usize * INDEX_ENTRY_SIZE;
-        let hot_start = index_start + index_size;
+        let hot_start = HEADER_SIZE + index_size;
 
         // Step 3: Write hot section, tracking offsets
         let mut hot_buf = Vec::new();
@@ -119,11 +118,16 @@ impl FstBuilder {
         }
 
         // Step 5: Assemble final buffer
-        let total_size = HEADER_SIZE + index_size + hot_buf.len() + cold_buf.len() + FOOTER_SIZE;
+        let total_size = HEADER_SIZE + index_size + hot_buf.len() + cold_buf.len();
         let mut buf = Vec::with_capacity(total_size);
 
-        // Header
-        write_header(self.len, &mut buf);
+        // Header (includes node_count and cold_offset)
+        let header = Header {
+            entry_count: self.len,
+            node_count,
+            cold_offset: cold_start as u32,
+        };
+        write_header(&header, &mut buf);
 
         // Index
         for i in 0..nodes.len() {
@@ -139,15 +143,6 @@ impl FstBuilder {
 
         // Cold section
         buf.extend_from_slice(&cold_buf);
-
-        // Footer
-        let footer = Footer {
-            root_node_id: root_id,
-            node_count,
-            hot_start: hot_start as u32,
-            cold_start: cold_start as u32,
-        };
-        write_footer(&footer, &mut buf);
 
         Ok(buf)
     }

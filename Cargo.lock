@@ -906,6 +906,7 @@ version = "0.1.0"
 dependencies = [
  "box-format",
  "env_logger 0.9.3",
+ "fastvlq",
  "fuser",
  "libc",
  "log",

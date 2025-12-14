@@ -2,19 +2,17 @@
 ///
 /// Format v1 with hot/cold sections:
 /// ```text
-/// [Header: 16 bytes]
+/// [Header: 24 bytes]
 /// [Node Index: node_count × 8 bytes]  <- (hot_off: u32, cold_off: u32)
 /// [Hot Section]                        <- flags, edge_count, first_bytes, offsets
 /// [Cold Section]                       <- edge labels, outputs, target_node_ids
-/// [Footer: 16 bytes]
 /// ```
 use fastvlq::{WriteVlqExt, decode_vu64_slice};
 
 /// Header constants
 pub const MAGIC: &[u8; 4] = b"BFST";
 pub const VERSION: u8 = 1;
-pub const HEADER_SIZE: usize = 16;
-pub const FOOTER_SIZE: usize = 16;
+pub const HEADER_SIZE: usize = 24;
 pub const INDEX_ENTRY_SIZE: usize = 8;
 
 /// Node type thresholds (ART-style adaptive)
@@ -24,35 +22,36 @@ pub const INDEXED_THRESHOLD: usize = 17; // Use 256-byte index for 17+ edges
 pub const FLAG_IS_FINAL: u8 = 0x01;
 pub const FLAG_INDEXED: u8 = 0x02; // Large node with 256-byte index
 
+/// Header data parsed from FST.
+#[derive(Debug, Clone, Copy)]
+pub struct Header {
+    pub entry_count: u64,
+    pub node_count: u32,
+    pub cold_offset: u32,
+}
+
+impl Header {
+    /// Compute the hot section start offset.
+    #[inline]
+    pub fn hot_offset(&self) -> usize {
+        HEADER_SIZE + (self.node_count as usize) * INDEX_ENTRY_SIZE
+    }
+}
+
 /// Write the FST header.
-pub fn write_header(entry_count: u64, buf: &mut Vec<u8>) {
+pub fn write_header(header: &Header, buf: &mut Vec<u8>) {
     buf.extend_from_slice(MAGIC);
     buf.push(VERSION);
     buf.push(0); // flags
     buf.push(0); // reserved
     buf.push(0); // reserved
-    buf.extend_from_slice(&entry_count.to_le_bytes());
+    buf.extend_from_slice(&header.node_count.to_le_bytes());
+    buf.extend_from_slice(&header.entry_count.to_le_bytes());
+    buf.extend_from_slice(&header.cold_offset.to_le_bytes());
 }
 
-/// Footer data parsed from FST.
-#[derive(Debug, Clone, Copy)]
-pub struct Footer {
-    pub root_node_id: u32,
-    pub node_count: u32,
-    pub hot_start: u32,
-    pub cold_start: u32,
-}
-
-/// Write the FST footer.
-pub fn write_footer(footer: &Footer, buf: &mut Vec<u8>) {
-    buf.extend_from_slice(&footer.root_node_id.to_le_bytes());
-    buf.extend_from_slice(&footer.node_count.to_le_bytes());
-    buf.extend_from_slice(&footer.hot_start.to_le_bytes());
-    buf.extend_from_slice(&footer.cold_start.to_le_bytes());
-}
-
-/// Parse the FST header, returns entry count.
-pub fn read_header(data: &[u8]) -> Result<u64, crate::FstError> {
+/// Parse the FST header.
+pub fn read_header(data: &[u8]) -> Result<Header, crate::FstError> {
     use crate::FstError;
 
     if data.len() < HEADER_SIZE {
@@ -65,23 +64,14 @@ pub fn read_header(data: &[u8]) -> Result<u64, crate::FstError> {
         return Err(FstError::UnsupportedVersion(data[4]));
     }
 
-    let entry_count = u64::from_le_bytes(data[8..16].try_into().unwrap());
-    Ok(entry_count)
-}
+    let node_count = u32::from_le_bytes(data[8..12].try_into().unwrap());
+    let entry_count = u64::from_le_bytes(data[12..20].try_into().unwrap());
+    let cold_offset = u32::from_le_bytes(data[20..24].try_into().unwrap());
 
-/// Parse the FST footer.
-pub fn read_footer(data: &[u8]) -> Option<Footer> {
-    if data.len() < FOOTER_SIZE {
-        return None;
-    }
-    let footer_start = data.len() - FOOTER_SIZE;
-    let f = &data[footer_start..];
-
-    Some(Footer {
-        root_node_id: u32::from_le_bytes([f[0], f[1], f[2], f[3]]),
-        node_count: u32::from_le_bytes([f[4], f[5], f[6], f[7]]),
-        hot_start: u32::from_le_bytes([f[8], f[9], f[10], f[11]]),
-        cold_start: u32::from_le_bytes([f[12], f[13], f[14], f[15]]),
+    Ok(Header {
+        entry_count,
+        node_count,
+        cold_offset,
     })
 }
 
@@ -606,32 +596,21 @@ mod tests {
 
     #[test]
     fn test_header_roundtrip() {
-        let mut buf = Vec::new();
-        write_header(12345, &mut buf);
-        assert_eq!(buf.len(), HEADER_SIZE);
-
-        let count = read_header(&buf).unwrap();
-        assert_eq!(count, 12345);
-    }
-
-    #[test]
-    fn test_footer_roundtrip() {
-        let footer = Footer {
-            root_node_id: 42,
+        let header = Header {
+            entry_count: 12345,
             node_count: 100,
-            hot_start: 816,
-            cold_start: 2000,
+            cold_offset: 2000,
         };
 
         let mut buf = Vec::new();
-        write_footer(&footer, &mut buf);
-        assert_eq!(buf.len(), FOOTER_SIZE);
+        write_header(&header, &mut buf);
+        assert_eq!(buf.len(), HEADER_SIZE);
 
-        let parsed = read_footer(&buf).unwrap();
-        assert_eq!(parsed.root_node_id, 42);
+        let parsed = read_header(&buf).unwrap();
+        assert_eq!(parsed.entry_count, 12345);
         assert_eq!(parsed.node_count, 100);
-        assert_eq!(parsed.hot_start, 816);
-        assert_eq!(parsed.cold_start, 2000);
+        assert_eq!(parsed.cold_offset, 2000);
+        assert_eq!(parsed.hot_offset(), HEADER_SIZE + 100 * INDEX_ENTRY_SIZE);
     }
 
     #[test]

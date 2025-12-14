@@ -3,6 +3,7 @@ use std::ffi::OsStr;
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use fastvlq::ReadVlqExt;
 use fuser::{
     FileAttr, FileType, Filesystem, MountOption, ReplyAttr, ReplyData, ReplyDirectory, ReplyEmpty,
     ReplyEntry, Request,
@@ -12,6 +13,9 @@ use structopt::StructOpt;
 use tokio::runtime::Runtime;
 
 use box_format::{BoxFileReader, BoxMetadata, RecordIndex};
+
+/// Box epoch: 2020-01-01 00:00:00 UTC (seconds since Unix epoch)
+const BOX_EPOCH_UNIX: i64 = 1577836800;
 
 struct BoxFs {
     reader: BoxFileReader,
@@ -23,11 +27,17 @@ const TTL: Duration = Duration::from_secs(1);
 
 fn root_dir_attr(meta: &BoxMetadata) -> FileAttr {
     let ctime = match meta.file_attr("created") {
-        Some(b) if b.len() == 8 => {
-            let secs = u64::from_le_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]]);
-            UNIX_EPOCH
-                .checked_add(Duration::from_secs(secs))
-                .unwrap_or(UNIX_EPOCH)
+        Some(b) => {
+            let mut cursor = std::io::Cursor::new(b.as_slice());
+            match cursor.read_vi64() {
+                Ok(minutes) => {
+                    let unix_secs = (minutes * 60 + BOX_EPOCH_UNIX) as u64;
+                    UNIX_EPOCH
+                        .checked_add(Duration::from_secs(unix_secs))
+                        .unwrap_or(UNIX_EPOCH)
+                }
+                Err(_) => UNIX_EPOCH,
+            }
         }
         _ => UNIX_EPOCH,
     };
@@ -106,13 +116,26 @@ impl RecordExt for box_format::Record<'_> {
 
     fn perm(&self, meta: &BoxMetadata) -> u16 {
         match self.attr(meta, "unix.mode") {
-            Some(bytes) if bytes.len() == 2 => u16::from_le_bytes([bytes[0], bytes[1]]),
+            Some(bytes) => {
+                let mut cursor = std::io::Cursor::new(bytes);
+                match cursor.read_vu32() {
+                    Ok(mode) => (mode & 0o7777) as u16,
+                    Err(_) => {
+                        use box_format::Record::*;
+                        match self {
+                            File(_) => 0o644,
+                            Directory(_) => 0o755,
+                            Link(_) => 0o644,
+                        }
+                    }
+                }
+            }
             _ => {
                 use box_format::Record::*;
                 match self {
                     File(_) => 0o644,
                     Directory(_) => 0o755,
-                    Link(_) => 0x644,
+                    Link(_) => 0o644,
                 }
             }
         }
@@ -120,11 +143,17 @@ impl RecordExt for box_format::Record<'_> {
 
     fn ctime(&self, meta: &BoxMetadata) -> SystemTime {
         match self.attr(meta, "created") {
-            Some(b) if b.len() == 8 => {
-                let secs = u64::from_le_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]]);
-                UNIX_EPOCH
-                    .checked_add(Duration::from_secs(secs))
-                    .unwrap_or(UNIX_EPOCH)
+            Some(b) => {
+                let mut cursor = std::io::Cursor::new(b);
+                match cursor.read_vi64() {
+                    Ok(minutes) => {
+                        let unix_secs = (minutes * 60 + BOX_EPOCH_UNIX) as u64;
+                        UNIX_EPOCH
+                            .checked_add(Duration::from_secs(unix_secs))
+                            .unwrap_or(UNIX_EPOCH)
+                    }
+                    Err(_) => UNIX_EPOCH,
+                }
             }
             _ => UNIX_EPOCH,
         }

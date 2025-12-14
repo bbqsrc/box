@@ -6,6 +6,7 @@ edition = "2024"
 
 [dependencies]
 box-format.workspace = true
+fastvlq.workspace = true
 fuser.workspace = true
 tokio = { workspace = true, features = ["rt"] }
 structopt.workspace = true

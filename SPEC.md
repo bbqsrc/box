@@ -748,45 +748,35 @@ The FST maps full paths (using `\x1F` unit separator between components, as desc
 
 ```
 +------------------+  Offset = trailer_end
-|     Header       |  16 bytes
+|     Header       |  24 bytes
 +------------------+
 |    Node Index    |  node_count × 8 bytes
 +------------------+
 |   Hot Section    |  Variable size (compact node headers)
 +------------------+
 |   Cold Section   |  Variable size (edge data)
-+------------------+
-|     Footer       |  16 bytes
 +------------------+  EOF
 ```
 
 ### 14.3 Header
 
-The FST Header is 16 bytes and located at the start of the FST section.
+The FST Header is 24 bytes and located at the start of the FST section.
 
 | Offset | Size | Field | Description |
 |--------|------|-------|-------------|
 | 0x00 | 4 | `magic` | Magic bytes: `BFST` (0x42 0x46 0x53 0x54) |
 | 0x04 | 1 | `version` | Format version (currently 1) |
-| 0x05 | 3 | `reserved` | Reserved bytes (must be 0) |
-| 0x08 | 8 | `entry_count` | Number of paths indexed (`u64`) |
+| 0x05 | 1 | `flags` | Reserved flags (must be 0) |
+| 0x06 | 2 | `reserved` | Reserved bytes (must be 0) |
+| 0x08 | 4 | `node_count` | Total number of nodes (`u32`) |
+| 0x0C | 8 | `entry_count` | Number of paths indexed (`u64`) |
+| 0x14 | 4 | `cold_offset` | Cold section start offset (`u32`) |
+
+The Hot Section starts at offset `24 + node_count × 8` (immediately after the Node Index). The root node is always node 0.
 
 Implementations MUST reject FST data where magic bytes do not match or version is unsupported.
 
-### 14.4 Footer
-
-The FST Footer is 16 bytes and located at the end of the FST section (last 16 bytes of the file).
-
-| Offset | Size | Field | Description |
-|--------|------|-------|-------------|
-| 0x00 | 4 | `root_id` | Root node ID (`u32`, always 0) |
-| 0x04 | 4 | `node_count` | Total number of nodes (`u32`) |
-| 0x08 | 4 | `hot_offset` | Hot section start offset (`u32`) |
-| 0x0C | 4 | `cold_offset` | Cold section start offset (`u32`) |
-
-The `hot_offset` and `cold_offset` are absolute byte offsets from the start of the FST section.
-
-### 14.5 Node Index
+### 14.4 Node Index
 
 The Node Index is an array of `node_count` entries, with each entry being 8 bytes.
 
@@ -799,7 +789,7 @@ The Node Index is an array of `node_count` entries, with each entry being 8 byte
 
 Offsets are relative to the start of their respective sections. Node IDs are indices into this array (node 0 = first entry, node 1 = second entry, etc.).
 
-### 14.6 Hot Section
+### 14.5 Hot Section
 
 The Hot Section contains compact node headers optimized for cache efficiency. Each node's hot data has the following structure:
 
@@ -830,7 +820,7 @@ The lookup data format depends on the `INDEXED` flag:
 
 Array of `edge_count` entries, each a `u16`. Each offset points to the corresponding edge's data within this node's cold section data block.
 
-### 14.7 Cold Section
+### 14.6 Cold Section
 
 The Cold Section contains edge data and final output values. Each node's cold data has the following structure:
 
@@ -858,7 +848,7 @@ If IS_FINAL flag is set:
 
 If the `IS_FINAL` flag is set, the final output value is stored at the end of the node's cold data block. This value is added to the accumulated output when the traversal terminates at this node.
 
-### 14.8 Path Encoding in FST
+### 14.7 Path Encoding in FST
 
 Paths stored in the FST use the same encoding as BoxPath (Section 9):
 
@@ -872,7 +862,7 @@ Paths stored in the FST use the same encoding as BoxPath (Section 9):
 - Duplicate keys are not permitted
 - Values are `u64` record indices (as returned by `RecordIndex.get()`)
 
-### 14.9 Output Value Accumulation
+### 14.8 Output Value Accumulation
 
 The FST stores output values along edges and at final nodes. The final lookup value is computed by:
 
@@ -882,7 +872,7 @@ The FST stores output values along edges and at final nodes. The final lookup va
 
 The result is the `RecordIndex` value for the path.
 
-### 14.10 Implementation Notes
+### 14.9 Implementation Notes
 
 **Adaptive Node Format:**
 
@@ -903,13 +893,12 @@ Implementations MAY use SIMD instructions for compact node lookups:
 - x86_64: SSE2 `_mm_cmpeq_epi8` for 16-byte parallel comparison
 - aarch64: NEON `vceqq_u8` for similar parallel comparison
 
-### 14.11 Constants
+### 14.10 Constants
 
 | Constant | Value | Description |
 |----------|-------|-------------|
 | Magic | `BFST` | FST section identifier |
-| Version | 3 | Current format version |
-| Header size | 16 bytes | Fixed header size |
-| Footer size | 16 bytes | Fixed footer size |
+| Version | 1 | Current format version |
+| Header size | 24 bytes | Fixed header size |
 | Index entry size | 8 bytes | Per-node index entry |
 | Indexed threshold | 17 | Minimum edges for indexed format |
