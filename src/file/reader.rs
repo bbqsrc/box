@@ -12,7 +12,7 @@ use super::meta::Records;
 use super::{BoxMetadata, meta::RecordsItem};
 use crate::path::IntoBoxPathError;
 use crate::{
-    de::{DeserializeBorrowed, DeserializeOwned},
+    de::{DeserializeOwned, deserialize_metadata_borrowed},
     header::BoxHeader,
     path::BoxPath,
     record::{FileRecord, LinkRecord, Record},
@@ -52,9 +52,10 @@ pub(super) async fn read_trailer<R: tokio::io::AsyncRead + tokio::io::AsyncSeek 
     reader: &mut R,
     ptr: NonZeroU64,
     offset: u64,
+    version: u8,
 ) -> std::io::Result<BoxMetadata<'static>> {
     reader.seek(SeekFrom::Start(offset + ptr.get())).await?;
-    BoxMetadata::deserialize_owned(reader).await
+    crate::de::deserialize_metadata_owned(reader, version).await
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -244,7 +245,7 @@ impl BoxFileReader {
 
         // Deserialize with borrowed data from the mmap
         let mut pos = 0;
-        let meta = BoxMetadata::deserialize_borrowed(trailer_data, &mut pos)
+        let meta = deserialize_metadata_borrowed(trailer_data, &mut pos, header.version)
             .map_err(OpenError::InvalidTrailer)?;
 
         // Safety: The trailer_segment holds an Arc<MemoryMappedFile> which keeps the

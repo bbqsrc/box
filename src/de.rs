@@ -180,17 +180,30 @@ impl<'a> DeserializeBorrowed<'a> for FileRecord<'a> {
     }
 }
 
+/// Deserialize DirectoryRecord with version awareness.
+pub(crate) fn deserialize_directory_borrowed<'a>(
+    data: &'a [u8],
+    pos: &mut usize,
+    version: u8,
+) -> std::io::Result<DirectoryRecord<'a>> {
+    let name = <Cow<'a, str>>::deserialize_borrowed(data, pos)?;
+    let entries = if version == 0 {
+        <Vec<RecordIndex>>::deserialize_borrowed(data, pos)?
+    } else {
+        Vec::new() // v1+: entries not in binary format
+    };
+    let attrs = AttrMap::deserialize_borrowed(data, pos)?;
+
+    Ok(DirectoryRecord {
+        name,
+        entries,
+        attrs,
+    })
+}
+
 impl<'a> DeserializeBorrowed<'a> for DirectoryRecord<'a> {
     fn deserialize_borrowed(data: &'a [u8], pos: &mut usize) -> std::io::Result<Self> {
-        let name = <Cow<'a, str>>::deserialize_borrowed(data, pos)?;
-        let entries = <Vec<RecordIndex>>::deserialize_borrowed(data, pos)?;
-        let attrs = AttrMap::deserialize_borrowed(data, pos)?;
-
-        Ok(DirectoryRecord {
-            name,
-            entries,
-            attrs,
-        })
+        deserialize_directory_borrowed(data, pos, 0) // Default to v0 for trait
     }
 }
 
@@ -208,21 +221,30 @@ impl<'a> DeserializeBorrowed<'a> for LinkRecord<'a> {
     }
 }
 
+/// Deserialize Record with version awareness.
+pub(crate) fn deserialize_record_borrowed<'a>(
+    data: &'a [u8],
+    pos: &mut usize,
+    version: u8,
+) -> std::io::Result<Record<'a>> {
+    let ty = read_u8_slice(data, pos)?;
+    let record = match ty {
+        0 => Record::File(FileRecord::deserialize_borrowed(data, pos)?),
+        1 => Record::Directory(deserialize_directory_borrowed(data, pos, version)?),
+        2 => Record::Link(LinkRecord::deserialize_borrowed(data, pos)?),
+        _ => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("invalid or unsupported record type: {}", ty),
+            ));
+        }
+    };
+    Ok(record)
+}
+
 impl<'a> DeserializeBorrowed<'a> for Record<'a> {
     fn deserialize_borrowed(data: &'a [u8], pos: &mut usize) -> std::io::Result<Self> {
-        let ty = read_u8_slice(data, pos)?;
-        let record = match ty {
-            0 => Record::File(FileRecord::deserialize_borrowed(data, pos)?),
-            1 => Record::Directory(DirectoryRecord::deserialize_borrowed(data, pos)?),
-            2 => Record::Link(LinkRecord::deserialize_borrowed(data, pos)?),
-            _ => {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    format!("invalid or unsupported record type: {}", ty),
-                ));
-            }
-        };
-        Ok(record)
+        deserialize_record_borrowed(data, pos, 0) // Default to v0 for trait
     }
 }
 
@@ -238,39 +260,46 @@ impl<'a> DeserializeBorrowed<'a> for DefaultStringInterner {
     }
 }
 
-impl<'a> DeserializeBorrowed<'a> for BoxMetadata<'a> {
-    fn deserialize_borrowed(data: &'a [u8], pos: &mut usize) -> std::io::Result<Self> {
-        let root = <Vec<RecordIndex>>::deserialize_borrowed(data, pos)?;
+/// Deserialize BoxMetadata with version awareness.
+pub(crate) fn deserialize_metadata_borrowed<'a>(
+    data: &'a [u8],
+    pos: &mut usize,
+    version: u8,
+) -> std::io::Result<BoxMetadata<'a>> {
+    let root = if version == 0 {
+        <Vec<RecordIndex>>::deserialize_borrowed(data, pos)?
+    } else {
+        Vec::new()
+    };
 
-        let record_count = read_vlq_u64(data, pos)? as usize;
-        let mut records = Vec::with_capacity(record_count);
-        for _ in 0..record_count {
-            records.push(Record::deserialize_borrowed(data, pos)?);
-        }
-
-        let attr_keys = DefaultStringInterner::deserialize_borrowed(data, pos)?;
-        let attrs = AttrMap::deserialize_borrowed(data, pos)?;
-
-        // Skip 0-padding to 8-byte boundary
-        while *pos < data.len() && data[*pos] == 0 {
-            *pos += 1;
-        }
-
-        // Parse FST from remaining bytes (no length prefix)
-        let fst = if *pos >= data.len() {
-            None // Old archive - no FST
-        } else {
-            box_fst::Fst::new(Cow::Borrowed(&data[*pos..])).ok()
-        };
-
-        Ok(BoxMetadata {
-            root,
-            records,
-            attr_keys,
-            attrs,
-            fst,
-        })
+    let record_count = read_vlq_u64(data, pos)? as usize;
+    let mut records = Vec::with_capacity(record_count);
+    for _ in 0..record_count {
+        records.push(deserialize_record_borrowed(data, pos, version)?);
     }
+
+    let attr_keys = DefaultStringInterner::deserialize_borrowed(data, pos)?;
+    let attrs = AttrMap::deserialize_borrowed(data, pos)?;
+
+    // Skip 0-padding to 8-byte boundary
+    while *pos < data.len() && data[*pos] == 0 {
+        *pos += 1;
+    }
+
+    // Parse FST from remaining bytes (no length prefix)
+    let fst = if *pos >= data.len() {
+        None
+    } else {
+        box_fst::Fst::new(Cow::Borrowed(&data[*pos..])).ok()
+    };
+
+    Ok(BoxMetadata {
+        root,
+        records,
+        attr_keys,
+        attrs,
+        fst,
+    })
 }
 
 // ============================================================================
@@ -416,31 +445,64 @@ impl DeserializeOwned for RecordIndex {
     }
 }
 
-impl DeserializeOwned for DirectoryRecord<'static> {
-    async fn deserialize_owned<R: AsyncRead + AsyncSeek + Unpin + Send>(
-        reader: &mut R,
-    ) -> std::io::Result<Self> {
-        let start = reader.stream_position().await?;
-        let name = String::deserialize_owned(reader).await?;
+/// Deserialize DirectoryRecord with version awareness (owned).
+pub(crate) async fn deserialize_directory_owned<R: AsyncRead + AsyncSeek + Unpin + Send>(
+    reader: &mut R,
+    version: u8,
+) -> std::io::Result<DirectoryRecord<'static>> {
+    let start = reader.stream_position().await?;
+    let name = String::deserialize_owned(reader).await?;
 
-        // Entries vec
+    let entries = if version == 0 {
         let len = reader.read_vu64().await? as usize;
         let mut entries = Vec::with_capacity(len);
         for _ in 0..len {
             entries.push(RecordIndex::deserialize_owned(reader).await?);
         }
+        entries
+    } else {
+        Vec::new()
+    };
 
-        let attrs = <HashMap<usize, Vec<u8>>>::deserialize_owned(reader).await?;
+    let attrs = <HashMap<usize, Vec<u8>>>::deserialize_owned(reader).await?;
 
-        let end = reader.stream_position().await?;
-        tracing::debug!(start = format_args!("{:#x}", start), end = format_args!("{:#x}", end), bytes = end - start, %name, "deserialized DirectoryRecord");
+    let end = reader.stream_position().await?;
+    tracing::debug!(start = format_args!("{:#x}", start), end = format_args!("{:#x}", end), bytes = end - start, %name, "deserialized DirectoryRecord");
 
-        Ok(DirectoryRecord {
-            name: Cow::Owned(name),
-            entries,
-            attrs,
-        })
-    }
+    Ok(DirectoryRecord {
+        name: Cow::Owned(name),
+        entries,
+        attrs,
+    })
+}
+
+/// Deserialize Record with version awareness (owned).
+pub(crate) async fn deserialize_record_owned<R: AsyncRead + AsyncSeek + Unpin + Send>(
+    reader: &mut R,
+    version: u8,
+) -> std::io::Result<Record<'static>> {
+    let start = reader.stream_position().await?;
+    let ty = reader.read_u8().await?;
+    let record = match ty {
+        0 => Record::File(FileRecord::deserialize_owned(reader).await?),
+        1 => Record::Directory(deserialize_directory_owned(reader, version).await?),
+        2 => Record::Link(LinkRecord::deserialize_owned(reader).await?),
+        _ => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("invalid or unsupported record type: {}", ty),
+            ));
+        }
+    };
+    let end = reader.stream_position().await?;
+    tracing::debug!(
+        start = format_args!("{:#x}", start),
+        end = format_args!("{:#x}", end),
+        bytes = end - start,
+        ty,
+        "deserialized Record"
+    );
+    Ok(record)
 }
 
 impl DeserializeOwned for LinkRecord<'static> {
@@ -460,35 +522,6 @@ impl DeserializeOwned for LinkRecord<'static> {
             target,
             attrs,
         })
-    }
-}
-
-impl DeserializeOwned for Record<'static> {
-    async fn deserialize_owned<R: AsyncRead + AsyncSeek + Unpin + Send>(
-        reader: &mut R,
-    ) -> std::io::Result<Self> {
-        let start = reader.stream_position().await?;
-        let ty = reader.read_u8().await?;
-        let record = match ty {
-            0 => Record::File(FileRecord::deserialize_owned(reader).await?),
-            1 => Record::Directory(DirectoryRecord::deserialize_owned(reader).await?),
-            2 => Record::Link(LinkRecord::deserialize_owned(reader).await?),
-            _ => {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    format!("invalid or unsupported field type: {}", ty),
-                ));
-            }
-        };
-        let end = reader.stream_position().await?;
-        tracing::debug!(
-            start = format_args!("{:#x}", start),
-            end = format_args!("{:#x}", end),
-            bytes = end - start,
-            ty,
-            "deserialized Record"
-        );
-        Ok(record)
     }
 }
 
@@ -531,65 +564,69 @@ impl DeserializeOwned for BoxHeader {
     }
 }
 
-impl DeserializeOwned for BoxMetadata<'static> {
-    async fn deserialize_owned<R: AsyncRead + AsyncSeek + Unpin + Send>(
-        reader: &mut R,
-    ) -> std::io::Result<Self> {
-        let start = reader.stream_position().await?;
-        let root = <Vec<RecordIndex>>::deserialize_owned(reader).await?;
+/// Deserialize BoxMetadata with version awareness (owned).
+pub(crate) async fn deserialize_metadata_owned<R: AsyncRead + AsyncSeek + Unpin + Send>(
+    reader: &mut R,
+    version: u8,
+) -> std::io::Result<BoxMetadata<'static>> {
+    let start = reader.stream_position().await?;
 
-        // Inline record deserialization to avoid lifetime issues with blanket Vec<T> impl
-        let record_count = reader.read_vu64().await?;
-        let mut records = Vec::with_capacity(record_count as usize);
-        for _ in 0..record_count {
-            records.push(Record::deserialize_owned(reader).await?);
-        }
+    let root = if version == 0 {
+        <Vec<RecordIndex>>::deserialize_owned(reader).await?
+    } else {
+        Vec::new()
+    };
 
-        let attr_keys = <DefaultStringInterner>::deserialize_owned(reader).await?;
-        let attrs = <HashMap<usize, Vec<u8>>>::deserialize_owned(reader).await?;
-
-        // Skip 0-padding to 8-byte boundary
-        loop {
-            let mut byte = [0u8; 1];
-            match reader.read_exact(&mut byte).await {
-                Ok(_) if byte[0] == 0 => continue, // Skip padding
-                Ok(_) => {
-                    // Non-zero byte found, seek back one byte
-                    reader.seek(std::io::SeekFrom::Current(-1)).await?;
-                    break;
-                }
-                Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break, // EOF
-                Err(e) => return Err(e),
-            }
-        }
-
-        // Read remaining bytes and parse as FST
-        let mut fst_bytes = Vec::new();
-        reader.read_to_end(&mut fst_bytes).await?;
-        let fst = if fst_bytes.is_empty() {
-            None // Old archive - no FST
-        } else {
-            box_fst::Fst::new(Cow::Owned(fst_bytes)).ok()
-        };
-
-        let end = reader.stream_position().await?;
-        tracing::debug!(
-            start = format_args!("{:#x}", start),
-            end = format_args!("{:#x}", end),
-            bytes = end - start,
-            records = records.len(),
-            fst_size = fst.as_ref().map(|f| f.len()).unwrap_or(0),
-            "deserialized BoxMetadata"
-        );
-
-        Ok(BoxMetadata {
-            root,
-            records,
-            attr_keys,
-            attrs,
-            fst,
-        })
+    let record_count = reader.read_vu64().await?;
+    let mut records = Vec::with_capacity(record_count as usize);
+    for _ in 0..record_count {
+        records.push(deserialize_record_owned(reader, version).await?);
     }
+
+    let attr_keys = <DefaultStringInterner>::deserialize_owned(reader).await?;
+    let attrs = <HashMap<usize, Vec<u8>>>::deserialize_owned(reader).await?;
+
+    // Skip 0-padding to 8-byte boundary
+    loop {
+        let mut byte = [0u8; 1];
+        match reader.read_exact(&mut byte).await {
+            Ok(_) if byte[0] == 0 => continue, // Skip padding
+            Ok(_) => {
+                // Non-zero byte found, seek back one byte
+                reader.seek(std::io::SeekFrom::Current(-1)).await?;
+                break;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break, // EOF
+            Err(e) => return Err(e),
+        }
+    }
+
+    // Read remaining bytes and parse as FST
+    let mut fst_bytes = Vec::new();
+    reader.read_to_end(&mut fst_bytes).await?;
+    let fst = if fst_bytes.is_empty() {
+        None
+    } else {
+        box_fst::Fst::new(Cow::Owned(fst_bytes)).ok()
+    };
+
+    let end = reader.stream_position().await?;
+    tracing::debug!(
+        start = format_args!("{:#x}", start),
+        end = format_args!("{:#x}", end),
+        bytes = end - start,
+        records = records.len(),
+        fst_size = fst.as_ref().map(|f| f.len()).unwrap_or(0),
+        "deserialized BoxMetadata"
+    );
+
+    Ok(BoxMetadata {
+        root,
+        records,
+        attr_keys,
+        attrs,
+        fst,
+    })
 }
 
 impl DeserializeOwned for Compression {

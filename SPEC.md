@@ -18,6 +18,7 @@
 11. [Checksums](#11-checksums)
 12. [Standard Attributes](#12-standard-attributes)
 13. [Implementation Guidance](#13-implementation-guidance)
+14. [FST Index](#14-fst-index)
 
 ---
 
@@ -55,7 +56,7 @@ The key words "MUST", "MUST NOT", "REQUIRED", "SHALL", "SHALL NOT", "SHOULD", "S
 
 ## 3. File Structure Overview
 
-A Box archive consists of three sections laid out sequentially:
+A Box archive consists of four sections laid out sequentially:
 
 ```
 +------------------+  Offset 0x00
@@ -68,10 +69,12 @@ A Box archive consists of three sections laid out sequentially:
 |                  |
 |     Trailer      |  Variable size (BoxMetadata)
 |                  |
++------------------+
+|   FST Index      |  Variable size
 +------------------+  EOF
 ```
 
-The Header is always 32 bytes and located at offset 0. The Header contains a pointer to the Trailer, which stores all metadata. File content data is stored between the Header and Trailer.
+The Header is always 32 bytes and located at offset 0. The Header contains a pointer to the Trailer, which stores record metadata. File content data is stored between the Header and Trailer. The FST Index follows the Trailer and provides path-to-record mapping (see Section 14).
 
 All multi-byte integers in the Box format are stored in **little-endian** byte order unless otherwise specified.
 
@@ -156,18 +159,8 @@ The following vector types are used in the format:
 
 | Type | Usage | Element Encoding |
 |------|-------|------------------|
-| `Vec<RecordIndex>` | `root`, `DirectoryRecord.entries` | VLQ (1-based index) |
 | `Vec<Record>` | `BoxMetadata.records` | Record (see Section 8) |
 | `Vec<String>` | `attr_keys` | String (VLQ length + UTF-8) |
-
-**Example: Vec\<RecordIndex\> with 3 elements [1, 2, 5]:**
-
-```
-03              - VLQ: count = 3
-01              - VLQ: index 1
-02              - VLQ: index 2
-05              - VLQ: index 5
-```
 
 ### 4.5 Vec\<u8\> (Byte Array)
 
@@ -234,12 +227,11 @@ Implementations MUST reject files where the first 4 bytes do not match the magic
 
 ### 5.3 Version
 
-> [!WARNING]  
-> This section is incomplete. The first stable version of Box will be 1.
-
-The version field indicates the format version. This specification defines version **0**.
+The version field indicates the format version. This specification defines version **1**.
 
 Implementations SHOULD reject archives with version numbers they do not support.
+
+Implementations MAY support reading version 0 archives for backward compatibility. Version 0 archives include `root` in BoxMetadata and `entries` in DirectoryRecord; version 1 archives do not.
 
 ### 5.4 Reserved Fields
 
@@ -314,26 +306,21 @@ File record data offsets MUST be non-zero. A zero data offset indicates a corrup
 
 ## 7. Trailer (Metadata)
 
-The Trailer contains all archive metadata, serialized as a BoxMetadata structure.
+The Trailer contains record metadata, serialized as a BoxMetadata structure. Path-to-record mapping is stored in the FST Index (Section 14).
 
 ### 7.1 BoxMetadata Structure
 
 The `BoxMetadata` is serialized in the following order:
 
-1. **`root`** (`Vec<RecordIndex>`): Indices of root-level entries
-2. **`records`** (`Vec<Record>`): All record definitions
-3. **`attr_keys`** (`Vec<String>`): Interned attribute key names
-4. **`attrs`** (`AttrMap`): Archive-level attributes
+1. **`records`** (`Vec<Record>`): All record definitions
+2. **`attr_keys`** (`Vec<String>`): Interned attribute key names
+3. **`attrs`** (`AttrMap`): Archive-level attributes
 
-### 7.2 Root
-
-The `root` field contains `RecordIndex` values for all top-level entries (files and directories not contained within another directory).
-
-### 7.3 Records
+### 7.2 Records
 
 The `records` field contains all `Record` structures. Records are referenced by 1-based index; index `n` corresponds to `records[n-1]`.
 
-### 7.4 Attribute Keys (attr_keys)
+### 7.3 Attribute Keys (attr_keys)
 
 Attribute keys are interned to reduce storage size. The `attr_keys` field is a vector of strings where the index corresponds to the key's symbol value.
 
@@ -341,7 +328,7 @@ When serializing: keys are written in symbol order (0, 1, 2, ...).
 
 When deserializing: strings are assigned symbols in the order read.
 
-### 7.5 Archive Attributes (attrs)
+### 7.4 Archive Attributes (attrs)
 
 The `attrs` field contains attributes that apply to the entire archive, using the same `AttrMap` format as record attributes.
 
@@ -397,7 +384,7 @@ OO OO OO OO OO OO OO OO     - data offset (u64)
 
 ### 8.3 Directory Record (Type 0x01)
 
-Directory records describe directory entries.
+Directory records describe directory entries. Directory children are located via FST prefix queries using the directory's path (see Section 14).
 
 **Structure:**
 
@@ -405,20 +392,17 @@ Directory records describe directory entries.
 |-------|------|-------------|
 | `type` | `u8` | Record type: `0x01` |
 | `name` | `String` | Directory name |
-| `entries` | `Vec<RecordIndex>` | Child record indices |
 | `attrs` | `AttrMap` | Directory attributes |
 
 **Requirements:**
 
 - `name` MUST be a valid directory name component.
-- `entries` contains indices of records that are direct children of this directory.
 
 **Binary Layout:**
 
 ```
 01                          - type (directory)
 [String: name]
-[Vec<RecordIndex>: entries]
 [AttrMap: attrs]
 ```
 
@@ -743,3 +727,189 @@ Implementations MUST:
 - Limit memory allocation based on reported sizes (decompressed_length is advisory)
 - Reject paths containing `..` after normalization
 - Handle symbolic links carefully to prevent path traversal attacks during extraction
+
+---
+
+## 14. FST Index
+
+The FST (Finite State Transducer) Index provides the path-to-record mapping for the archive. It is located immediately after the Trailer section and extends to the end of the archive file.
+
+### 14.1 Overview
+
+The FST provides:
+
+- **Fast path lookups:** O(m) time complexity where m = path length in bytes
+- **Prefix iteration:** Efficiently enumerate all paths with a given prefix
+- **Directory traversal:** Find directory children via prefix queries
+
+The FST maps full paths (using `\x1F` unit separator between components, as described in Section 9) to `RecordIndex` values.
+
+### 14.2 FST Layout
+
+```
++------------------+  Offset = trailer_end
+|     Header       |  16 bytes
++------------------+
+|    Node Index    |  node_count × 8 bytes
++------------------+
+|   Hot Section    |  Variable size (compact node headers)
++------------------+
+|   Cold Section   |  Variable size (edge data)
++------------------+
+|     Footer       |  16 bytes
++------------------+  EOF
+```
+
+### 14.3 Header
+
+The FST Header is 16 bytes and located at the start of the FST section.
+
+| Offset | Size | Field | Description |
+|--------|------|-------|-------------|
+| 0x00 | 4 | `magic` | Magic bytes: `BFST` (0x42 0x46 0x53 0x54) |
+| 0x04 | 1 | `version` | Format version (currently 3) |
+| 0x05 | 3 | `reserved` | Reserved bytes (must be 0) |
+| 0x08 | 8 | `entry_count` | Number of paths indexed (`u64` LE) |
+
+Implementations MUST reject FST data where magic bytes do not match or version is unsupported.
+
+### 14.4 Footer
+
+The FST Footer is 16 bytes and located at the end of the FST section (last 16 bytes of the file).
+
+| Offset | Size | Field | Description |
+|--------|------|-------|-------------|
+| 0x00 | 4 | `root_id` | Root node ID (`u32` LE, always 0) |
+| 0x04 | 4 | `node_count` | Total number of nodes (`u32` LE) |
+| 0x08 | 4 | `hot_offset` | Hot section start offset (`u32` LE) |
+| 0x0C | 4 | `cold_offset` | Cold section start offset (`u32` LE) |
+
+The `hot_offset` and `cold_offset` are absolute byte offsets from the start of the FST section.
+
+### 14.5 Node Index
+
+The Node Index is an array of `node_count` entries, with each entry being 8 bytes.
+
+**Entry Format:**
+
+| Offset | Size | Field | Description |
+|--------|------|-------|-------------|
+| 0x00 | 4 | `hot_offset` | Offset within Hot Section (`u32` LE) |
+| 0x04 | 4 | `cold_offset` | Offset within Cold Section (`u32` LE) |
+
+Offsets are relative to the start of their respective sections. Node IDs are indices into this array (node 0 = first entry, node 1 = second entry, etc.).
+
+### 14.6 Hot Section
+
+The Hot Section contains compact node headers optimized for cache efficiency. Each node's hot data has the following structure:
+
+```
+[flags: u8]
+[edge_count: VLQ]
+[lookup_data: variable]
+[offsets: edge_count × u16 LE]
+```
+
+**Flags Byte:**
+
+| Bit | Name | Description |
+|-----|------|-------------|
+| 0 | `IS_FINAL` | Node is an accepting state (has an output value) |
+| 1 | `INDEXED` | Node uses 256-byte lookup table (17+ edges) |
+| 2-7 | Reserved | Must be 0 |
+
+**Lookup Data:**
+
+The lookup data format depends on the `INDEXED` flag:
+
+- **If INDEXED (≥17 edges):** 256-byte lookup table where `table[byte]` returns the edge index for that byte value, or `0xFF` if no edge exists for that byte.
+
+- **If not INDEXED (<17 edges):** Array of `edge_count` bytes containing the first byte of each edge label, sorted in ascending order. Used for binary search or SIMD-accelerated lookups.
+
+**Offsets Array:**
+
+Array of `edge_count` entries, each a `u16` (little-endian). Each offset points to the corresponding edge's data within this node's cold section data block.
+
+### 14.7 Cold Section
+
+The Cold Section contains edge data and final output values. Each node's cold data has the following structure:
+
+```
+For each edge (0 to edge_count-1):
+    [label_len: VLQ]
+    [label: label_len bytes]
+    [output: VLQ]
+    [target_node: u32 LE]
+
+If IS_FINAL flag is set:
+    [final_output: VLQ]
+```
+
+**Edge Fields:**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `label_len` | VLQ | Length of edge label in bytes |
+| `label` | bytes | Edge label (arbitrary byte sequence) |
+| `output` | VLQ | Output value to accumulate (`u64`) |
+| `target_node` | `u32` LE | Target node ID |
+
+**Final Output:**
+
+If the `IS_FINAL` flag is set, the final output value is stored at the end of the node's cold data block. This value is added to the accumulated output when the traversal terminates at this node.
+
+### 14.8 Path Encoding in FST
+
+Paths stored in the FST use the same encoding as BoxPath (Section 9):
+
+- Components are separated by `U+001F` UNIT SEPARATOR (`\x1F`)
+- Paths are stored without leading separators
+- Example: `foo/bar/baz.txt` → `foo\x1Fbar\x1Fbaz.txt`
+
+**Build Requirements:**
+
+- Keys MUST be inserted in strict lexicographic byte order
+- Duplicate keys are not permitted
+- Values are `u64` record indices (as returned by `RecordIndex.get()`)
+
+### 14.9 Output Value Accumulation
+
+The FST stores output values along edges and at final nodes. The final lookup value is computed by:
+
+1. Starting with accumulated value = 0
+2. For each edge traversed: `accumulated = accumulated.wrapping_add(edge.output)`
+3. If the final node has `IS_FINAL` set: `accumulated = accumulated.wrapping_add(final_output)`
+
+The result is the `RecordIndex` value for the path.
+
+### 14.10 Implementation Notes
+
+**Adaptive Node Format:**
+
+The FST uses an adaptive node format inspired by Adaptive Radix Trees (ART):
+
+- Nodes with fewer than 17 edges use compact format (sorted first-bytes array)
+- Nodes with 17 or more edges use indexed format (256-byte lookup table)
+
+The threshold of 17 balances memory usage against lookup performance.
+
+**Hot/Cold Separation:**
+
+Data is separated into "hot" (frequently accessed during traversal) and "cold" (accessed only when needed) sections. This improves cache utilization during lookups.
+
+**SIMD Optimization:**
+
+Implementations MAY use SIMD instructions for compact node lookups:
+- x86_64: SSE2 `_mm_cmpeq_epi8` for 16-byte parallel comparison
+- aarch64: NEON `vceqq_u8` for similar parallel comparison
+
+### 14.11 Constants
+
+| Constant | Value | Description |
+|----------|-------|-------------|
+| Magic | `BFST` | FST section identifier |
+| Version | 3 | Current format version |
+| Header size | 16 bytes | Fixed header size |
+| Footer size | 16 bytes | Fixed footer size |
+| Index entry size | 8 bytes | Per-node index entry |
+| Indexed threshold | 17 | Minimum edges for indexed format |

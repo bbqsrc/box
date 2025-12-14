@@ -165,7 +165,7 @@ impl Serialize for DirectoryRecord<'_> {
         // Record id - 1 for directory
         writer.write_u8(0x1).await?;
         self.name.write(writer).await?;
-        self.entries.write(writer).await?;
+        // v1: entries not serialized (found via FST prefix queries)
         self.attrs.write(writer).await?;
         Ok(())
     }
@@ -219,7 +219,7 @@ impl Serialize for BoxMetadata<'_> {
         &self,
         writer: &mut W,
     ) -> std::io::Result<()> {
-        self.root.write(writer).await?;
+        // v1: root not serialized (paths indexed by FST)
         self.records.write(writer).await?;
         self.attr_keys.write(writer).await?;
         self.attrs.write(writer).await?;

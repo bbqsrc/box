@@ -112,14 +112,6 @@ impl BoxFileWriter {
             .as_ref()
             .and_then(|bytes| box_fst::Fst::new(Cow::Owned(bytes.clone())).ok());
 
-        // Clear redundant directory traversal data (FST handles all lookups now)
-        self.meta.root.clear();
-        for record in &mut self.meta.records {
-            if let Record::Directory(dir) = record {
-                dir.entries.clear();
-            }
-        }
-
         // Flush any buffered file data before seeking
         self.file.flush().await?;
 
@@ -241,7 +233,7 @@ impl BoxFileWriter {
         let ptr = header
             .trailer
             .ok_or_else(|| std::io::Error::other("no trailer found"))?;
-        let meta = read_trailer(&mut reader, ptr, 0).await?;
+        let meta = read_trailer(&mut reader, ptr, 0, header.version).await?;
 
         // Get the file back from the BufReader
         let file = reader.into_inner();
