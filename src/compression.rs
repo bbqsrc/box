@@ -47,8 +47,9 @@ pub struct ByteCount {
     pub write: u64,
 }
 
-#[derive(Clone, Copy, Eq, PartialEq)]
+#[derive(Clone, Copy, Eq, PartialEq, Default)]
 pub enum Compression {
+    #[default]
     Stored,
     Deflate,
     Zstd,
@@ -56,12 +57,6 @@ pub enum Compression {
     Snappy,
     Brotli,
     Unknown(u8),
-}
-
-impl Default for Compression {
-    fn default() -> Self {
-        Self::Stored
-    }
 }
 
 impl Compression {

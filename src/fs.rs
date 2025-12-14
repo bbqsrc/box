@@ -77,25 +77,25 @@ pub fn metadata_to_attrs(
     let mut attrs = HashMap::new();
 
     if timestamps {
-        if let Ok(created) = meta.created() {
-            if let Ok(duration) = created.duration_since(std::time::SystemTime::UNIX_EPOCH) {
-                let minutes = (duration.as_secs() as i64 - BOX_EPOCH_UNIX) / 60;
-                attrs.insert("created".into(), Vi64::new(minutes).as_slice().to_vec());
-            }
+        if let Ok(created) = meta.created()
+            && let Ok(duration) = created.duration_since(std::time::SystemTime::UNIX_EPOCH)
+        {
+            let minutes = (duration.as_secs() as i64 - BOX_EPOCH_UNIX) / 60;
+            attrs.insert("created".into(), Vi64::new(minutes).as_slice().to_vec());
         }
 
-        if let Ok(modified) = meta.modified() {
-            if let Ok(duration) = modified.duration_since(std::time::SystemTime::UNIX_EPOCH) {
-                let minutes = (duration.as_secs() as i64 - BOX_EPOCH_UNIX) / 60;
-                attrs.insert("modified".into(), Vi64::new(minutes).as_slice().to_vec());
-            }
+        if let Ok(modified) = meta.modified()
+            && let Ok(duration) = modified.duration_since(std::time::SystemTime::UNIX_EPOCH)
+        {
+            let minutes = (duration.as_secs() as i64 - BOX_EPOCH_UNIX) / 60;
+            attrs.insert("modified".into(), Vi64::new(minutes).as_slice().to_vec());
         }
 
-        if let Ok(accessed) = meta.accessed() {
-            if let Ok(duration) = accessed.duration_since(std::time::SystemTime::UNIX_EPOCH) {
-                let minutes = (duration.as_secs() as i64 - BOX_EPOCH_UNIX) / 60;
-                attrs.insert("accessed".into(), Vi64::new(minutes).as_slice().to_vec());
-            }
+        if let Ok(accessed) = meta.accessed()
+            && let Ok(duration) = accessed.duration_since(std::time::SystemTime::UNIX_EPOCH)
+        {
+            let minutes = (duration.as_secs() as i64 - BOX_EPOCH_UNIX) / 60;
+            attrs.insert("accessed".into(), Vi64::new(minutes).as_slice().to_vec());
         }
     }
 
