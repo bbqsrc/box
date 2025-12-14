@@ -769,7 +769,7 @@ The FST Header is 16 bytes and located at the start of the FST section.
 | 0x00 | 4 | `magic` | Magic bytes: `BFST` (0x42 0x46 0x53 0x54) |
 | 0x04 | 1 | `version` | Format version (currently 1) |
 | 0x05 | 3 | `reserved` | Reserved bytes (must be 0) |
-| 0x08 | 8 | `entry_count` | Number of paths indexed (`u64` LE) |
+| 0x08 | 8 | `entry_count` | Number of paths indexed (`u64`) |
 
 Implementations MUST reject FST data where magic bytes do not match or version is unsupported.
 
@@ -779,10 +779,10 @@ The FST Footer is 16 bytes and located at the end of the FST section (last 16 by
 
 | Offset | Size | Field | Description |
 |--------|------|-------|-------------|
-| 0x00 | 4 | `root_id` | Root node ID (`u32` LE, always 0) |
-| 0x04 | 4 | `node_count` | Total number of nodes (`u32` LE) |
-| 0x08 | 4 | `hot_offset` | Hot section start offset (`u32` LE) |
-| 0x0C | 4 | `cold_offset` | Cold section start offset (`u32` LE) |
+| 0x00 | 4 | `root_id` | Root node ID (`u32`, always 0) |
+| 0x04 | 4 | `node_count` | Total number of nodes (`u32`) |
+| 0x08 | 4 | `hot_offset` | Hot section start offset (`u32`) |
+| 0x0C | 4 | `cold_offset` | Cold section start offset (`u32`) |
 
 The `hot_offset` and `cold_offset` are absolute byte offsets from the start of the FST section.
 
@@ -794,8 +794,8 @@ The Node Index is an array of `node_count` entries, with each entry being 8 byte
 
 | Offset | Size | Field | Description |
 |--------|------|-------|-------------|
-| 0x00 | 4 | `hot_offset` | Offset within Hot Section (`u32` LE) |
-| 0x04 | 4 | `cold_offset` | Offset within Cold Section (`u32` LE) |
+| 0x00 | 4 | `hot_offset` | Offset within Hot Section (`u32`) |
+| 0x04 | 4 | `cold_offset` | Offset within Cold Section (`u32`) |
 
 Offsets are relative to the start of their respective sections. Node IDs are indices into this array (node 0 = first entry, node 1 = second entry, etc.).
 
@@ -807,7 +807,7 @@ The Hot Section contains compact node headers optimized for cache efficiency. Ea
 [flags: u8]
 [edge_count: VLQ]
 [lookup_data: variable]
-[offsets: edge_count × u16 LE]
+[offsets: edge_count × u16]
 ```
 
 **Flags Byte:**
@@ -828,7 +828,7 @@ The lookup data format depends on the `INDEXED` flag:
 
 **Offsets Array:**
 
-Array of `edge_count` entries, each a `u16` (little-endian). Each offset points to the corresponding edge's data within this node's cold section data block.
+Array of `edge_count` entries, each a `u16`. Each offset points to the corresponding edge's data within this node's cold section data block.
 
 ### 14.7 Cold Section
 
@@ -839,7 +839,7 @@ For each edge (0 to edge_count-1):
     [label_len: VLQ]
     [label: label_len bytes]
     [output: VLQ]
-    [target_node: u32 LE]
+    [target_node: u32]
 
 If IS_FINAL flag is set:
     [final_output: VLQ]
@@ -852,7 +852,7 @@ If IS_FINAL flag is set:
 | `label_len` | VLQ | Length of edge label in bytes |
 | `label` | bytes | Edge label (arbitrary byte sequence) |
 | `output` | VLQ | Output value to accumulate (`u64`) |
-| `target_node` | `u32` LE | Target node ID |
+| `target_node` | `u32` | Target node ID |
 
 **Final Output:**
 
