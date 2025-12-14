@@ -87,10 +87,9 @@ impl<'a> BoxPath<'a> {
     }
 
     pub fn parent(&self) -> Option<BoxPath<'_>> {
-        match self.0.rfind(PATH_BOX_SEP) {
-            Some(pos) => Some(BoxPath(Cow::Borrowed(&self.0[..pos]))),
-            None => None,
-        }
+        self.0
+            .rfind(PATH_BOX_SEP)
+            .map(|pos| BoxPath(Cow::Borrowed(&self.0[..pos])))
     }
 
     pub fn filename(&self) -> &str {

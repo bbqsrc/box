@@ -327,15 +327,17 @@ impl BoxFileWriter {
         // Set archive-level uid/gid defaults from first file if not already set
         if let Some(uid) = attrs.get("unix.uid") {
             let uid_key = self.meta.attr_key_or_create("unix.uid");
-            if !self.meta.attrs.contains_key(&uid_key) {
-                self.meta.attrs.insert(uid_key, uid.clone());
-            }
+            self.meta
+                .attrs
+                .entry(uid_key)
+                .or_insert_with(|| uid.clone());
         }
         if let Some(gid) = attrs.get("unix.gid") {
             let gid_key = self.meta.attr_key_or_create("unix.gid");
-            if !self.meta.attrs.contains_key(&gid_key) {
-                self.meta.attrs.insert(gid_key, gid.clone());
-            }
+            self.meta
+                .attrs
+                .entry(gid_key)
+                .or_insert_with(|| gid.clone());
         }
 
         // Get archive defaults for filtering
@@ -352,20 +354,18 @@ impl BoxFileWriter {
         let mut result = HashMap::new();
         for (k, v) in attrs {
             // Skip uid if matches archive default
-            if k == "unix.uid" {
-                if let Some(ref default) = default_uid {
-                    if &v == default {
-                        continue;
-                    }
-                }
+            if k == "unix.uid"
+                && let Some(ref default) = default_uid
+                && &v == default
+            {
+                continue;
             }
             // Skip gid if matches archive default
-            if k == "unix.gid" {
-                if let Some(ref default) = default_gid {
-                    if &v == default {
-                        continue;
-                    }
-                }
+            if k == "unix.gid"
+                && let Some(ref default) = default_gid
+                && &v == default
+            {
+                continue;
             }
             let key = self.meta.attr_key_or_create(&k);
             result.insert(key, v);
@@ -453,10 +453,10 @@ impl BoxFileWriter {
         attrs: HashMap<String, Vec<u8>>,
     ) -> std::io::Result<()> {
         // First ensure all parent directories exist
-        if let Some(parent) = path.parent() {
-            if self.meta.index(&parent).is_none() {
-                self.mkdir_all(parent.into_owned(), HashMap::new())?;
-            }
+        if let Some(parent) = path.parent()
+            && self.meta.index(&parent).is_none()
+        {
+            self.mkdir_all(parent.into_owned(), HashMap::new())?;
         }
 
         // Now create this directory if it doesn't exist
@@ -824,10 +824,10 @@ impl BoxFileWriter {
             let box_path = BoxPath::new(&file_path)?;
 
             // Ensure parent directories exist
-            if let Some(parent) = box_path.parent() {
-                if self.meta.index(&parent).is_none() {
-                    self.mkdir_all(parent, HashMap::new())?;
-                }
+            if let Some(parent) = box_path.parent()
+                && self.meta.index(&parent).is_none()
+            {
+                self.mkdir_all(parent, HashMap::new())?;
             }
 
             if file_type.is_symlink() {
@@ -864,10 +864,10 @@ impl BoxFileWriter {
                 let config = options.config.for_size(meta.len());
 
                 // Ensure parent exists
-                if let Some(parent) = box_path.parent() {
-                    if self.meta.index(&parent).is_none() {
-                        self.mkdir_all(parent, HashMap::new())?;
-                    }
+                if let Some(parent) = box_path.parent()
+                    && self.meta.index(&parent).is_none()
+                {
+                    self.mkdir_all(parent, HashMap::new())?;
                 }
 
                 let file = tokio::fs::File::open(&file_path).await?;
@@ -962,12 +962,11 @@ impl BoxFileWriter {
         // Build parent index cache for O(1) lookups (avoids O(depth) path traversal per file)
         let mut parent_cache: HashMap<BoxPath<'static>, RecordIndex> = HashMap::new();
         for job in &files {
-            if let Some(parent) = job.box_path.parent() {
-                if !parent_cache.contains_key(&parent) {
-                    if let Some(idx) = self.meta.index(&parent) {
-                        parent_cache.insert(parent.into_owned(), idx);
-                    }
-                }
+            if let Some(parent) = job.box_path.parent()
+                && !parent_cache.contains_key(&parent)
+                && let Some(idx) = self.meta.index(&parent)
+            {
+                parent_cache.insert(parent.into_owned(), idx);
             }
         }
 

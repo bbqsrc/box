@@ -59,7 +59,7 @@ mod tests {
 
     #[test]
     fn test_null_checksum() {
-        let mut hasher = NullChecksum::default();
+        let mut hasher = NullChecksum;
         Digest::update(&mut hasher, b"hello world");
         let result = hasher.finalize();
         assert_eq!(result.len(), 0);

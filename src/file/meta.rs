@@ -12,6 +12,7 @@ use crate::file::RecordIndex;
 use crate::path::BoxPath;
 use crate::record::DirectoryRecord;
 
+#[derive(Default)]
 pub struct BoxMetadata<'a> {
     /// Root "directory" keyed by record indices
     pub(crate) root: Vec<RecordIndex>,
@@ -40,18 +41,6 @@ impl std::fmt::Debug for BoxMetadata<'_> {
             .field("attrs", &self.attrs)
             .field("fst", &self.fst.as_ref().map(|f| f.len()))
             .finish()
-    }
-}
-
-impl Default for BoxMetadata<'static> {
-    fn default() -> Self {
-        Self {
-            root: Vec::new(),
-            records: Vec::new(),
-            attr_keys: DefaultStringInterner::default(),
-            attrs: AttrMap::new(),
-            fst: None,
-        }
     }
 }
 
@@ -301,15 +290,15 @@ impl<'a> BoxMetadata<'a> {
     #[inline(always)]
     pub fn dir_records_by_index(&self, dir_index: RecordIndex) -> Vec<(RecordIndex, &Record<'a>)> {
         // First check if tree is populated
-        if let Some(Record::Directory(dir)) = self.record(dir_index) {
-            if !dir.entries.is_empty() {
-                return dir
-                    .entries
-                    .iter()
-                    .copied()
-                    .filter_map(|x| self.record(x).map(|r| (x, r)))
-                    .collect();
-            }
+        if let Some(Record::Directory(dir)) = self.record(dir_index)
+            && !dir.entries.is_empty()
+        {
+            return dir
+                .entries
+                .iter()
+                .copied()
+                .filter_map(|x| self.record(x).map(|r| (x, r)))
+                .collect();
         }
 
         // Use FST - need to find the directory's path first

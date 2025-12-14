@@ -534,10 +534,7 @@ impl BoxFileReader {
             let tx = tx.clone();
             let progress = progress.clone();
             let permit = semaphore.clone().acquire_owned().await.map_err(|e| {
-                ExtractError::DecompressionFailed(
-                    std::io::Error::new(std::io::ErrorKind::Other, e),
-                    box_path.to_path_buf(),
-                )
+                ExtractError::DecompressionFailed(std::io::Error::other(e), box_path.to_path_buf())
             })?;
 
             let archive_path = archive_path.clone();
@@ -713,15 +710,10 @@ impl BoxFileReader {
 
         for item in self.meta.iter() {
             if let Record::File(f) = item.record {
-                let expected_hash = item.record.attr(self.metadata(), "blake3");
-                if expected_hash.is_none() {
-                    files_without_checksum += 1;
+                if let Some(expected_hash) = item.record.attr(self.metadata(), "blake3") {
+                    files.push((item.path.clone(), f.clone(), expected_hash.to_vec()));
                 } else {
-                    files.push((
-                        item.path.clone(),
-                        f.clone(),
-                        expected_hash.unwrap().to_vec(),
-                    ));
+                    files_without_checksum += 1;
                 }
             }
         }
@@ -945,21 +937,21 @@ impl BoxFileReader {
                 stats.bytes_written += file.decompressed_length;
 
                 // Verify checksum if requested
-                if options.verify_checksums {
-                    if let Some(expected_hash) = record.attr(self.metadata(), "blake3") {
-                        let actual_hash = compute_file_blake3(&out_path).await.map_err(|e| {
-                            ExtractError::VerificationFailed(e, out_path.to_path_buf())
-                        })?;
+                if options.verify_checksums
+                    && let Some(expected_hash) = record.attr(self.metadata(), "blake3")
+                {
+                    let actual_hash = compute_file_blake3(&out_path)
+                        .await
+                        .map_err(|e| ExtractError::VerificationFailed(e, out_path.to_path_buf()))?;
 
-                        if actual_hash.as_bytes() != expected_hash {
-                            tracing::warn!(
-                                "Checksum mismatch for {}: expected {}, got {}",
-                                path,
-                                hex::encode(expected_hash),
-                                hex::encode(actual_hash.as_bytes())
-                            );
-                            stats.checksum_failures += 1;
-                        }
+                    if actual_hash.as_bytes() != expected_hash {
+                        tracing::warn!(
+                            "Checksum mismatch for {}: expected {}, got {}",
+                            path,
+                            hex::encode(expected_hash),
+                            hex::encode(actual_hash.as_bytes())
+                        );
+                        stats.checksum_failures += 1;
                     }
                 }
 
@@ -1113,8 +1105,10 @@ async fn extract_single_file(
     let cursor = std::io::Cursor::new(data);
     let buf_reader = tokio::io::BufReader::new(cursor);
 
-    let mut stats = ExtractStats::default();
-    stats.files_extracted = 1;
+    let mut stats = ExtractStats {
+        files_extracted: 1,
+        ..Default::default()
+    };
 
     // Decompress with optional inline checksum verification
     if verify_checksum && expected_hash.is_some() {
@@ -1137,16 +1131,16 @@ async fn extract_single_file(
 
         // Verify checksum
         let actual_hash = hashing_writer.finalize_bytes();
-        if let Some(expected) = expected_hash {
-            if actual_hash != expected {
-                tracing::warn!(
-                    "Checksum mismatch for {}: expected {}, got {}",
-                    box_path,
-                    hex::encode(expected),
-                    hex::encode(&actual_hash)
-                );
-                stats.checksum_failures = 1;
-            }
+        if let Some(expected) = expected_hash
+            && actual_hash != expected
+        {
+            tracing::warn!(
+                "Checksum mismatch for {}: expected {}, got {}",
+                box_path,
+                hex::encode(expected),
+                hex::encode(&actual_hash)
+            );
+            stats.checksum_failures = 1;
         }
     } else {
         let mut out_file = tokio::io::BufWriter::new(out_file);

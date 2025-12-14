@@ -26,7 +26,7 @@ The `.box` file format and related tooling is designed to be a modern successor 
 <tr><td>🌐<td><strong>UTF-8 only, Unicode normalised</strong> path names and string data
 <tr><td>👩‍🚀<td>Extensible with <strong>space-efficient attributes in key-value pairs</strong> for records and whole archives
 <tr><td>↔️<td>Configurable optional <strong>byte-alignment of files</strong> to enable easy memory mapping
-<tr><td>💽<td><strong>Index-based metadata</strong> for tree-based structuring, mapping closely to how filesystems work
+<tr><td>💽<td><strong>FST-based path index</strong> for fast O(m) lookups and efficient prefix queries
 <tr><td>📁<td>Support for <strong>directories, files and links</strong>
 <tr><td>🗜️<td><strong>Multiple compression methods</strong> within a single archive
 <tr><td>🔒<td><strong>BLAKE3 checksums</strong> for data integrity verification

@@ -322,11 +322,9 @@ impl<D: AsRef<[u8]>> Fst<D> {
                     .wrapping_add(self.header.hot_offset() + next_idx.hot_offset as usize),
             );
 
-            if match_len >= remaining.len() {
-                if match_len < edge.label.len() {
-                    key_buffer.extend_from_slice(edge.label);
-                    return Some((edge.target_node_id, output_sum));
-                }
+            if match_len >= remaining.len() && match_len < edge.label.len() {
+                key_buffer.extend_from_slice(edge.label);
+                return Some((edge.target_node_id, output_sum));
             }
 
             key_buffer.extend_from_slice(edge.label);
@@ -413,11 +411,9 @@ impl<'a, D: AsRef<[u8]>> PrefixIter<'a, D> {
                     .wrapping_add(self.fst.header.hot_offset() + next_idx.hot_offset as usize),
             );
 
-            if match_len >= remaining.len() {
-                if match_len < edge.label.len() {
-                    self.key_buffer.extend_from_slice(edge.label);
-                    return Some((edge.target_node_id, output_sum));
-                }
+            if match_len >= remaining.len() && match_len < edge.label.len() {
+                self.key_buffer.extend_from_slice(edge.label);
+                return Some((edge.target_node_id, output_sum));
             }
 
             self.key_buffer.extend_from_slice(edge.label);
