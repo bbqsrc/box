@@ -25,6 +25,10 @@ pub struct BoxMetadata<'a> {
 
     /// The global attributes that apply to this entire box file.
     pub(crate) attrs: AttrMap,
+
+    /// Parsed FST for O(key_length) path lookups and iteration.
+    /// None for old archives without FST support.
+    pub(crate) fst: Option<box_fst::Fst<Cow<'a, [u8]>>>,
 }
 
 impl std::fmt::Debug for BoxMetadata<'_> {
@@ -34,6 +38,7 @@ impl std::fmt::Debug for BoxMetadata<'_> {
             .field("records", &self.records)
             .field("attr_keys", &self.attr_keys.len())
             .field("attrs", &self.attrs)
+            .field("fst", &self.fst.as_ref().map(|f| f.len()))
             .finish()
     }
 }
@@ -45,6 +50,7 @@ impl Default for BoxMetadata<'static> {
             records: Vec::new(),
             attr_keys: DefaultStringInterner::default(),
             attrs: AttrMap::new(),
+            fst: None,
         }
     }
 }
@@ -124,6 +130,55 @@ impl<'a, 'b> Iterator for Records<'a, 'b> {
     }
 }
 
+/// Iterator over records using FST.
+pub struct FstRecordsIterator<'a, 'b> {
+    meta: &'a BoxMetadata<'b>,
+    inner: box_fst::PrefixIter<'a, Cow<'b, [u8]>>,
+}
+
+impl<'a, 'b> Iterator for FstRecordsIterator<'a, 'b> {
+    type Item = RecordsItem<'a, 'b>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        for (path_bytes, idx) in self.inner.by_ref() {
+            let Some(index) = RecordIndex::new(idx).ok() else {
+                continue;
+            };
+            let Some(record) = self.meta.record(index) else {
+                continue;
+            };
+            let Ok(path_str) = std::str::from_utf8(&path_bytes) else {
+                continue;
+            };
+            return Some(RecordsItem {
+                index,
+                path: BoxPath(Cow::Owned(path_str.to_string())),
+                record,
+            });
+        }
+        None
+    }
+}
+
+/// Iterator over metadata records - either tree-based or FST-based.
+pub enum MetadataIter<'a, 'b> {
+    Tree(Records<'a, 'b>),
+    Fst(FstRecordsIterator<'a, 'b>),
+    Empty,
+}
+
+impl<'a, 'b> Iterator for MetadataIter<'a, 'b> {
+    type Item = RecordsItem<'a, 'b>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            MetadataIter::Tree(iter) => iter.next(),
+            MetadataIter::Fst(iter) => iter.next(),
+            MetadataIter::Empty => None,
+        }
+    }
+}
+
 pub struct FindRecord<'a, 'b> {
     meta: &'a BoxMetadata<'a>,
     query: VecDeque<&'b str>,
@@ -181,32 +236,118 @@ impl<'a, 'b> Iterator for FindRecord<'a, 'b> {
 }
 
 impl<'a> BoxMetadata<'a> {
-    #[inline(always)]
-    pub fn iter(&self) -> Records<'_, 'a> {
-        Records::new(self, &self.root, None)
+    /// Iterate over all records in the archive.
+    ///
+    /// For new archives with FST, this iterates FST entries lazily.
+    /// For old archives without FST, this uses tree traversal.
+    pub fn iter(&self) -> MetadataIter<'_, 'a> {
+        if !self.root.is_empty() {
+            MetadataIter::Tree(Records::new(self, &self.root, None))
+        } else if let Some(fst) = &self.fst {
+            MetadataIter::Fst(FstRecordsIterator {
+                meta: self,
+                inner: fst.prefix_iter(&[]),
+            })
+        } else {
+            MetadataIter::Empty
+        }
     }
 
     #[inline(always)]
     pub fn root_records(&self) -> Vec<(RecordIndex, &Record<'a>)> {
-        self.root
-            .iter()
-            .copied()
-            .filter_map(|x| self.record(x).map(|r| (x, r)))
-            .collect()
+        // Use tree if populated (old archives or during writing)
+        if !self.root.is_empty() {
+            return self
+                .root
+                .iter()
+                .copied()
+                .filter_map(|x| self.record(x).map(|r| (x, r)))
+                .collect();
+        }
+
+        // Use FST for new archives (empty root on disk)
+        if let Some(fst) = &self.fst {
+            return fst
+                .prefix_iter(&[])
+                .filter(|(key, _)| !key.contains(&0x1f)) // No separator = root level
+                .filter_map(|(_, idx)| {
+                    let index = RecordIndex::new(idx).ok()?;
+                    self.record(index).map(|r| (index, r))
+                })
+                .collect();
+        }
+
+        Vec::new()
     }
 
     #[inline(always)]
     pub fn dir_records(&self, dir_record: &DirectoryRecord<'_>) -> Vec<(RecordIndex, &Record<'a>)> {
-        dir_record
-            .entries
-            .iter()
-            .copied()
-            .filter_map(|x| self.record(x).map(|r| (x, r)))
+        // Use tree if populated (old archives or during writing)
+        if !dir_record.entries.is_empty() {
+            return dir_record
+                .entries
+                .iter()
+                .copied()
+                .filter_map(|x| self.record(x).map(|r| (x, r)))
+                .collect();
+        }
+
+        // For new archives with FST, we need the directory's path
+        // This requires the caller to use dir_records_by_index instead
+        Vec::new()
+    }
+
+    /// Get directory children by record index (works with FST).
+    #[inline(always)]
+    pub fn dir_records_by_index(&self, dir_index: RecordIndex) -> Vec<(RecordIndex, &Record<'a>)> {
+        // First check if tree is populated
+        if let Some(Record::Directory(dir)) = self.record(dir_index) {
+            if !dir.entries.is_empty() {
+                return dir
+                    .entries
+                    .iter()
+                    .copied()
+                    .filter_map(|x| self.record(x).map(|r| (x, r)))
+                    .collect();
+            }
+        }
+
+        // Use FST - need to find the directory's path first
+        let Some(fst) = &self.fst else {
+            return Vec::new();
+        };
+
+        // Find the directory's path by searching FST for this index
+        let dir_path: Option<Vec<u8>> = fst
+            .prefix_iter(&[])
+            .find(|(_, idx)| *idx == dir_index.get())
+            .map(|(path, _)| path);
+
+        let Some(mut prefix) = dir_path else {
+            return Vec::new();
+        };
+        prefix.push(0x1f); // Add separator for children
+
+        // Find all direct children (paths starting with prefix, no more separators)
+        fst.prefix_iter(&prefix)
+            .filter(|(key, _)| !key[prefix.len()..].contains(&0x1f))
+            .filter_map(|(_, idx)| {
+                let index = RecordIndex::new(idx).ok()?;
+                self.record(index).map(|r| (index, r))
+            })
             .collect()
     }
 
     #[inline(always)]
     pub fn index(&self, path: &BoxPath<'_>) -> Option<RecordIndex> {
+        // Try FST first (O(key_length))
+        if let Some(fst) = &self.fst {
+            let path_bytes: &[u8] = path.as_ref();
+            if let Some(value) = fst.get(path_bytes) {
+                return std::num::NonZeroU64::new(value).map(RecordIndex);
+            }
+        }
+        // Fall back to directory traversal (O(depth × entries))
         FindRecord::new(self, path.iter().collect(), &self.root).next()
     }
 
@@ -243,13 +384,29 @@ impl<'a> BoxMetadata<'a> {
         for (sym, key) in self.attr_keys.iter() {
             let k = sym.to_usize();
             if let Some(v) = self.attrs.get(&k) {
-                let value = std::str::from_utf8(v)
-                    .map(|v| {
-                        serde_json::from_str(v)
-                            .map(AttrValue::Json)
-                            .unwrap_or(AttrValue::String(v))
-                    })
-                    .unwrap_or(AttrValue::Bytes(v));
+                // Known binary attribute types - don't try to interpret as string
+                let is_binary_attr = matches!(
+                    key,
+                    "unix.mode"
+                        | "unix.uid"
+                        | "unix.gid"
+                        | "created"
+                        | "modified"
+                        | "accessed"
+                        | "blake3"
+                );
+
+                let value = if is_binary_attr {
+                    AttrValue::Bytes(v)
+                } else {
+                    std::str::from_utf8(v)
+                        .map(|v| {
+                            serde_json::from_str(v)
+                                .map(AttrValue::Json)
+                                .unwrap_or(AttrValue::String(v))
+                        })
+                        .unwrap_or(AttrValue::Bytes(v))
+                };
                 map.insert(key, value);
             }
         }
@@ -264,6 +421,20 @@ impl<'a> BoxMetadata<'a> {
         self.attrs.get(&key)
     }
 
+    /// Get all attribute keys used in this archive (both file-level and record-level).
+    pub fn attr_keys(&self) -> Vec<&str> {
+        self.attr_keys.iter().map(|(_, key)| key).collect()
+    }
+
+    /// Get all attribute keys with their indices.
+    pub fn attr_keys_with_indices(&self) -> Vec<(usize, &str)> {
+        use string_interner::Symbol;
+        self.attr_keys
+            .iter()
+            .map(|(sym, key)| (sym.to_usize(), key))
+            .collect()
+    }
+
     /// O(1) lookup of attribute key index.
     #[inline(always)]
     pub fn attr_key(&self, key: &str) -> Option<usize> {
@@ -274,6 +445,18 @@ impl<'a> BoxMetadata<'a> {
     #[inline(always)]
     pub fn attr_key_or_create(&mut self, key: &str) -> usize {
         self.attr_keys.get_or_intern(key).to_usize()
+    }
+
+    /// Get the raw archive-level attrs map (for debugging).
+    pub fn raw_attrs(&self) -> &AttrMap {
+        &self.attrs
+    }
+
+    /// Resolve an attribute key index to its string name.
+    pub fn attr_key_name(&self, idx: usize) -> Option<&str> {
+        use string_interner::Symbol;
+        let sym = string_interner::DefaultSymbol::try_from_usize(idx)?;
+        self.attr_keys.resolve(sym)
     }
 }
 

@@ -64,6 +64,18 @@ pub struct CreateArgs {
     #[arg(long)]
     pub no_checksum: bool,
 
+    /// Store file timestamps (created, modified, accessed)
+    #[arg(long)]
+    pub timestamps: bool,
+
+    /// Store file ownership (uid, gid)
+    #[arg(long)]
+    pub ownership: bool,
+
+    /// Preserve all file metadata (implies --timestamps --ownership)
+    #[arg(short = 'A', long)]
+    pub archive_metadata: bool,
+
     /// Include hidden files
     #[arg(short = 'a', long = "all")]
     pub include_hidden: bool,
@@ -152,6 +164,9 @@ pub struct ListArgs {
 pub struct InfoArgs {
     /// Path to the .box archive
     pub archive: PathBuf,
+
+    /// Optional file path within the archive to show info for
+    pub file: Option<String>,
 }
 
 #[derive(Debug, clap::Args)]

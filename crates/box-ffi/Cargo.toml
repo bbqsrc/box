@@ -1,0 +1,17 @@
+[package]
+name = "box-ffi"
+description = "FFI bindings for the Box archive format"
+version = "0.4.0"
+authors = ["Brendan Molloy <brendan@bbqsrc.net>"]
+edition = "2024"
+license = "Apache-2.0 OR MIT"
+repository = "https://github.com/bbqsrc/box"
+
+[lib]
+crate-type = ["cdylib", "staticlib"]
+
+[dependencies]
+box-format = { workspace = true }
+cffi = { workspace = true }
+libc = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread"] }

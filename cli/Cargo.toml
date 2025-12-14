@@ -12,26 +12,27 @@ name = "box"
 path = "src/main.rs"
 
 [dependencies]
-box-format = { version = "0.4.0", path = ".." }
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs"] }
-async-walkdir = "2.1.0"
-futures = "0.3"
-clap = { version = "4", features = ["derive"] }
-indicatif = "0.18.3"
-glob = "0.3"
-humansize = { version = "2.1.3", features = ["impl_style"] }
-byteorder = "1.3.4"
-chrono = "0.4.15"
-blake3 = { version = "1", features = ["digest"] }
-thiserror = "2.0.17"
-miette = { version = "7", features = ["fancy"] }
-tracing = "0.1.19"
-tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
-wild = "2.0.4"
-serde = { version = "1", features = ["derive"] }
-serde_json = "1.0.64"
-textwrap = "0.16.2"
-num_cpus = "1.16"
+box-format.workspace = true
+fastvlq.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "fs"] }
+async-walkdir.workspace = true
+futures.workspace = true
+clap.workspace = true
+indicatif.workspace = true
+glob.workspace = true
+humansize.workspace = true
+byteorder.workspace = true
+chrono.workspace = true
+blake3 = { workspace = true, features = ["digest"] }
+thiserror.workspace = true
+miette.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+wild.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+textwrap.workspace = true
+num_cpus.workspace = true
 
 [features]
 default = []

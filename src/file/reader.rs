@@ -290,6 +290,43 @@ impl BoxFileReader {
         &self.meta
     }
 
+    #[inline(always)]
+    pub fn trailer_size(&self) -> u64 {
+        self.trailer_segment.len()
+    }
+
+    /// Get an attribute value with fallback to archive-level attributes.
+    ///
+    /// Checks: record attr -> archive attr -> None
+    pub fn get_attr<'a>(&'a self, record: &'a Record<'_>, key: &str) -> Option<&'a [u8]> {
+        // Try record-level attr first
+        if let Some(value) = record.attr(&self.meta, key) {
+            return Some(value);
+        }
+        // Fall back to archive-level attr
+        self.meta.file_attr(key).map(|v| v.as_slice())
+    }
+
+    /// Get the unix mode for a record, with fallback to defaults.
+    ///
+    /// Checks: record attr -> archive attr -> default (0o644 for files, 0o755 for dirs)
+    #[cfg(unix)]
+    pub fn get_mode(&self, record: &Record<'_>) -> u32 {
+        use fastvlq::ReadVlqExt;
+
+        if let Some(mode_bytes) = self.get_attr(record, "unix.mode") {
+            let mut cursor = std::io::Cursor::new(mode_bytes);
+            if let Ok(mode) = cursor.read_vu32() {
+                return mode;
+            }
+        }
+        // Default based on record type
+        match record {
+            Record::Directory(_) => crate::fs::DEFAULT_DIR_MODE,
+            _ => crate::fs::DEFAULT_FILE_MODE,
+        }
+    }
+
     pub async fn decompress<W: tokio::io::AsyncWrite + Unpin>(
         &self,
         record: &FileRecord<'_>,
@@ -465,18 +502,9 @@ impl BoxFileReader {
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;
-                if let Some(mode_bytes) = record.attr(self.metadata(), "unix.mode") {
-                    if mode_bytes.len() == 4 {
-                        let mode = u32::from_le_bytes([
-                            mode_bytes[0],
-                            mode_bytes[1],
-                            mode_bytes[2],
-                            mode_bytes[3],
-                        ]);
-                        let permissions = std::fs::Permissions::from_mode(mode);
-                        fs::set_permissions(&new_dir, permissions).await.ok();
-                    }
-                }
+                let mode = self.get_mode(&record);
+                let permissions = std::fs::Permissions::from_mode(mode);
+                fs::set_permissions(&new_dir, permissions).await.ok();
             }
 
             stats.dirs_created += 1;
@@ -818,16 +846,9 @@ impl BoxFileReader {
                 #[cfg(unix)]
                 {
                     use std::os::unix::fs::PermissionsExt;
-
-                    let mode: Option<u32> = record
-                        .attr(self.metadata(), "unix.mode")
-                        .filter(|x| x.len() == 4)
-                        .map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]));
-
-                    if let Some(mode) = mode {
-                        let permissions = std::fs::Permissions::from_mode(mode);
-                        fs::set_permissions(&out_path, permissions).await.ok();
-                    }
+                    let mode = self.get_mode(record);
+                    let permissions = std::fs::Permissions::from_mode(mode);
+                    fs::set_permissions(&out_path, permissions).await.ok();
                 }
 
                 let out_file = tokio::io::BufWriter::new(out_file);
@@ -903,16 +924,9 @@ impl BoxFileReader {
                 #[cfg(unix)]
                 {
                     use std::os::unix::fs::PermissionsExt;
-
-                    let mode: Option<u32> = record
-                        .attr(self.metadata(), "unix.mode")
-                        .filter(|x| x.len() == 4)
-                        .map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]));
-
-                    if let Some(mode) = mode {
-                        let permissions = std::fs::Permissions::from_mode(mode);
-                        fs::set_permissions(&out_path, permissions).await.ok();
-                    }
+                    let mode = self.get_mode(record);
+                    let permissions = std::fs::Permissions::from_mode(mode);
+                    fs::set_permissions(&out_path, permissions).await.ok();
                 }
 
                 let out_file = tokio::io::BufWriter::new(out_file);

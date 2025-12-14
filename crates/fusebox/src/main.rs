@@ -59,7 +59,7 @@ trait RecordExt {
     fn ctime(&self, meta: &BoxMetadata) -> SystemTime;
 }
 
-impl RecordExt for box_format::Record {
+impl RecordExt for box_format::Record<'_> {
     fn fuse_file_type(&self) -> FileType {
         use box_format::Record::*;
 
@@ -146,19 +146,7 @@ impl Filesystem for BoxFs {
         };
 
         let records = match record_index(parent) {
-            Some(index) => match self
-                .reader
-                .metadata()
-                .record(index)
-                .and_then(|x| x.as_directory())
-                .map(|x| self.reader.metadata().dir_records(x))
-            {
-                Some(v) => v,
-                None => {
-                    reply.error(ENOENT);
-                    return;
-                }
-            },
+            Some(index) => self.reader.metadata().dir_records_by_index(index),
             None => self.reader.metadata().root_records(),
         };
 
@@ -276,19 +264,7 @@ impl Filesystem for BoxFs {
         mut reply: ReplyDirectory,
     ) {
         let records = match record_index(ino) {
-            Some(index) => match self
-                .reader
-                .metadata()
-                .record(index)
-                .and_then(|x| x.as_directory())
-                .map(|x| self.reader.metadata().dir_records(x))
-            {
-                Some(v) => v,
-                None => {
-                    reply.error(ENOENT);
-                    return;
-                }
-            },
+            Some(index) => self.reader.metadata().dir_records_by_index(index),
             None => self.reader.metadata().root_records(),
         };
 

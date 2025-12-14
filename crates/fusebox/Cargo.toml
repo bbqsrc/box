@@ -5,10 +5,10 @@ authors = ["Brendan Molloy <brendan@bbqsrc.net>"]
 edition = "2024"
 
 [dependencies]
-fuser = { git = "https://github.com/cberner/fuser" }
-tokio = { version = "1", features = ["rt"] }
-structopt = "0.3.17"
-box-format = { path = "../.." }
-env_logger = "0.9"
-libc = "0.2.76"
-log = "0.4.11"
+box-format.workspace = true
+fuser.workspace = true
+tokio = { workspace = true, features = ["rt"] }
+structopt.workspace = true
+env_logger.workspace = true
+libc.workspace = true
+log.workspace = true

@@ -1,8 +1,102 @@
-use box_format::{BoxFileReader, Record};
+use std::collections::BTreeMap;
+
+use box_format::{AttrMap, AttrValue, BoxFileReader, BoxMetadata, BoxPath, Record};
+use fastvlq::ReadVlqExt;
 
 use crate::cli::InfoArgs;
 use crate::error::{Error, Result};
-use crate::util::{format_size, format_time};
+use crate::util::{BOX_EPOCH_UNIX, format_size};
+
+/// Resolve a record's attrs map to key names and AttrValue.
+fn resolve_attrs<'a>(
+    attrs: &'a AttrMap,
+    metadata: &'a BoxMetadata<'_>,
+) -> BTreeMap<&'a str, AttrValue<'a>> {
+    let mut map = BTreeMap::new();
+    for (key_idx, value) in attrs {
+        if let Some(key) = metadata.attr_key_name(*key_idx) {
+            let is_binary_attr = matches!(
+                key,
+                "unix.mode"
+                    | "unix.uid"
+                    | "unix.gid"
+                    | "created"
+                    | "modified"
+                    | "accessed"
+                    | "blake3"
+            );
+            let attr_value = if is_binary_attr {
+                AttrValue::Bytes(value)
+            } else {
+                std::str::from_utf8(value)
+                    .map(|v| {
+                        serde_json::from_str(v)
+                            .map(AttrValue::Json)
+                            .unwrap_or(AttrValue::String(v))
+                    })
+                    .unwrap_or(AttrValue::Bytes(value))
+            };
+            map.insert(key, attr_value);
+        }
+    }
+    map
+}
+
+/// Format an attribute with its type annotation and value.
+fn format_attr(key: &str, value: &AttrValue<'_>) -> String {
+    match value {
+        AttrValue::Bytes(bytes) => match key {
+            "blake3" if bytes.len() == 32 => {
+                let hex: String = bytes.iter().map(|b| format!("{:02x}", b)).collect();
+                format!("{}[u256 hex]: {}", key, hex)
+            }
+            "unix.mode" => {
+                let mut cursor = std::io::Cursor::new(*bytes);
+                if let Ok(val) = cursor.read_vu32() {
+                    format!("{}[vu32 oct]: {:o}", key, val)
+                } else {
+                    format!("{}[bytes]: (invalid)", key)
+                }
+            }
+            "unix.uid" | "unix.gid" => {
+                let mut cursor = std::io::Cursor::new(*bytes);
+                if let Ok(val) = cursor.read_vu32() {
+                    format!("{}[vu32]: {}", key, val)
+                } else {
+                    format!("{}[bytes]: (invalid)", key)
+                }
+            }
+            "created" | "modified" | "accessed" => {
+                let mut cursor = std::io::Cursor::new(*bytes);
+                if let Ok(minutes) = cursor.read_vi64() {
+                    let unix_secs = minutes * 60 + BOX_EPOCH_UNIX;
+                    let time =
+                        std::time::UNIX_EPOCH + std::time::Duration::new(unix_secs as u64, 0);
+                    let datetime: chrono::DateTime<chrono::Utc> = time.into();
+                    let formatted = datetime.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+                    format!("{}[vi64 dt]: {}", key, formatted)
+                } else {
+                    format!("{}[bytes]: (invalid)", key)
+                }
+            }
+            _ if bytes.is_empty() => format!("{}[bytes]: (empty)", key),
+            _ => {
+                let hex: String = bytes
+                    .iter()
+                    .map(|b| format!("{:02x}", b))
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                format!("{}[{} bytes]: {}", key, bytes.len(), hex)
+            }
+        },
+        AttrValue::String(s) if s.is_empty() => format!("{}[str]: (empty)", key),
+        AttrValue::String(s) => format!("{}[str]: {}", key, s),
+        AttrValue::Json(json) => {
+            let v = serde_json::to_string(json).unwrap_or_else(|_| format!("{:?}", json));
+            format!("{}[json]: {}", key, v)
+        }
+    }
+}
 
 pub async fn run(args: InfoArgs) -> Result<()> {
     let bf = BoxFileReader::open(&args.archive)
@@ -12,6 +106,109 @@ pub async fn run(args: InfoArgs) -> Result<()> {
             source,
         })?;
 
+    // If a file path is provided, show info for that file
+    if let Some(file_path) = &args.file {
+        return show_file_info(&bf, file_path);
+    }
+
+    // Otherwise show archive info
+    show_archive_info(&bf, &args)
+}
+
+fn show_file_info(bf: &BoxFileReader, file_path: &str) -> Result<()> {
+    let metadata = bf.metadata();
+
+    let box_path = BoxPath::new(file_path).map_err(|source| Error::InvalidPath {
+        path: file_path.into(),
+        source,
+    })?;
+
+    let index = metadata
+        .index(&box_path)
+        .ok_or_else(|| Error::FileNotFound {
+            path: file_path.into(),
+        })?;
+
+    let record = metadata.record(index).ok_or_else(|| Error::FileNotFound {
+        path: file_path.into(),
+    })?;
+
+    println!("Path:  {}", file_path);
+
+    match record {
+        Record::File(f) => {
+            println!("Type:  file");
+            println!("Compression: {}", f.compression);
+            println!(
+                "Size:  {} (compressed: {})",
+                format_size(f.decompressed_length),
+                format_size(f.length)
+            );
+
+            let ratio = if f.decompressed_length == 0 {
+                0.0
+            } else {
+                100.0 - (f.length as f64 / f.decompressed_length as f64 * 100.0)
+            };
+            println!("Ratio: {:.1}%", ratio);
+
+            println!();
+            println!("Record:");
+            println!("  Index:  {}", index.get());
+            println!("  Offset: {:#x}", f.data.get());
+
+            // Show attributes
+            let attrs = resolve_attrs(&f.attrs, metadata);
+            if !attrs.is_empty() {
+                println!();
+                println!("Attributes:");
+                for (key, value) in attrs {
+                    println!("  {}", format_attr(key, &value));
+                }
+            }
+        }
+        Record::Directory(d) => {
+            println!("Type:  directory");
+            println!("Entries: {}", d.entries.len());
+
+            println!();
+            println!("Record:");
+            println!("  Index: {}", index.get());
+
+            // Show attributes
+            let attrs = resolve_attrs(&d.attrs, metadata);
+            if !attrs.is_empty() {
+                println!();
+                println!("Attributes:");
+                for (key, value) in attrs {
+                    println!("  {}", format_attr(key, &value));
+                }
+            }
+        }
+        Record::Link(l) => {
+            println!("Type:   symlink");
+            println!("Target: {}", l.target);
+
+            println!();
+            println!("Record:");
+            println!("  Index: {}", index.get());
+
+            // Show attributes
+            let attrs = resolve_attrs(&l.attrs, metadata);
+            if !attrs.is_empty() {
+                println!();
+                println!("Attributes:");
+                for (key, value) in attrs {
+                    println!("  {}", format_attr(key, &value));
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn show_archive_info(bf: &BoxFileReader, args: &InfoArgs) -> Result<()> {
     let metadata = bf.metadata();
 
     // Count files, directories, and links
@@ -42,10 +239,6 @@ pub async fn run(args: InfoArgs) -> Result<()> {
     };
     println!("Alignment:   {}", alignment);
 
-    if let Some(created) = metadata.file_attr("created") {
-        println!("Created:     {}", format_time(Some(created)));
-    }
-
     println!();
     println!("Contents:");
     println!("  Files:       {}", file_count);
@@ -58,6 +251,7 @@ pub async fn run(args: InfoArgs) -> Result<()> {
     println!("Size:");
     println!("  Original:    {}", format_size(total_size));
     println!("  Compressed:  {}", format_size(total_compressed));
+    println!("  Trailer:     {}", format_size(bf.trailer_size()));
 
     let ratio = if total_size == 0 {
         0.0
@@ -66,20 +260,23 @@ pub async fn run(args: InfoArgs) -> Result<()> {
     };
     println!("  Ratio:       {:.1}%", ratio);
 
-    // Show file attributes if any (excluding created which we already showed)
-    let mut attrs = metadata.file_attrs();
-    attrs.remove("created");
+    // Show all attribute keys used in the archive (with indices)
+    let all_keys = metadata.attr_keys_with_indices();
+    if !all_keys.is_empty() {
+        println!();
+        println!("Attribute keys:");
+        for (idx, key) in all_keys {
+            println!("  {}: {}", idx, key);
+        }
+    }
 
+    // Show file-level (archive) attributes if any
+    let attrs = metadata.file_attrs();
     if !attrs.is_empty() {
         println!();
-        println!("Attributes:");
-        for (key, value) in attrs {
-            if let box_format::AttrValue::Json(json) = value {
-                let v = serde_json::to_string(&json).unwrap();
-                println!("  {}: {}", key, v);
-            } else {
-                println!("  {}: {}", key, value);
-            }
+        println!("Archive attributes:");
+        for (key, value) in &attrs {
+            println!("  {}", format_attr(key, value));
         }
     }
 

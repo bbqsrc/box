@@ -8,35 +8,34 @@ license = "Apache-2.0 OR MIT"
 repository = "https://github.com/bbqsrc/box"
 
 [lib]
-crate-type = ["cdylib", "rlib", "staticlib"]
+crate-type = ["rlib"]
 
 [dependencies]
-byteorder = "1.3.4"
-mmap-io = { version = "0.9.4", features = ["async"] }
-tokio = { version = "1", features = ["fs", "io-util", "sync"] }
-tokio-util = { version = "0.7", features = ["compat"] }
-async-compression = { version = "0.4.36", default-features = false, features = ["tokio"] }
-tokio-snappy = { version = "0.2.0", optional = true }
-async-walkdir = "2.1.0"
-futures = "0.3"
-blake3 = { version = "1", features = ["traits-preview"] }
-hex = "0.4"
-pathdiff = "0.2.0"
-unic-normal = "0.9.0"
-unic-ucd = "0.9.0"
-relative-path = "2.0.1"
-fastvlq = { git = "https://github.com/bbqsrc/fastvlq", features = ["async-tokio"] }
-cffi = { version = "0.1", optional = true }
-libc = { version = "0.2.79", optional = true }
-log = "0.4.11"
-tracing = "0.1.21"
-serde_json = "1.0.64"
-thiserror = "2.0.17"
-pin-project-lite = "0.2"
-digest = "0.10"
-sysinfo = "0.37.2"
-tempfile = "3"
-string-interner = "0.19.0"
+box-fst.workspace = true
+byteorder.workspace = true
+mmap-io.workspace = true
+tokio = { workspace = true, features = ["fs", "io-util", "sync"] }
+tokio-util = { workspace = true, features = ["compat"] }
+async-compression.workspace = true
+tokio-snappy = { workspace = true, optional = true }
+async-walkdir.workspace = true
+futures.workspace = true
+blake3 = { workspace = true, features = ["traits-preview"] }
+hex.workspace = true
+pathdiff.workspace = true
+unic-normal.workspace = true
+unic-ucd.workspace = true
+relative-path.workspace = true
+fastvlq = { workspace = true, features = ["async-tokio"] }
+log.workspace = true
+tracing.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+pin-project-lite.workspace = true
+digest.workspace = true
+sysinfo.workspace = true
+tempfile.workspace = true
+string-interner.workspace = true
 
 [features]
 default = ["brotli", "xz", "deflate", "zstd", "snappy", "writer", "reader"]
@@ -49,8 +48,70 @@ deflate = ["async-compression/deflate"]
 zstd = ["async-compression/zstd"]
 snappy = ["tokio-snappy"]
 
-ffi = ["libc", "cffi"]
-
 [workspace]
 resolver = "3"
-members = ["cli", "crates/fusebox", "box-fst"]
+members = ["cli", "crates/*"]
+
+[workspace.dependencies]
+# Shared dependencies
+tokio = { version = "1", default-features = false }
+tokio-util = { version = "0.7", default-features = false }
+futures = "0.3"
+async-walkdir = "2.1.0"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+byteorder = "1.3.4"
+fastvlq = { git = "https://github.com/bbqsrc/fastvlq" }
+
+# Error handling
+thiserror = "2"
+miette = { version = "7", features = ["fancy"] }
+
+# Logging/tracing
+log = "0.4"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
+env_logger = "0.9"
+
+# Crypto/hashing
+blake3 = "1"
+
+# Compression
+async-compression = { version = "0.4", default-features = false, features = ["tokio"] }
+tokio-snappy = { version = "0.2.0" }
+
+# System
+libc = "0.2"
+sysinfo = "0.37"
+tempfile = "3"
+num_cpus = "1.16"
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+indicatif = "0.18"
+glob = "0.3"
+humansize = { version = "2.1", features = ["impl_style"] }
+chrono = "0.4"
+wild = "2.0"
+textwrap = "0.16"
+
+# Other
+mmap-io = { version = "0.9.4", features = ["async"] }
+hex = "0.4"
+pathdiff = "0.2"
+unic-normal = "0.9"
+unic-ucd = "0.9"
+relative-path = "2.0"
+cffi = { version = "0.1" }
+pin-project-lite = "0.2"
+digest = "0.10"
+string-interner = "0.19"
+smallvec = "1.13"
+fuser = { git = "https://github.com/cberner/fuser" }
+structopt = "0.3"
+
+# Workspace crates
+box-format = { version = "0.4.0", path = "." }
+box-fst = { version = "0.1.0", path = "crates/fst" }

@@ -209,6 +209,7 @@ impl Serialize for BoxHeader {
         write_u32_le(writer, self.alignment).await?;
         writer.write_all(&[0u8; 4]).await?; // reserved2
         write_u64_le(writer, self.trailer.map(|x| x.get()).unwrap_or(0)).await?;
+        writer.write_all(&[0u8; 8]).await?; // reserved3
         Ok(())
     }
 }

@@ -118,4 +118,7 @@ pub enum Error {
         #[source]
         source: std::io::Error,
     },
+
+    #[error("File not found in archive: `{}`", path.display())]
+    FileNotFound { path: PathBuf },
 }

@@ -251,11 +251,24 @@ impl<'a> DeserializeBorrowed<'a> for BoxMetadata<'a> {
         let attr_keys = DefaultStringInterner::deserialize_borrowed(data, pos)?;
         let attrs = AttrMap::deserialize_borrowed(data, pos)?;
 
+        // Skip 0-padding to 8-byte boundary
+        while *pos < data.len() && data[*pos] == 0 {
+            *pos += 1;
+        }
+
+        // Parse FST from remaining bytes (no length prefix)
+        let fst = if *pos >= data.len() {
+            None // Old archive - no FST
+        } else {
+            box_fst::Fst::new(Cow::Borrowed(&data[*pos..])).ok()
+        };
+
         Ok(BoxMetadata {
             root,
             records,
             attr_keys,
             attrs,
+            fst,
         })
     }
 }
@@ -535,12 +548,37 @@ impl DeserializeOwned for BoxMetadata<'static> {
         let attr_keys = <DefaultStringInterner>::deserialize_owned(reader).await?;
         let attrs = <HashMap<usize, Vec<u8>>>::deserialize_owned(reader).await?;
 
+        // Skip 0-padding to 8-byte boundary
+        loop {
+            let mut byte = [0u8; 1];
+            match reader.read_exact(&mut byte).await {
+                Ok(_) if byte[0] == 0 => continue, // Skip padding
+                Ok(_) => {
+                    // Non-zero byte found, seek back one byte
+                    reader.seek(std::io::SeekFrom::Current(-1)).await?;
+                    break;
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break, // EOF
+                Err(e) => return Err(e),
+            }
+        }
+
+        // Read remaining bytes and parse as FST
+        let mut fst_bytes = Vec::new();
+        reader.read_to_end(&mut fst_bytes).await?;
+        let fst = if fst_bytes.is_empty() {
+            None // Old archive - no FST
+        } else {
+            box_fst::Fst::new(Cow::Owned(fst_bytes)).ok()
+        };
+
         let end = reader.stream_position().await?;
         tracing::debug!(
             start = format_args!("{:#x}", start),
             end = format_args!("{:#x}", end),
             bytes = end - start,
             records = records.len(),
+            fst_size = fst.as_ref().map(|f| f.len()).unwrap_or(0),
             "deserialized BoxMetadata"
         );
 
@@ -549,6 +587,7 @@ impl DeserializeOwned for BoxMetadata<'static> {
             records,
             attr_keys,
             attrs,
+            fst,
         })
     }
 }

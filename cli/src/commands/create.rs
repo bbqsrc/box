@@ -4,11 +4,12 @@ use std::time::{Duration, Instant, SystemTime};
 
 use async_walkdir::WalkDir;
 use box_format::{BoxFileWriter, BoxPath, CompressionConfig, FileJob, ParallelProgress, fs};
+use fastvlq::Vi64;
 use futures::StreamExt;
 
 use crate::cli::CreateArgs;
 use crate::error::{Error, Result};
-use crate::util::{create_spinner, matches_exclude, parse_paths_with_compression};
+use crate::util::{BOX_EPOCH_UNIX, create_spinner, matches_exclude, parse_paths_with_compression};
 
 /// Timing stats for archive creation phases.
 #[derive(Default)]
@@ -79,14 +80,19 @@ pub async fn run(args: CreateArgs) -> Result<()> {
         source,
     })?;
 
-    // Set creation timestamp
-    let now = SystemTime::now()
+    // Calculate effective metadata flags (-A implies both --timestamps and --ownership)
+    let timestamps = args.timestamps || args.archive_metadata;
+    let ownership = args.ownership || args.archive_metadata;
+
+    // Set creation timestamp as Vi64 minutes since Box epoch
+    let unix_secs = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
         .unwrap()
-        .as_secs()
-        .to_le_bytes();
+        .as_secs() as i64;
+    let minutes_since_epoch = (unix_secs - BOX_EPOCH_UNIX) / 60;
+    let now = Vi64::new(minutes_since_epoch);
 
-    bf.set_file_attr("created", now.to_vec())
+    bf.set_file_attr("created", now.as_slice().to_vec())
         .map_err(|source| Error::SetAttribute {
             key: "created".to_string(),
             source,
@@ -195,7 +201,7 @@ pub async fn run(args: CreateArgs) -> Result<()> {
                 }
             }
 
-            let dir_meta = fs::metadata_to_attrs(&dir.meta);
+            let dir_meta = fs::metadata_to_attrs(&dir.meta, timestamps, ownership);
             bf.mkdir(dir.box_path.clone(), dir_meta)
                 .map_err(|source| Error::CreateDirectory {
                     path: dir.box_path.clone(),
@@ -246,7 +252,7 @@ pub async fn run(args: CreateArgs) -> Result<()> {
             }
         }
 
-        let link_meta = fs::metadata_to_attrs(&link.meta);
+        let link_meta = fs::metadata_to_attrs(&link.meta, timestamps, ownership);
 
         if is_dir {
             bf.link(link.box_path.clone(), target_box_path, link_meta)
@@ -298,7 +304,7 @@ pub async fn run(args: CreateArgs) -> Result<()> {
                     source,
                 })?;
 
-            let file_meta = fs::metadata_to_attrs(&file.meta);
+            let file_meta = fs::metadata_to_attrs(&file.meta, timestamps, ownership);
 
             let record = if !args.no_checksum {
                 bf.insert_streaming::<_, blake3::Hasher>(
@@ -413,6 +419,8 @@ pub async fn run(args: CreateArgs) -> Result<()> {
             .add_paths_parallel_with_progress(
                 file_jobs,
                 !args.no_checksum,
+                timestamps,
+                ownership,
                 concurrency,
                 Some(progress_tx),
             )

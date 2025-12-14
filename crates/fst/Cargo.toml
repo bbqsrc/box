@@ -1,0 +1,18 @@
+[package]
+name = "box-fst"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0 OR MIT"
+description = "A radix tree that serializes as an FST for fast path lookups"
+
+[dependencies]
+thiserror.workspace = true
+fastvlq.workspace = true
+
+[dev-dependencies]
+criterion = "0.5"
+rand = "0.8"
+
+[[bench]]
+name = "lookup"
+harness = false

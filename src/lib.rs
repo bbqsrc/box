@@ -16,9 +16,6 @@ mod record;
 #[cfg(feature = "writer")]
 mod ser;
 
-#[cfg(feature = "ffi")]
-pub mod ffi;
-
 pub use self::file::RecordIndex;
 pub use checksum::{Checksum, NullChecksum};
 pub use compression::{ByteCount, Compression, CompressionConfig};

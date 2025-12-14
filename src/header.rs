@@ -8,15 +8,20 @@ pub(crate) struct BoxHeader {
     pub(crate) trailer: Option<NonZeroU64>,
 }
 
+impl BoxHeader {
+    pub const SIZE: usize = 32;
+}
+
 // Make some attempt to not accidentally load plain text files,
 // and also make it break almost immediately in any UTF-8 compliant text parser.
 pub(crate) const MAGIC_BYTES: &[u8; 4] = b"\xffBOX";
+pub const VERSION: u8 = 0;
 
 impl BoxHeader {
     pub(crate) fn new(trailer: Option<NonZeroU64>) -> BoxHeader {
         BoxHeader {
             magic_bytes: *MAGIC_BYTES,
-            version: 0,
+            version: VERSION,
             alignment: 0,
             trailer,
         }

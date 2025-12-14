@@ -1,8 +1,11 @@
 use std::path::Path;
 
 use box_format::{BoxPath, Compression, CompressionConfig};
-use byteorder::{LittleEndian, ReadBytesExt};
+use fastvlq::ReadVlqExt;
 use indicatif::{ProgressBar, ProgressStyle};
+
+/// Box epoch: 2020-01-01 00:00:00 UTC (seconds since Unix epoch)
+pub const BOX_EPOCH_UNIX: i64 = 1577836800;
 
 /// A path with its associated compression configuration
 #[derive(Debug, Clone)]
@@ -81,15 +84,21 @@ pub fn create_spinner(message: &str) -> ProgressBar {
     pb
 }
 
-/// Format a timestamp from bytes
+/// Format a timestamp from bytes (Vi64 minutes since Box epoch)
 pub fn format_time(attr: Option<&[u8]>) -> String {
-    attr.and_then(|mut x| x.read_u64::<LittleEndian>().ok())
-        .map(|x| std::time::UNIX_EPOCH + std::time::Duration::new(x, 0))
-        .map(|x| {
-            let datetime: chrono::DateTime<chrono::Utc> = x.into();
-            datetime.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
-        })
-        .unwrap_or_else(|| "-".into())
+    attr.and_then(|x| {
+        let mut cursor = std::io::Cursor::new(x);
+        cursor.read_vi64().ok()
+    })
+    .map(|minutes| {
+        let unix_seconds = minutes * 60 + BOX_EPOCH_UNIX;
+        std::time::UNIX_EPOCH + std::time::Duration::new(unix_seconds as u64, 0)
+    })
+    .map(|x| {
+        let datetime: chrono::DateTime<chrono::Utc> = x.into();
+        datetime.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+    })
+    .unwrap_or_else(|| "-".into())
 }
 
 /// Format Unix ACL from bytes

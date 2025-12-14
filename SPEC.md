@@ -1,6 +1,6 @@
 # Box Archive Format Specification
 
-**Version:** 0.1.0
+**Version:** 0.1.0  
 **Status:** Draft
 
 ## Table of Contents
@@ -234,7 +234,10 @@ Implementations MUST reject files where the first 4 bytes do not match the magic
 
 ### 5.3 Version
 
-The version field indicates the format version. This specification defines version **1**.
+> [!WARNING]  
+> This section is incomplete. The first stable version of Box will be 1.
+
+The version field indicates the format version. This specification defines version **0**.
 
 Implementations SHOULD reject archives with version numbers they do not support.
 
@@ -584,21 +587,56 @@ This section defines well-known attributes. Implementations MAY define additiona
 
 | Attribute | Format | Description |
 |-----------|--------|-------------|
-| `created` | `i64` | Creation time (Unix timestamp, seconds) |
-| `modified` | `i64` | Modification time (Unix timestamp, seconds) |
-| `accessed` | `i64` | Access time (Unix timestamp, seconds) |
+| `created` | Vi64 | Creation time (minutes since Box epoch) |
+| `modified` | Vi64 | Modification time (minutes since Box epoch) |
+| `accessed` | Vi64 | Access time (minutes since Box epoch) |
 
-Timestamps are stored as signed 64-bit integers representing seconds since the Unix epoch (1970-01-01 00:00:00 UTC). The signed format supports dates before 1970. Sub-second precision is not supported. Implementations that require higher precision MAY define custom attributes.
+**Box Epoch:** 2020-01-01 00:00:00 UTC (Unix timestamp 1577836800).
 
-### 12.2 Unix Permission Attributes
+Timestamps are OPTIONAL and stored as signed variable-length integers (Vi64, zigzag encoded) representing minutes since the Box epoch. The signed format supports dates before 2020. Minute precision is sufficient for typical archive use cases.
+
+When timestamps are absent, implementations SHOULD use the archive file's own creation/modification time as a fallback.
+
+Writers MAY omit timestamps to reduce archive size. The `box` CLI omits timestamps by default; use `--timestamps` to include them, or `--archive`/`-A` to include all metadata.
+
+#### Optional Precision Extensions
+
+For applications requiring finer precision, the following extension attributes are supported:
 
 | Attribute | Format | Description |
 |-----------|--------|-------------|
-| `unix.mode` | `u32` | Unix file mode/permissions |
-| `unix.uid` | `u32` | Unix user ID |
-| `unix.gid` | `u32` | Unix group ID |
+| `created.seconds` | u8 | Seconds component (0-59) |
+| `modified.seconds` | u8 | Seconds component (0-59) |
+| `accessed.seconds` | u8 | Seconds component (0-59) |
+| `created.nanoseconds` | Vu64 | Sub-minute precision in nanoseconds (0-59,999,999,999) |
+| `modified.nanoseconds` | Vu64 | Sub-minute precision in nanoseconds (0-59,999,999,999) |
+| `accessed.nanoseconds` | Vu64 | Sub-minute precision in nanoseconds (0-59,999,999,999) |
 
-These attributes are OPTIONAL and typically only present for archives created on Unix-like systems.
+**Precedence:** `.nanoseconds` takes precedence over `.seconds`. If `.nanoseconds` is present, `.seconds` MUST be ignored. The nanoseconds value encodes the full sub-minute precision including seconds (e.g., 30.5 seconds = 30,500,000,000 nanoseconds).
+
+Implementations are NOT REQUIRED to support these extensions. Writers SHOULD only include them when the application explicitly requires sub-minute precision.
+
+### 12.2 Unix Permission Attributes
+
+| Attribute | Format | Description | Default |
+|-----------|--------|-------------|---------|
+| `unix.mode` | Vu32 | Unix file mode/permissions | 0o100644 (files), 0o40755 (dirs) |
+| `unix.uid` | Vu32 | Unix user ID | Archive attr, then current user |
+| `unix.gid` | Vu32 | Unix group ID | Archive attr, then current user |
+
+These attributes are OPTIONAL. When absent, implementations SHOULD apply the defaults listed above.
+
+**Fallback Chain for `unix.uid` and `unix.gid`:**
+
+1. Check the record's attribute
+2. Check the archive-level attribute (in `BoxMetadata.attrs`)
+3. Use the current user's UID/GID
+
+Writers SHOULD store `unix.uid` and `unix.gid` as archive-level attributes and only store per-record values when they differ from the archive default. This significantly reduces trailer size for archives where all files have the same owner.
+
+Writers MAY omit `unix.uid` and `unix.gid` entirely to reduce archive size. The `box` CLI omits ownership by default; use `--ownership` to include them, or `--archive`/`-A` to include all metadata.
+
+Writers SHOULD omit `unix.mode` when it matches the default for the record type (0o100644 for files, 0o40755 for directories).
 
 ### 12.3 Checksum Attributes
 
@@ -612,8 +650,10 @@ Attribute values are stored as raw bytes (`Vec<u8>`). The interpretation depends
 
 | Attribute Type | Encoding |
 |----------------|----------|
-| Timestamps (`created`, `modified`, `accessed`) | `i64` little-endian (8 bytes) |
-| Unix permissions (`unix.mode`, `unix.uid`, `unix.gid`) | `u32` little-endian (4 bytes) |
+| Timestamps (`created`, `modified`, `accessed`) | Vi64 (variable, 1-9 bytes, zigzag encoded) |
+| Timestamp seconds extensions (`.seconds`) | u8 (1 byte) |
+| Timestamp nanoseconds extensions (`.nanoseconds`) | Vu64 (variable, 1-9 bytes) |
+| Unix permissions (`unix.mode`, `unix.uid`, `unix.gid`) | Vu32 (variable, 1-5 bytes) |
 | Checksums (`blake3`) | Raw hash bytes (32 bytes for Blake3) |
 | Custom attributes | Application-defined (typically UTF-8 or raw bytes) |
 

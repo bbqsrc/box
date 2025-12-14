@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::default::Default;
 use std::io::SeekFrom;
@@ -100,11 +101,28 @@ impl BoxFileWriter {
     async fn write_header(&mut self) -> std::io::Result<()> {
         self.file.seek(SeekFrom::Start(0)).await?;
         self.header.write(&mut self.file).await?;
-        self.file_pos = std::mem::size_of::<BoxHeader>() as u64;
+        self.file_pos = BoxHeader::SIZE as u64;
         Ok(())
     }
 
     async fn finish_inner(&mut self) -> std::io::Result<u64> {
+        // Build FST from existing metadata (None for empty archives)
+        let fst_bytes = self.build_fst()?;
+        self.meta.fst = fst_bytes
+            .as_ref()
+            .and_then(|bytes| box_fst::Fst::new(Cow::Owned(bytes.clone())).ok());
+
+        // Clear redundant directory traversal data (FST handles all lookups now)
+        self.meta.root.clear();
+        for record in &mut self.meta.records {
+            if let Record::Directory(dir) = record {
+                dir.entries.clear();
+            }
+        }
+
+        // Flush any buffered file data before seeking
+        self.file.flush().await?;
+
         let pos = self.next_write_addr().get();
         self.header.trailer = NonZeroU64::new(pos);
         self.write_header().await?;
@@ -112,12 +130,78 @@ impl BoxFileWriter {
         self.file.seek(SeekFrom::Start(pos)).await?;
         self.file_pos = pos;
         self.meta.write(&mut self.file).await?;
+
+        // Pad to 8-byte boundary and write FST
+        if let Some(fst_bytes) = &fst_bytes {
+            self.file.flush().await?; // Flush before stream_position
+            let cur_pos = self.file.stream_position().await?;
+            let padding = (8 - (cur_pos % 8)) % 8;
+            if padding > 0 {
+                self.file.write_all(&[0u8; 8][..padding as usize]).await?;
+            }
+            self.file.write_all(fst_bytes).await?;
+        }
+
         self.file.flush().await?;
 
         let new_pos = self.file.get_ref().metadata().await?.len();
         self.file.get_mut().set_len(new_pos).await?;
         self.finished = true;
         Ok(new_pos)
+    }
+
+    fn build_fst(&self) -> std::io::Result<Option<Vec<u8>>> {
+        // Collect all paths by traversing metadata
+        let mut paths: Vec<(Vec<u8>, u64)> = Vec::new();
+        self.collect_paths(&self.meta.root, &mut Vec::new(), &mut paths);
+
+        // Empty archives have no FST
+        if paths.is_empty() {
+            return Ok(None);
+        }
+
+        // FST requires sorted input
+        paths.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+
+        // Build FST
+        let mut builder = box_fst::FstBuilder::new();
+        for (path, index) in paths {
+            builder
+                .insert(&path, index)
+                .map_err(|e| std::io::Error::other(e.to_string()))?;
+        }
+        builder
+            .finish()
+            .map(Some)
+            .map_err(|e| std::io::Error::other(e.to_string()))
+    }
+
+    fn collect_paths(
+        &self,
+        entries: &[super::RecordIndex],
+        prefix: &mut Vec<u8>,
+        paths: &mut Vec<(Vec<u8>, u64)>,
+    ) {
+        for &index in entries {
+            let record = self.meta.record(index).unwrap();
+            let name = record.name().as_bytes();
+
+            // Build full path with \x1f separator (BoxPath separator)
+            let path_start = prefix.len();
+            if !prefix.is_empty() {
+                prefix.push(0x1f);
+            }
+            prefix.extend_from_slice(name);
+
+            paths.push((prefix.clone(), index.get()));
+
+            // Recurse into directories
+            if let Record::Directory(dir) = record {
+                self.collect_paths(&dir.entries, prefix, paths);
+            }
+
+            prefix.truncate(path_start);
+        }
     }
 
     pub async fn finish(mut self) -> std::io::Result<u64> {
@@ -168,7 +252,7 @@ impl BoxFileWriter {
                 .rev()
                 .find_map(|r| r.as_file())
                 .map(|r| r.data.get() + r.length)
-                .unwrap_or(std::mem::size_of::<BoxHeader>() as u64)
+                .unwrap_or(BoxHeader::SIZE as u64)
         };
 
         let f = BoxFileWriter {
@@ -209,7 +293,7 @@ impl BoxFileWriter {
             .open(path.as_ref())
             .await?;
 
-        let header_size = std::mem::size_of::<BoxHeader>() as u64;
+        let header_size = BoxHeader::SIZE as u64;
         let mut boxfile = BoxFileWriter {
             file: BufWriter::with_capacity(WRITE_BUFFER_SIZE, file),
             path: tokio::fs::canonicalize(path.as_ref()).await?,
@@ -248,10 +332,53 @@ impl BoxFileWriter {
     }
 
     fn convert_attrs(&mut self, attrs: HashMap<String, Vec<u8>>) -> HashMap<usize, Vec<u8>> {
-        attrs
-            .into_iter()
-            .map(|(k, v)| (self.meta.attr_key_or_create(&k), v))
-            .collect()
+        // Set archive-level uid/gid defaults from first file if not already set
+        if let Some(uid) = attrs.get("unix.uid") {
+            let uid_key = self.meta.attr_key_or_create("unix.uid");
+            if !self.meta.attrs.contains_key(&uid_key) {
+                self.meta.attrs.insert(uid_key, uid.clone());
+            }
+        }
+        if let Some(gid) = attrs.get("unix.gid") {
+            let gid_key = self.meta.attr_key_or_create("unix.gid");
+            if !self.meta.attrs.contains_key(&gid_key) {
+                self.meta.attrs.insert(gid_key, gid.clone());
+            }
+        }
+
+        // Get archive defaults for filtering
+        let default_uid = self
+            .meta
+            .attr_key("unix.uid")
+            .and_then(|k| self.meta.attrs.get(&k).cloned());
+        let default_gid = self
+            .meta
+            .attr_key("unix.gid")
+            .and_then(|k| self.meta.attrs.get(&k).cloned());
+
+        // Filter out uid/gid that match archive defaults, then convert keys
+        let mut result = HashMap::new();
+        for (k, v) in attrs {
+            // Skip uid if matches archive default
+            if k == "unix.uid" {
+                if let Some(ref default) = default_uid {
+                    if &v == default {
+                        continue;
+                    }
+                }
+            }
+            // Skip gid if matches archive default
+            if k == "unix.gid" {
+                if let Some(ref default) = default_gid {
+                    if &v == default {
+                        continue;
+                    }
+                }
+            }
+            let key = self.meta.attr_key_or_create(&k);
+            result.insert(key, v);
+        }
+        result
     }
 
     fn insert_inner(
@@ -616,10 +743,12 @@ impl BoxFileWriter {
         box_path: BoxPath<'static>,
         config: &CompressionConfig,
         with_checksum: bool,
+        timestamps: bool,
+        ownership: bool,
     ) -> std::io::Result<&FileRecord<'static>> {
         let fs_path = fs_path.as_ref();
         let meta = tokio::fs::metadata(fs_path).await?;
-        let attrs = crate::fs::metadata_to_attrs(&meta);
+        let attrs = crate::fs::metadata_to_attrs(&meta, timestamps, ownership);
 
         // Don't compress small files
         let config = config.for_size(meta.len());
@@ -658,7 +787,14 @@ impl BoxFileWriter {
             // Single file
             let box_path = BoxPath::new(path)?;
             let record = self
-                .insert_file(path, box_path, &options.config, options.checksum)
+                .insert_file(
+                    path,
+                    box_path,
+                    &options.config,
+                    options.checksum,
+                    options.timestamps,
+                    options.ownership,
+                )
                 .await?;
             stats.files_added += 1;
             stats.bytes_original += record.decompressed_length;
@@ -708,7 +844,8 @@ impl BoxFileWriter {
                     let parent_path = file_path.parent().unwrap_or(Path::new(""));
                     let target_path = parent_path.join(&target_path);
                     let target_box_path = BoxPath::new(&target_path)?;
-                    let link_meta = crate::fs::metadata_to_attrs(&meta);
+                    let link_meta =
+                        crate::fs::metadata_to_attrs(&meta, options.timestamps, options.ownership);
 
                     if self.meta.index(&box_path).is_none() {
                         self.link(box_path, target_box_path, link_meta)?;
@@ -721,13 +858,15 @@ impl BoxFileWriter {
                 }
             } else if file_type.is_dir() {
                 if self.meta.index(&box_path).is_none() {
-                    let dir_meta = crate::fs::metadata_to_attrs(&meta);
+                    let dir_meta =
+                        crate::fs::metadata_to_attrs(&meta, options.timestamps, options.ownership);
                     self.mkdir(box_path, dir_meta)?;
                     stats.dirs_added += 1;
                 }
             } else if self.meta.index(&box_path).is_none() {
                 // Regular file
-                let attrs = crate::fs::metadata_to_attrs(&meta);
+                let attrs =
+                    crate::fs::metadata_to_attrs(&meta, options.timestamps, options.ownership);
 
                 // Don't compress small files
                 let config = options.config.for_size(meta.len());
@@ -776,13 +915,22 @@ impl BoxFileWriter {
         &mut self,
         files: I,
         checksum: bool,
+        timestamps: bool,
+        ownership: bool,
         concurrency: usize,
     ) -> std::io::Result<AddStats>
     where
         I: IntoIterator<Item = FileJob>,
     {
-        self.add_paths_parallel_with_progress(files, checksum, concurrency, None)
-            .await
+        self.add_paths_parallel_with_progress(
+            files,
+            checksum,
+            timestamps,
+            ownership,
+            concurrency,
+            None,
+        )
+        .await
     }
 
     /// Add multiple files in parallel with progress reporting.
@@ -793,6 +941,8 @@ impl BoxFileWriter {
         &mut self,
         files: I,
         checksum: bool,
+        timestamps: bool,
+        ownership: bool,
         concurrency: usize,
         progress: Option<tokio::sync::mpsc::UnboundedSender<ParallelProgress>>,
     ) -> std::io::Result<AddStats>
@@ -859,6 +1009,8 @@ impl BoxFileWriter {
                         job.box_path,
                         &job.config,
                         memory_threshold,
+                        timestamps,
+                        ownership,
                     )
                     .await
                 } else {
@@ -867,6 +1019,8 @@ impl BoxFileWriter {
                         job.box_path,
                         &job.config,
                         memory_threshold,
+                        timestamps,
+                        ownership,
                     )
                     .await
                 };
@@ -960,6 +1114,10 @@ pub struct AddOptions {
     pub config: CompressionConfig,
     /// Whether to compute Blake3 checksums.
     pub checksum: bool,
+    /// Whether to store file timestamps (created, modified, accessed).
+    pub timestamps: bool,
+    /// Whether to store file ownership (uid, gid).
+    pub ownership: bool,
     /// Whether to recurse into directories.
     pub recursive: bool,
     /// Whether to include hidden files.
@@ -973,6 +1131,8 @@ impl Default for AddOptions {
         Self {
             config: CompressionConfig::new(Compression::Zstd),
             checksum: true,
+            timestamps: false,
+            ownership: false,
             recursive: true,
             include_hidden: false,
             follow_symlinks: false,
@@ -1027,11 +1187,13 @@ pub async fn compress_file<C: Checksum>(
     box_path: BoxPath<'static>,
     config: &CompressionConfig,
     memory_threshold: u64,
+    timestamps: bool,
+    ownership: bool,
 ) -> std::io::Result<CompressedFile> {
     let file = tokio::fs::File::open(fs_path).await?;
     let meta = file.metadata().await?;
     let file_size = meta.len();
-    let attrs = crate::fs::metadata_to_attrs(&meta);
+    let attrs = crate::fs::metadata_to_attrs(&meta, timestamps, ownership);
 
     // Don't compress small files
     let config = config.for_size(file_size);
