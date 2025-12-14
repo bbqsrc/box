@@ -767,7 +767,7 @@ The FST Header is 16 bytes and located at the start of the FST section.
 | Offset | Size | Field | Description |
 |--------|------|-------|-------------|
 | 0x00 | 4 | `magic` | Magic bytes: `BFST` (0x42 0x46 0x53 0x54) |
-| 0x04 | 1 | `version` | Format version (currently 3) |
+| 0x04 | 1 | `version` | Format version (currently 1) |
 | 0x05 | 3 | `reserved` | Reserved bytes (must be 0) |
 | 0x08 | 8 | `entry_count` | Number of paths indexed (`u64` LE) |
 

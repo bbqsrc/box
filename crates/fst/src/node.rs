@@ -1,6 +1,6 @@
 /// Node encoding/decoding - optimized for hot/cold data separation.
 ///
-/// Format v2 with hot/cold sections:
+/// Format v1 with hot/cold sections:
 /// ```text
 /// [Header: 16 bytes]
 /// [Node Index: node_count × 8 bytes]  <- (hot_off: u32, cold_off: u32)
@@ -12,7 +12,7 @@ use fastvlq::{WriteVlqExt, decode_vu64_slice};
 
 /// Header constants
 pub const MAGIC: &[u8; 4] = b"BFST";
-pub const VERSION: u8 = 3;
+pub const VERSION: u8 = 1;
 pub const HEADER_SIZE: usize = 16;
 pub const FOOTER_SIZE: usize = 16;
 pub const INDEX_ENTRY_SIZE: usize = 8;
