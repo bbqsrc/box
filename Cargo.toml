@@ -101,7 +101,7 @@ pathdiff = "0.2"
 unic-normal = "0.9"
 unic-ucd = "0.9"
 relative-path = "2.0"
-cffi = { version = "0.1" }
+cffi = { git = "https://github.com/cffi-rs/cffi", branch = "next" }
 pin-project-lite = "0.2"
 digest = "0.10"
 string-interner = "0.19"
