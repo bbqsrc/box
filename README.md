@@ -15,7 +15,9 @@ The `.box` file format and related tooling is designed to be a modern successor 
 |-------|-------------|
 | **box-format** (this crate) | Core library for reading and writing `.box` archives |
 | [**cli**](cli/) | Command line tool for working with `.box` archives |
-| [**fusebox**](crates/fusebox/) | Demonstration FUSE driver for mounting archives |
+| [**fusebox**](crates/fusebox/) | FUSE driver for mounting archives (Linux/macOS) |
+| [**projfsbox**](crates/projfsbox/) | Windows ProjFS driver for mounting archives |
+| [**fskitbox**](crates/fskitbox/) | macOS FSKit driver for mounting archives (macOS 15.4+) |
 
 ## Features
 
