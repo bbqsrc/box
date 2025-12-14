@@ -1,6 +1,6 @@
 # Box - Open Standard Archive Format
 
-[![Actions Status](https://github.com/bbqsrc/box/workflows/Continuous%20Integration/badge.svg)](https://github.com/bbqsrc/box/actions)
+[![Actions Status](https://github.com/bbqsrc/box/workflows/CI/badge.svg)](https://github.com/bbqsrc/box/actions)
 
 <table>
 <tr><td>⚠️<td>Box is under active development. Do not expect compatibility between versions until v1.0.
