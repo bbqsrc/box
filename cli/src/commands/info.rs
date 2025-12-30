@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 
 use box_format::{AttrMap, AttrValue, BoxFileReader, BoxMetadata, BoxPath, Record};
-use fastvlq::ReadVlqExt;
+use fastvint::ReadVintExt;
 
 use crate::cli::InfoArgs;
 use crate::error::{Error, Result};

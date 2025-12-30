@@ -12,7 +12,7 @@ path = "src/main.rs"
 
 [dependencies]
 box-format.workspace = true
-fastvlq.workspace = true
+fastvint.workspace = true
 tokio = { workspace = true, features = ["rt", "sync"] }
 clap.workspace = true
 tracing.workspace = true

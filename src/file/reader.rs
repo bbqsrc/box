@@ -313,7 +313,7 @@ impl BoxFileReader {
     /// Checks: record attr -> archive attr -> default (0o644 for files, 0o755 for dirs)
     #[cfg(unix)]
     pub fn get_mode(&self, record: &Record<'_>) -> u32 {
-        use fastvlq::ReadVlqExt;
+        use fastvint::ReadVintExt;
 
         if let Some(mode_bytes) = self.get_attr(record, "unix.mode") {
             let mut cursor = std::io::Cursor::new(mode_bytes);

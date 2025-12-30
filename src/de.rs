@@ -2,7 +2,7 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 use std::num::NonZeroU64;
 
-use fastvlq::{AsyncReadVlqExt, ReadVlqExt};
+use fastvint::{AsyncReadVintExt, ReadVintExt};
 use string_interner::DefaultStringInterner;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeek, AsyncSeekExt};
 
@@ -20,7 +20,7 @@ use crate::compression::constants::*;
 /// Read a VLQ-encoded u64 from a byte slice, advancing the position.
 fn read_vlq_u64(data: &[u8], pos: &mut usize) -> std::io::Result<u64> {
     let mut cursor = std::io::Cursor::new(&data[*pos..]);
-    let value = ReadVlqExt::read_vu64(&mut cursor)?;
+    let value = ReadVintExt::read_vu64(&mut cursor)?;
     *pos += cursor.position() as usize;
     Ok(value)
 }

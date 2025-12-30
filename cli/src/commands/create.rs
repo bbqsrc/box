@@ -4,7 +4,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use async_walkdir::WalkDir;
 use box_format::{BoxFileWriter, BoxPath, CompressionConfig, FileJob, ParallelProgress, fs};
-use fastvlq::Vi64;
+use fastvint::Vi64;
 use futures::StreamExt;
 
 use crate::cli::CreateArgs;
@@ -92,7 +92,7 @@ pub async fn run(args: CreateArgs) -> Result<()> {
     let minutes_since_epoch = (unix_secs - BOX_EPOCH_UNIX) / 60;
     let now = Vi64::new(minutes_since_epoch);
 
-    bf.set_file_attr("created", now.as_slice().to_vec())
+    bf.set_file_attr("created", now.bytes().to_vec())
         .map_err(|source| Error::SetAttribute {
             key: "created".to_string(),
             source,

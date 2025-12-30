@@ -4,7 +4,7 @@
 //! Each callback receives a `PRJ_CALLBACK_DATA` containing context and request info.
 
 use box_format::Record;
-use fastvlq::ReadVlqExt;
+use fastvint::ReadVintExt;
 use windows::Win32::Foundation::{
     ERROR_FILE_NOT_FOUND, ERROR_INSUFFICIENT_BUFFER, ERROR_NOT_ENOUGH_MEMORY,
 };

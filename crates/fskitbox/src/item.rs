@@ -60,7 +60,7 @@ impl BoxItem {
         match record.attr(meta, "unix.mode") {
             Some(bytes) => {
                 let mut cursor = std::io::Cursor::new(bytes);
-                match fastvlq::ReadVlqExt::read_vu32(&mut cursor) {
+                match fastvint::ReadVintExt::read_vu32(&mut cursor) {
                     Ok(mode) => mode & 0o7777,
                     Err(_) => Self::default_mode(record),
                 }
@@ -82,7 +82,7 @@ impl BoxItem {
         match record.attr(meta, "unix.uid") {
             Some(bytes) => {
                 let mut cursor = std::io::Cursor::new(bytes);
-                fastvlq::ReadVlqExt::read_vu32(&mut cursor).unwrap_or(501)
+                fastvint::ReadVintExt::read_vu32(&mut cursor).unwrap_or(501)
             }
             None => 501, // Default to current user
         }
@@ -93,7 +93,7 @@ impl BoxItem {
         match record.attr(meta, "unix.gid") {
             Some(bytes) => {
                 let mut cursor = std::io::Cursor::new(bytes);
-                fastvlq::ReadVlqExt::read_vu32(&mut cursor).unwrap_or(20)
+                fastvint::ReadVintExt::read_vu32(&mut cursor).unwrap_or(20)
             }
             None => 20, // Default staff group
         }
@@ -118,7 +118,7 @@ impl BoxItem {
         match record.attr(meta, attr_name) {
             Some(bytes) => {
                 let mut cursor = std::io::Cursor::new(bytes);
-                match fastvlq::ReadVlqExt::read_vi64(&mut cursor) {
+                match fastvint::ReadVintExt::read_vi64(&mut cursor) {
                     Ok(minutes) => {
                         let unix_secs = (minutes * 60 + BOX_EPOCH_UNIX) as u64;
                         UNIX_EPOCH

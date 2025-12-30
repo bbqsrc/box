@@ -1,6 +1,6 @@
 use std::io::SeekFrom;
 
-use fastvlq::AsyncWriteVlqExt;
+use fastvint::AsyncWriteVintExt;
 use tokio::io::{AsyncSeek, AsyncSeekExt, AsyncWrite, AsyncWriteExt};
 
 use string_interner::DefaultStringInterner;

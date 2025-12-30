@@ -3,7 +3,7 @@ use crate::node::{
     EdgeData, HEADER_SIZE, Header, INDEX_ENTRY_SIZE, INDEXED_THRESHOLD, NodeData, NodeIndex,
     write_header, write_node_cold, write_node_hot,
 };
-use fastvlq::encode_vu64;
+use fastvint::encode_vu64;
 
 /// A builder for constructing radix tree FSTs.
 ///

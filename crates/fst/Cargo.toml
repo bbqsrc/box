@@ -7,7 +7,7 @@ description = "A radix tree that serializes as an FST for fast path lookups"
 
 [dependencies]
 thiserror.workspace = true
-fastvlq.workspace = true
+fastvint.workspace = true
 
 [dev-dependencies]
 criterion = "0.5"

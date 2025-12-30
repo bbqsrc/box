@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 
-use fastvlq::Vi64;
+use fastvint::Vi64;
 
 /// Box epoch: 2020-01-01 00:00:00 UTC (seconds since Unix epoch)
 pub const BOX_EPOCH_UNIX: i64 = 1577836800;
@@ -28,15 +28,15 @@ pub fn metadata_to_attrs(
         let accessed_minutes = (meta.atime() - BOX_EPOCH_UNIX) / 60;
         attrs.insert(
             "created".into(),
-            Vi64::new(created_minutes).as_slice().to_vec(),
+            Vi64::new(created_minutes).bytes().to_vec(),
         );
         attrs.insert(
             "modified".into(),
-            Vi64::new(modified_minutes).as_slice().to_vec(),
+            Vi64::new(modified_minutes).bytes().to_vec(),
         );
         attrs.insert(
             "accessed".into(),
-            Vi64::new(accessed_minutes).as_slice().to_vec(),
+            Vi64::new(accessed_minutes).bytes().to_vec(),
         );
     }
 
@@ -50,18 +50,18 @@ pub fn metadata_to_attrs(
     if mode != default_mode {
         attrs.insert(
             "unix.mode".into(),
-            fastvlq::Vu32::new(mode).as_slice().to_vec(),
+            fastvint::Vu32::new(mode).bytes().to_vec(),
         );
     }
 
     if ownership {
         attrs.insert(
             "unix.uid".into(),
-            fastvlq::Vu32::new(meta.uid()).as_slice().to_vec(),
+            fastvint::Vu32::new(meta.uid()).bytes().to_vec(),
         );
         attrs.insert(
             "unix.gid".into(),
-            fastvlq::Vu32::new(meta.gid()).as_slice().to_vec(),
+            fastvint::Vu32::new(meta.gid()).bytes().to_vec(),
         );
     }
 
@@ -81,21 +81,21 @@ pub fn metadata_to_attrs(
             && let Ok(duration) = created.duration_since(std::time::SystemTime::UNIX_EPOCH)
         {
             let minutes = (duration.as_secs() as i64 - BOX_EPOCH_UNIX) / 60;
-            attrs.insert("created".into(), Vi64::new(minutes).as_slice().to_vec());
+            attrs.insert("created".into(), Vi64::new(minutes).bytes().to_vec());
         }
 
         if let Ok(modified) = meta.modified()
             && let Ok(duration) = modified.duration_since(std::time::SystemTime::UNIX_EPOCH)
         {
             let minutes = (duration.as_secs() as i64 - BOX_EPOCH_UNIX) / 60;
-            attrs.insert("modified".into(), Vi64::new(minutes).as_slice().to_vec());
+            attrs.insert("modified".into(), Vi64::new(minutes).bytes().to_vec());
         }
 
         if let Ok(accessed) = meta.accessed()
             && let Ok(duration) = accessed.duration_since(std::time::SystemTime::UNIX_EPOCH)
         {
             let minutes = (duration.as_secs() as i64 - BOX_EPOCH_UNIX) / 60;
-            attrs.insert("accessed".into(), Vi64::new(minutes).as_slice().to_vec());
+            attrs.insert("accessed".into(), Vi64::new(minutes).bytes().to_vec());
         }
     }
 

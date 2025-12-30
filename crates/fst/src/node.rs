@@ -7,7 +7,7 @@
 /// [Hot Section]                        <- flags, edge_count, first_bytes, offsets
 /// [Cold Section]                       <- edge labels, outputs, target_node_ids
 /// ```
-use fastvlq::{WriteVlqExt, decode_vu64_slice};
+use fastvint::{WriteVintExt, decode_vu64_slice};
 
 /// Header constants
 pub const MAGIC: &[u8; 4] = b"BFST";
@@ -78,7 +78,7 @@ pub fn read_header(data: &[u8]) -> Result<Header, crate::FstError> {
 /// Read a VLQ u64 directly from slice.
 #[inline(always)]
 fn read_vlq(data: &[u8], pos: &mut usize) -> Option<u64> {
-    let (value, len) = decode_vu64_slice(data.get(*pos..)?)?;
+    let (value, len) = decode_vu64_slice(data.get(*pos..)?);
     *pos += len;
     Some(value)
 }

@@ -1,7 +1,7 @@
 use std::path::Path;
 
 use box_format::{BoxPath, Compression, CompressionConfig};
-use fastvlq::ReadVlqExt;
+use fastvint::ReadVintExt;
 use indicatif::{ProgressBar, ProgressStyle};
 
 /// Box epoch: 2020-01-01 00:00:00 UTC (seconds since Unix epoch)

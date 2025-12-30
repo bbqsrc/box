@@ -13,7 +13,7 @@ box-format.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "sync"] }
 tracing.workspace = true
 thiserror.workspace = true
-fastvlq.workspace = true
+fastvint.workspace = true
 libc.workspace = true
 
 # Objective-C interop
