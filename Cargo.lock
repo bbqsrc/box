@@ -303,6 +303,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "box-core"
+version = "0.1.0"
+
+[[package]]
 name = "box-ffi"
 version = "0.4.0"
 dependencies = [
@@ -319,6 +323,7 @@ dependencies = [
  "async-compression",
  "async-walkdir",
  "blake3",
+ "box-core",
  "box-fst",
  "byteorder",
  "digest",

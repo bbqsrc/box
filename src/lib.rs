@@ -2,6 +2,9 @@
 //!
 //! Use [BoxFileReader][BoxFileReader] to read files, and [BoxFileWriter][BoxFileWriter] to write files.
 
+// Re-export core types for kernel compatibility
+pub use box_core;
+
 pub mod checksum;
 mod compression;
 mod counting;

@@ -1,0 +1,18 @@
+[package]
+name = "box-core"
+description = "Core types for the Box archive format (no_std compatible)"
+version = "0.1.0"
+authors = ["Brendan Molloy <brendan@bbqsrc.net>"]
+edition = "2024"
+license = "Apache-2.0 OR MIT"
+repository = "https://github.com/bbqsrc/box"
+
+[lib]
+crate-type = ["rlib"]
+
+[features]
+default = ["std"]
+std = ["alloc"]
+alloc = []
+
+[dependencies]

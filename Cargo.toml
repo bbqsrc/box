@@ -11,6 +11,7 @@ repository = "https://github.com/bbqsrc/box"
 crate-type = ["rlib"]
 
 [dependencies]
+box-core.workspace = true
 box-fst.workspace = true
 byteorder.workspace = true
 mmap-io.workspace = true
@@ -115,4 +116,5 @@ block2 = "0.6"
 
 # Workspace crates
 box-format = { version = "0.4.0", path = "." }
+box-core = { version = "0.1.0", path = "crates/core" }
 box-fst = { version = "0.1.0", path = "crates/fst" }
