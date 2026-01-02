@@ -139,6 +139,16 @@ pub async fn run(args: ExtractArgs) -> Result<()> {
                 stats.checksum_failures
             );
         }
+
+        // Print timing breakdown
+        let timing = &stats.timing;
+        let total = timing.collect + timing.directories + timing.decompress + timing.symlinks;
+        println!("\nTiming:");
+        println!("  Collect:     {:>8.2?}", timing.collect);
+        println!("  Directories: {:>8.2?}", timing.directories);
+        println!("  Decompress:  {:>8.2?}", timing.decompress);
+        println!("  Symlinks:    {:>8.2?}", timing.symlinks);
+        println!("  Total:       {:>8.2?}", total);
     }
 
     if stats.checksum_failures > 0 {

@@ -21,8 +21,8 @@ pub use checksum::{Checksum, NullChecksum};
 pub use compression::{ByteCount, Compression, CompressionConfig};
 #[cfg(feature = "reader")]
 pub use file::reader::{
-    BoxFileReader, ExtractError, ExtractOptions, ExtractProgress, ExtractStats, OpenError,
-    ValidateProgress, ValidateStats,
+    BoxFileReader, ExtractError, ExtractOptions, ExtractProgress, ExtractStats, ExtractTiming,
+    OpenError, ValidateProgress, ValidateStats,
 };
 #[cfg(feature = "writer")]
 pub use file::writer::{

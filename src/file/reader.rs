@@ -2,6 +2,7 @@ use std::io::SeekFrom;
 use std::num::NonZeroU64;
 use std::ops::AddAssign;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 use std::sync::Arc;
 
 use mmap_io::MemoryMappedFile;
@@ -104,6 +105,19 @@ pub enum ExtractError {
     VerificationFailed(#[source] std::io::Error, PathBuf),
 }
 
+/// Timing breakdown for extraction phases.
+#[derive(Debug, Clone, Default)]
+pub struct ExtractTiming {
+    /// Time spent collecting entries from metadata.
+    pub collect: Duration,
+    /// Time spent creating directories.
+    pub directories: Duration,
+    /// Time spent decompressing and writing files.
+    pub decompress: Duration,
+    /// Time spent creating symlinks.
+    pub symlinks: Duration,
+}
+
 /// Statistics from extracting files from an archive.
 #[derive(Debug, Clone, Default)]
 pub struct ExtractStats {
@@ -117,6 +131,8 @@ pub struct ExtractStats {
     pub bytes_written: u64,
     /// Number of files that failed checksum verification.
     pub checksum_failures: u64,
+    /// Timing breakdown for extraction phases.
+    pub timing: ExtractTiming,
 }
 
 impl AddAssign for ExtractStats {
@@ -126,6 +142,7 @@ impl AddAssign for ExtractStats {
         self.links_created += other.links_created;
         self.bytes_written += other.bytes_written;
         self.checksum_failures += other.checksum_failures;
+        // Note: timing is not added - it's only meaningful at the top level
     }
 }
 
@@ -388,6 +405,7 @@ impl BoxFileReader {
     ) -> Result<ExtractStats, ExtractError> {
         let output_path = output_path.as_ref();
         let mut stats = ExtractStats::default();
+        let start = Instant::now();
         for item in self.meta.iter() {
             self.extract_inner_with_options(
                 &item.path,
@@ -398,6 +416,8 @@ impl BoxFileReader {
             )
             .await?;
         }
+        // Serial extraction doesn't have separate phases, report all as decompress
+        stats.timing.decompress = start.elapsed();
         Ok(stats)
     }
 
@@ -453,11 +473,11 @@ impl BoxFileReader {
         concurrency: usize,
         progress: Option<tokio::sync::mpsc::UnboundedSender<ExtractProgress>>,
     ) -> Result<ExtractStats, ExtractError> {
-        use std::sync::Arc;
-
         let output_path = output_path.as_ref();
+        let mut timing = ExtractTiming::default();
 
         // Collect entries by type
+        let collect_start = Instant::now();
         let mut directories = Vec::new();
         let mut files = Vec::new();
         let mut symlinks = Vec::new();
@@ -479,6 +499,7 @@ impl BoxFileReader {
         let total_files = files.len() as u64;
         let total_dirs = directories.len() as u64;
         let total_links = symlinks.len() as u64;
+        timing.collect = collect_start.elapsed();
 
         if let Some(ref p) = progress {
             let _ = p.send(ExtractProgress::Started {
@@ -491,6 +512,7 @@ impl BoxFileReader {
         let mut stats = ExtractStats::default();
 
         // Phase 1: Create directories (sequential)
+        let dirs_start = Instant::now();
         for (path, record) in directories {
             fs::create_dir_all(output_path)
                 .await
@@ -520,8 +542,10 @@ impl BoxFileReader {
                 let _ = p.send(ExtractProgress::DirectoryCreated { path });
             }
         }
+        timing.directories = dirs_start.elapsed();
 
         // Phase 2: Extract files (parallel)
+        let decompress_start = Instant::now();
         // Open mmap once and share across all tasks
         let mmap: Arc<MemoryMappedFile> = MemoryMappedFile::open_ro(&self.path)
             .map_err(|e| {
@@ -615,8 +639,10 @@ impl BoxFileReader {
                 });
             }
         }
+        timing.decompress = decompress_start.elapsed();
 
         // Phase 3: Create symlinks (sequential)
+        let symlinks_start = Instant::now();
         for (path, record) in symlinks {
             if let Record::Link(link) = &record {
                 let link_target = self
@@ -659,11 +685,13 @@ impl BoxFileReader {
                 }
             }
         }
+        timing.symlinks = symlinks_start.elapsed();
 
         if let Some(ref p) = progress {
             let _ = p.send(ExtractProgress::Finished);
         }
 
+        stats.timing = timing;
         Ok(stats)
     }
 
