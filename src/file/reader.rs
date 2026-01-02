@@ -649,35 +649,44 @@ impl BoxFileReader {
         let symlinks_start = Instant::now();
         for (path, record) in symlinks {
             if let Record::Link(link) = &record {
-                let link_target = self
-                    .resolve_link(link)
-                    .map_err(|e| ExtractError::ResolveLinkFailed(e, link.clone().into_owned()))?;
+                let link_path = output_path.join(path.to_path_buf());
 
-                let source = output_path.join(path.to_path_buf());
-                let destination = output_path.join(link_target.path.to_path_buf());
+                // Create parent directory if needed
+                if let Some(parent) = link_path.parent() {
+                    fs::create_dir_all(parent)
+                        .await
+                        .map_err(|e| ExtractError::CreateDirFailed(e, parent.to_path_buf()))?;
+                }
+
+                // Use the target as-is (may be relative or absolute)
+                let target = link.target.to_path_buf();
 
                 #[cfg(unix)]
                 {
-                    tokio::fs::symlink(&destination, &source)
-                        .await
-                        .map_err(|e| {
-                            ExtractError::CreateLinkFailed(e, source.clone(), destination)
-                        })?;
+                    tokio::fs::symlink(&target, &link_path).await.map_err(|e| {
+                        ExtractError::CreateLinkFailed(e, link_path.clone(), target)
+                    })?;
                 }
 
                 #[cfg(windows)]
                 {
-                    if link_target.record.as_directory().is_some() {
-                        tokio::fs::symlink_dir(&destination, &source)
+                    // On Windows, we need to know if it's a dir or file symlink
+                    let is_dir = self
+                        .resolve_link(link)
+                        .map(|r| r.record.as_directory().is_some())
+                        .unwrap_or(false);
+
+                    if is_dir {
+                        tokio::fs::symlink_dir(&target, &link_path)
                             .await
                             .map_err(|e| {
-                                ExtractError::CreateLinkFailed(e, source.clone(), destination)
+                                ExtractError::CreateLinkFailed(e, link_path.clone(), target)
                             })?;
                     } else {
-                        tokio::fs::symlink_file(&destination, &source)
+                        tokio::fs::symlink_file(&target, &link_path)
                             .await
                             .map_err(|e| {
-                                ExtractError::CreateLinkFailed(e, source.clone(), destination)
+                                ExtractError::CreateLinkFailed(e, link_path.clone(), target)
                             })?;
                     }
                 }
@@ -939,34 +948,51 @@ impl BoxFileReader {
             }
             #[cfg(unix)]
             Record::Link(link) => {
-                let link_target = self
-                    .resolve_link(link)
-                    .map_err(|e| ExtractError::ResolveLinkFailed(e, link.clone().into_owned()))?;
+                let link_path = output_path.join(path.to_path_buf());
 
-                let source = output_path.join(path.to_path_buf());
-                let destination = output_path.join(link_target.path.to_path_buf());
+                // Create parent directory if needed
+                if let Some(parent) = link_path.parent() {
+                    fs::create_dir_all(parent)
+                        .await
+                        .map_err(|e| ExtractError::CreateDirFailed(e, parent.to_path_buf()))?;
+                }
 
-                tokio::fs::symlink(&source, &destination)
+                // Use the target as-is (may be relative or absolute)
+                let target = link.target.to_path_buf();
+
+                tokio::fs::symlink(&target, &link_path)
                     .await
-                    .map_err(|e| ExtractError::CreateLinkFailed(e, source, destination))
+                    .map_err(|e| ExtractError::CreateLinkFailed(e, link_path, target))
             }
             #[cfg(windows)]
             Record::Link(link) => {
-                let link_target = self
+                let link_path = output_path.join(path.to_path_buf());
+
+                // Create parent directory if needed
+                if let Some(parent) = link_path.parent() {
+                    fs::create_dir_all(parent)
+                        .await
+                        .map_err(|e| ExtractError::CreateDirFailed(e, parent.to_path_buf()))?;
+                }
+
+                // Use the target as-is
+                let target = link.target.to_path_buf();
+
+                // On Windows, we need to know if it's a dir or file symlink
+                // Try to resolve to check, but fall back to file symlink
+                let is_dir = self
                     .resolve_link(link)
-                    .map_err(|e| ExtractError::ResolveLinkFailed(e, link.clone().into_owned()))?;
+                    .map(|r| r.record.as_directory().is_some())
+                    .unwrap_or(false);
 
-                let source = output_path.join(path.to_path_buf());
-                let destination = output_path.join(link_target.path.to_path_buf());
-
-                if link_target.record.as_directory().is_some() {
-                    tokio::fs::symlink_dir(&source, &destination)
+                if is_dir {
+                    tokio::fs::symlink_dir(&target, &link_path)
                         .await
-                        .map_err(|e| ExtractError::CreateLinkFailed(e, source, destination))
+                        .map_err(|e| ExtractError::CreateLinkFailed(e, link_path, target))
                 } else {
-                    tokio::fs::symlink_file(&source, &destination)
+                    tokio::fs::symlink_file(&target, &link_path)
                         .await
-                        .map_err(|e| ExtractError::CreateLinkFailed(e, source, destination))
+                        .map_err(|e| ExtractError::CreateLinkFailed(e, link_path, target))
                 }
             }
         }
@@ -1041,36 +1067,52 @@ impl BoxFileReader {
             }
             #[cfg(unix)]
             Record::Link(link) => {
-                let link_target = self
-                    .resolve_link(link)
-                    .map_err(|e| ExtractError::ResolveLinkFailed(e, link.clone().into_owned()))?;
+                let link_path = output_path.join(path.to_path_buf());
 
-                let source = output_path.join(path.to_path_buf());
-                let destination = output_path.join(link_target.path.to_path_buf());
+                // Create parent directory if needed
+                if let Some(parent) = link_path.parent() {
+                    fs::create_dir_all(parent)
+                        .await
+                        .map_err(|e| ExtractError::CreateDirFailed(e, parent.to_path_buf()))?;
+                }
 
-                tokio::fs::symlink(&source, &destination)
+                // Use the target as-is (may be relative or absolute)
+                let target = link.target.to_path_buf();
+
+                tokio::fs::symlink(&target, &link_path)
                     .await
-                    .map_err(|e| ExtractError::CreateLinkFailed(e, source, destination))?;
+                    .map_err(|e| ExtractError::CreateLinkFailed(e, link_path, target))?;
                 stats.links_created += 1;
                 Ok(())
             }
             #[cfg(windows)]
             Record::Link(link) => {
-                let link_target = self
+                let link_path = output_path.join(path.to_path_buf());
+
+                // Create parent directory if needed
+                if let Some(parent) = link_path.parent() {
+                    fs::create_dir_all(parent)
+                        .await
+                        .map_err(|e| ExtractError::CreateDirFailed(e, parent.to_path_buf()))?;
+                }
+
+                // Use the target as-is
+                let target = link.target.to_path_buf();
+
+                // On Windows, we need to know if it's a dir or file symlink
+                let is_dir = self
                     .resolve_link(link)
-                    .map_err(|e| ExtractError::ResolveLinkFailed(e, link.clone().into_owned()))?;
+                    .map(|r| r.record.as_directory().is_some())
+                    .unwrap_or(false);
 
-                let source = output_path.join(path.to_path_buf());
-                let destination = output_path.join(link_target.path.to_path_buf());
-
-                if link_target.record.as_directory().is_some() {
-                    tokio::fs::symlink_dir(&source, &destination)
+                if is_dir {
+                    tokio::fs::symlink_dir(&target, &link_path)
                         .await
-                        .map_err(|e| ExtractError::CreateLinkFailed(e, source, destination))?;
+                        .map_err(|e| ExtractError::CreateLinkFailed(e, link_path, target))?;
                 } else {
-                    tokio::fs::symlink_file(&source, &destination)
+                    tokio::fs::symlink_file(&target, &link_path)
                         .await
-                        .map_err(|e| ExtractError::CreateLinkFailed(e, source, destination))?;
+                        .map_err(|e| ExtractError::CreateLinkFailed(e, link_path, target))?;
                 }
                 stats.links_created += 1;
                 Ok(())
