@@ -454,7 +454,6 @@ impl BoxFileReader {
         progress: Option<tokio::sync::mpsc::UnboundedSender<ExtractProgress>>,
     ) -> Result<ExtractStats, ExtractError> {
         use std::sync::Arc;
-        use tokio::sync::{Semaphore, mpsc};
 
         let output_path = output_path.as_ref();
 
@@ -523,11 +522,6 @@ impl BoxFileReader {
         }
 
         // Phase 2: Extract files (parallel)
-        let semaphore = Arc::new(Semaphore::new(concurrency));
-        // Unbounded to prevent deadlock - workers block on send if bounded, holding permits
-        let (tx, mut rx) =
-            mpsc::unbounded_channel::<Result<(BoxPath, ExtractStats), ExtractError>>();
-
         // Open mmap once and share across all tasks
         let mmap: Arc<MemoryMappedFile> = MemoryMappedFile::open_ro(&self.path)
             .map_err(|e| {
@@ -538,58 +532,92 @@ impl BoxFileReader {
         let archive_offset = self.offset;
         let verify_checksums = options.verify_checksums;
 
-        for (box_path, record, expected_hash) in files {
-            let tx = tx.clone();
-            let progress = progress.clone();
-            eprintln!("[box] acquiring permit for {}", box_path);
-            let permit = semaphore.clone().acquire_owned().await.map_err(|e| {
-                ExtractError::DecompressionFailed(std::io::Error::other(e), box_path.to_path_buf())
-            })?;
-            eprintln!("[box] got permit for {}", box_path);
+        let mut join_set = tokio::task::JoinSet::new();
+        let mut files_iter = files.into_iter();
+        let mut files_extracted = 0u64;
 
-            let mmap = mmap.clone();
-            let out_base = output_path.to_path_buf();
+        // Seed initial tasks up to concurrency limit
+        for _ in 0..concurrency {
+            if let Some((box_path, record, expected_hash)) = files_iter.next() {
+                let mmap = mmap.clone();
+                let out_base = output_path.to_path_buf();
+                let progress = progress.clone();
 
-            tokio::spawn(async move {
-                let _permit = permit;
+                join_set.spawn(async move {
+                    if let Some(ref p) = progress {
+                        let _ = p.send(ExtractProgress::Extracting {
+                            path: box_path.clone(),
+                        });
+                    }
 
-                if let Some(ref p) = progress {
-                    let _ = p.send(ExtractProgress::Extracting {
-                        path: box_path.clone(),
-                    });
-                }
+                    let result = extract_single_file_from_mmap(
+                        mmap,
+                        archive_offset,
+                        &out_base,
+                        &box_path,
+                        &record,
+                        verify_checksums,
+                        expected_hash.as_deref(),
+                    )
+                    .await;
 
-                eprintln!("[box] extracting {}", box_path);
-                let result = extract_single_file_from_mmap(
-                    mmap,
-                    archive_offset,
-                    &out_base,
-                    &box_path,
-                    &record,
-                    verify_checksums,
-                    expected_hash.as_deref(),
-                )
-                .await;
-                eprintln!("[box] extracted {} result={:?}", box_path, result.is_ok());
-
-                let _ = tx.send(result.map(|s| (box_path, s)));
-            });
+                    result.map(|s| (box_path, s))
+                });
+            }
         }
 
-        drop(tx);
+        // Process results as they complete, spawning new tasks to maintain concurrency
+        while let Some(result) = join_set.join_next().await {
+            let result = result.map_err(|e| {
+                ExtractError::DecompressionFailed(
+                    std::io::Error::other(e),
+                    output_path.to_path_buf(),
+                )
+            })?;
 
-        // Collect results
-        let mut files_extracted = 0u64;
-        while let Some(result) = rx.recv().await {
             let (path, file_stats) = result?;
             stats += file_stats;
             files_extracted += 1;
 
+            eprintln!(
+                "DEBUG: file completed: {} ({}/{})",
+                path, files_extracted, total_files
+            );
+
             if let Some(ref p) = progress {
+                eprintln!("DEBUG: sending Extracted for {}", path);
                 let _ = p.send(ExtractProgress::Extracted {
                     path,
                     files_extracted,
                     total_files,
+                });
+            }
+
+            // Spawn next task if more files remain
+            if let Some((box_path, record, expected_hash)) = files_iter.next() {
+                let mmap = mmap.clone();
+                let out_base = output_path.to_path_buf();
+                let progress = progress.clone();
+
+                join_set.spawn(async move {
+                    if let Some(ref p) = progress {
+                        let _ = p.send(ExtractProgress::Extracting {
+                            path: box_path.clone(),
+                        });
+                    }
+
+                    let result = extract_single_file_from_mmap(
+                        mmap,
+                        archive_offset,
+                        &out_base,
+                        &box_path,
+                        &record,
+                        verify_checksums,
+                        expected_hash.as_deref(),
+                    )
+                    .await;
+
+                    result.map(|s| (box_path, s))
                 });
             }
         }
