@@ -1,7 +1,6 @@
 use std::path::Path;
 
 use box_format::{BoxPath, Compression, CompressionConfig};
-use fastvint::ReadVintExt;
 use indicatif::{ProgressBar, ProgressStyle};
 
 /// Box epoch: 2020-01-01 00:00:00 UTC (seconds since Unix epoch)
@@ -87,8 +86,8 @@ pub fn create_spinner(message: &str) -> ProgressBar {
 /// Format a timestamp from bytes (Vi64 minutes since Box epoch)
 pub fn format_time(attr: Option<&[u8]>) -> String {
     attr.and_then(|x| {
-        let mut cursor = std::io::Cursor::new(x);
-        cursor.read_vi64().ok()
+        let (minutes, len) = fastvint::decode_vi64_slice(x);
+        if len > 0 { Some(minutes) } else { None }
     })
     .map(|minutes| {
         let unix_seconds = minutes * 60 + BOX_EPOCH_UNIX;
@@ -101,10 +100,13 @@ pub fn format_time(attr: Option<&[u8]>) -> String {
     .unwrap_or_else(|| "-".into())
 }
 
-/// Format Unix ACL from bytes
+/// Format Unix ACL from bytes (fastvint Vu32 encoded mode)
 pub fn format_acl(attr: Option<&[u8]>) -> String {
     attr.map(|x| {
-        let acl = u16::from_le_bytes([x[0], x[1]]);
+        let (mode, len) = fastvint::decode_vu32_slice(x);
+        let mode = if len > 0 { mode } else { 0o644 };
+        // Extract just the permission bits (lower 9 bits)
+        let acl = (mode & 0o777) as u16;
         let mut s = String::with_capacity(9);
 
         macro_rules! add {

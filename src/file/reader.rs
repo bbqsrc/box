@@ -331,11 +331,9 @@ impl BoxFileReader {
     /// Checks: record attr -> archive attr -> default (0o644 for files, 0o755 for dirs)
     #[cfg(unix)]
     pub fn get_mode(&self, record: &Record<'_>) -> u32 {
-        use fastvint::ReadVintExt;
-
         if let Some(mode_bytes) = self.get_attr(record, "unix.mode") {
-            let mut cursor = std::io::Cursor::new(mode_bytes);
-            if let Ok(mode) = cursor.read_vu32() {
+            let (mode, len) = fastvint::decode_vu32_slice(mode_bytes);
+            if len > 0 {
                 return mode;
             }
         }
@@ -490,7 +488,11 @@ impl BoxFileReader {
                         .record
                         .attr(self.metadata(), "blake3")
                         .map(|h| h.to_vec());
-                    files.push((item.path.clone(), f.clone(), expected_hash));
+                    #[cfg(unix)]
+                    let mode = self.get_mode(&item.record);
+                    #[cfg(not(unix))]
+                    let mode = 0u32;
+                    files.push((item.path.clone(), f.clone(), expected_hash, mode));
                 }
                 Record::Link(_) => symlinks.push((item.path.clone(), item.record.clone())),
             }
@@ -562,7 +564,7 @@ impl BoxFileReader {
 
         // Seed initial tasks up to concurrency limit
         for _ in 0..concurrency {
-            if let Some((box_path, record, expected_hash)) = files_iter.next() {
+            if let Some((box_path, record, expected_hash, mode)) = files_iter.next() {
                 let mmap = mmap.clone();
                 let out_base = output_path.to_path_buf();
                 let progress = progress.clone();
@@ -582,6 +584,7 @@ impl BoxFileReader {
                         &record,
                         verify_checksums,
                         expected_hash.as_deref(),
+                        mode,
                     )
                     .await;
 
@@ -612,7 +615,7 @@ impl BoxFileReader {
             }
 
             // Spawn next task if more files remain
-            if let Some((box_path, record, expected_hash)) = files_iter.next() {
+            if let Some((box_path, record, expected_hash, mode)) = files_iter.next() {
                 let mmap = mmap.clone();
                 let out_base = output_path.to_path_buf();
                 let progress = progress.clone();
@@ -632,6 +635,7 @@ impl BoxFileReader {
                         &record,
                         verify_checksums,
                         expected_hash.as_deref(),
+                        mode,
                     )
                     .await;
 
@@ -1139,6 +1143,7 @@ async fn extract_single_file_from_mmap(
     record: &FileRecord<'_>,
     verify_checksum: bool,
     expected_hash: Option<&[u8]>,
+    mode: u32,
 ) -> Result<ExtractStats, ExtractError> {
     use crate::hashing::HashingWriter;
     use tokio::io::AsyncWriteExt;
@@ -1222,6 +1227,17 @@ async fn extract_single_file_from_mmap(
 
         stats.bytes_written = record.decompressed_length;
     }
+
+    // Set file permissions
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let permissions = std::fs::Permissions::from_mode(mode);
+        fs::set_permissions(&out_path, permissions).await.ok();
+    }
+
+    #[cfg(not(unix))]
+    let _ = mode;
 
     Ok(stats)
 }

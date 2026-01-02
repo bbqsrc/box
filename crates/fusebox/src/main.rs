@@ -4,7 +4,6 @@ use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use clap::Parser;
-use fastvint::ReadVintExt;
 use fuser::{
     FileAttr, FileType, Filesystem, MountOption, ReplyAttr, ReplyData, ReplyDirectory, ReplyEmpty,
     ReplyEntry, Request,
@@ -92,16 +91,18 @@ const TTL: Duration = Duration::from_secs(1);
 
 fn parse_archive_time(meta: &BoxMetadata, name: &str) -> Option<SystemTime> {
     let bytes = meta.file_attr(name)?;
-    let mut cursor = std::io::Cursor::new(bytes.as_slice());
-    let minutes = cursor.read_vi64().ok()?;
+    let (minutes, len) = fastvint::decode_vi64_slice(bytes.as_slice());
+    if len == 0 {
+        return None;
+    }
     let unix_secs = (minutes * 60 + BOX_EPOCH_UNIX) as u64;
     UNIX_EPOCH.checked_add(Duration::from_secs(unix_secs))
 }
 
 fn archive_uid(meta: &BoxMetadata) -> u32 {
     if let Some(bytes) = meta.file_attr("unix.uid") {
-        let mut cursor = std::io::Cursor::new(bytes.as_slice());
-        if let Ok(uid) = cursor.read_vu32() {
+        let (uid, len) = fastvint::decode_vu32_slice(bytes.as_slice());
+        if len > 0 {
             return uid;
         }
     }
@@ -110,8 +111,8 @@ fn archive_uid(meta: &BoxMetadata) -> u32 {
 
 fn archive_gid(meta: &BoxMetadata) -> u32 {
     if let Some(bytes) = meta.file_attr("unix.gid") {
-        let mut cursor = std::io::Cursor::new(bytes.as_slice());
-        if let Ok(gid) = cursor.read_vu32() {
+        let (gid, len) = fastvint::decode_vu32_slice(bytes.as_slice());
+        if len > 0 {
             return gid;
         }
     }
@@ -203,16 +204,15 @@ impl RecordExt for box_format::Record<'_> {
     fn perm(&self, meta: &BoxMetadata) -> u16 {
         match self.attr(meta, "unix.mode") {
             Some(bytes) => {
-                let mut cursor = std::io::Cursor::new(bytes);
-                match cursor.read_vu32() {
-                    Ok(mode) => (mode & 0o7777) as u16,
-                    Err(_) => {
-                        use box_format::Record::*;
-                        match self {
-                            File(_) => 0o644,
-                            Directory(_) => 0o755,
-                            Link(_) => 0o644,
-                        }
+                let (mode, len) = fastvint::decode_vu32_slice(bytes);
+                if len > 0 {
+                    (mode & 0o7777) as u16
+                } else {
+                    use box_format::Record::*;
+                    match self {
+                        File(_) => 0o644,
+                        Directory(_) => 0o755,
+                        Link(_) => 0o644,
                     }
                 }
             }
@@ -230,15 +230,15 @@ impl RecordExt for box_format::Record<'_> {
     fn uid(&self, meta: &BoxMetadata) -> u32 {
         // Try record attribute
         if let Some(bytes) = self.attr(meta, "unix.uid") {
-            let mut cursor = std::io::Cursor::new(bytes);
-            if let Ok(uid) = cursor.read_vu32() {
+            let (uid, len) = fastvint::decode_vu32_slice(bytes);
+            if len > 0 {
                 return uid;
             }
         }
         // Try archive-level default
         if let Some(bytes) = meta.file_attr("unix.uid") {
-            let mut cursor = std::io::Cursor::new(bytes);
-            if let Ok(uid) = cursor.read_vu32() {
+            let (uid, len) = fastvint::decode_vu32_slice(bytes);
+            if len > 0 {
                 return uid;
             }
         }
@@ -249,15 +249,15 @@ impl RecordExt for box_format::Record<'_> {
     fn gid(&self, meta: &BoxMetadata) -> u32 {
         // Try record attribute
         if let Some(bytes) = self.attr(meta, "unix.gid") {
-            let mut cursor = std::io::Cursor::new(bytes);
-            if let Ok(gid) = cursor.read_vu32() {
+            let (gid, len) = fastvint::decode_vu32_slice(bytes);
+            if len > 0 {
                 return gid;
             }
         }
         // Try archive-level default
         if let Some(bytes) = meta.file_attr("unix.gid") {
-            let mut cursor = std::io::Cursor::new(bytes);
-            if let Ok(gid) = cursor.read_vu32() {
+            let (gid, len) = fastvint::decode_vu32_slice(bytes);
+            if len > 0 {
                 return gid;
             }
         }

@@ -59,10 +59,11 @@ impl BoxItem {
     pub fn mode(record: &Record<'_>, meta: &BoxMetadata) -> u32 {
         match record.attr(meta, "unix.mode") {
             Some(bytes) => {
-                let mut cursor = std::io::Cursor::new(bytes);
-                match fastvint::ReadVintExt::read_vu32(&mut cursor) {
-                    Ok(mode) => mode & 0o7777,
-                    Err(_) => Self::default_mode(record),
+                let (mode, len) = fastvint::decode_vu32_slice(bytes);
+                if len > 0 {
+                    mode & 0o7777
+                } else {
+                    Self::default_mode(record)
                 }
             }
             None => Self::default_mode(record),
@@ -81,8 +82,8 @@ impl BoxItem {
     pub fn uid(record: &Record<'_>, meta: &BoxMetadata) -> u32 {
         match record.attr(meta, "unix.uid") {
             Some(bytes) => {
-                let mut cursor = std::io::Cursor::new(bytes);
-                fastvint::ReadVintExt::read_vu32(&mut cursor).unwrap_or(501)
+                let (v, len) = fastvint::decode_vu32_slice(bytes);
+                if len > 0 { v } else { 501 }
             }
             None => 501, // Default to current user
         }
@@ -92,8 +93,8 @@ impl BoxItem {
     pub fn gid(record: &Record<'_>, meta: &BoxMetadata) -> u32 {
         match record.attr(meta, "unix.gid") {
             Some(bytes) => {
-                let mut cursor = std::io::Cursor::new(bytes);
-                fastvint::ReadVintExt::read_vu32(&mut cursor).unwrap_or(20)
+                let (v, len) = fastvint::decode_vu32_slice(bytes);
+                if len > 0 { v } else { 20 }
             }
             None => 20, // Default staff group
         }
@@ -117,15 +118,14 @@ impl BoxItem {
     fn get_time(record: &Record<'_>, meta: &BoxMetadata, attr_name: &str) -> SystemTime {
         match record.attr(meta, attr_name) {
             Some(bytes) => {
-                let mut cursor = std::io::Cursor::new(bytes);
-                match fastvint::ReadVintExt::read_vi64(&mut cursor) {
-                    Ok(minutes) => {
-                        let unix_secs = (minutes * 60 + BOX_EPOCH_UNIX) as u64;
-                        UNIX_EPOCH
-                            .checked_add(Duration::from_secs(unix_secs))
-                            .unwrap_or(UNIX_EPOCH)
-                    }
-                    Err(_) => UNIX_EPOCH,
+                let (minutes, len) = fastvint::decode_vi64_slice(bytes);
+                if len > 0 {
+                    let unix_secs = (minutes * 60 + BOX_EPOCH_UNIX) as u64;
+                    UNIX_EPOCH
+                        .checked_add(Duration::from_secs(unix_secs))
+                        .unwrap_or(UNIX_EPOCH)
+                } else {
+                    UNIX_EPOCH
                 }
             }
             None => UNIX_EPOCH,

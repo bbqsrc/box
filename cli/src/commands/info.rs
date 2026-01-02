@@ -1,7 +1,6 @@
 use std::collections::BTreeMap;
 
 use box_format::{AttrMap, AttrValue, BoxFileReader, BoxMetadata, BoxPath, Record};
-use fastvint::ReadVintExt;
 
 use crate::cli::InfoArgs;
 use crate::error::{Error, Result};
@@ -51,24 +50,24 @@ fn format_attr(key: &str, value: &AttrValue<'_>) -> String {
                 format!("{}[u256 hex]: {}", key, hex)
             }
             "unix.mode" => {
-                let mut cursor = std::io::Cursor::new(*bytes);
-                if let Ok(val) = cursor.read_vu32() {
+                let (val, len) = fastvint::decode_vu32_slice(bytes);
+                if len > 0 {
                     format!("{}[vu32 oct]: {:o}", key, val)
                 } else {
                     format!("{}[bytes]: (invalid)", key)
                 }
             }
             "unix.uid" | "unix.gid" => {
-                let mut cursor = std::io::Cursor::new(*bytes);
-                if let Ok(val) = cursor.read_vu32() {
+                let (val, len) = fastvint::decode_vu32_slice(bytes);
+                if len > 0 {
                     format!("{}[vu32]: {}", key, val)
                 } else {
                     format!("{}[bytes]: (invalid)", key)
                 }
             }
             "created" | "modified" | "accessed" => {
-                let mut cursor = std::io::Cursor::new(*bytes);
-                if let Ok(minutes) = cursor.read_vi64() {
+                let (minutes, len) = fastvint::decode_vi64_slice(bytes);
+                if len > 0 {
                     let unix_secs = minutes * 60 + BOX_EPOCH_UNIX;
                     let time =
                         std::time::UNIX_EPOCH + std::time::Duration::new(unix_secs as u64, 0);
