@@ -441,6 +441,32 @@ impl<'a> BoxMetadata<'a> {
         &self.attrs
     }
 
+    /// Find the path for a given record index.
+    ///
+    /// This is O(n) for tree traversal, O(n) for FST iteration.
+    /// Used primarily for resolving symlink targets during extraction.
+    pub fn path_for_index(&self, target: RecordIndex) -> Option<BoxPath<'static>> {
+        // Try FST first if available
+        if let Some(fst) = &self.fst {
+            for (path_bytes, idx) in fst.prefix_iter(&[]) {
+                if idx == target.get() {
+                    if let Ok(path_str) = std::str::from_utf8(&path_bytes) {
+                        return Some(BoxPath(Cow::Owned(path_str.to_string())));
+                    }
+                }
+            }
+        }
+
+        // Fall back to tree traversal
+        for item in self.iter() {
+            if item.index == target {
+                return Some(item.path);
+            }
+        }
+
+        None
+    }
+
     /// Resolve an attribute key index to its string name.
     pub fn attr_key_name(&self, idx: usize) -> Option<&str> {
         use string_interner::Symbol;

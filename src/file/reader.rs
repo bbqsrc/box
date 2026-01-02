@@ -95,7 +95,7 @@ pub enum ExtractError {
     #[error("Creating link failed. Path: '{}' -> '{}'", .1.display(), .2.display())]
     CreateLinkFailed(#[source] std::io::Error, PathBuf, PathBuf),
 
-    #[error("Resolving link failed: Path: '{}' -> '{}'", .1.name, .1.target)]
+    #[error("Resolving link failed: Path: '{}' -> index {}", .1.name, .1.target.get())]
     ResolveLinkFailed(#[source] std::io::Error, LinkRecord<'static>),
 
     #[error("Could not convert to a valid Box path. Path suffix: '{}'", .1)]
@@ -658,8 +658,17 @@ impl BoxFileReader {
                         .map_err(|e| ExtractError::CreateDirFailed(e, parent.to_path_buf()))?;
                 }
 
-                // Use the target as-is (may be relative or absolute)
-                let target = link.target.to_path_buf();
+                // Resolve target index to path and compute relative symlink target
+                let target_path = self.meta.path_for_index(link.target).ok_or_else(|| {
+                    ExtractError::ResolveLinkFailed(
+                        std::io::Error::new(
+                            std::io::ErrorKind::NotFound,
+                            format!("No path for target index: {}", link.target.get()),
+                        ),
+                        link.clone().into_owned(),
+                    )
+                })?;
+                let target = self.compute_relative_symlink_target(&path, &target_path);
 
                 #[cfg(unix)]
                 {
@@ -874,17 +883,43 @@ impl BoxFileReader {
     }
 
     pub fn resolve_link(&self, link: &LinkRecord<'_>) -> std::io::Result<RecordsItem<'_, 'static>> {
-        match self.meta.index(&link.target) {
-            Some(index) => Ok(RecordsItem {
-                index,
-                path: link.target.clone().into_owned(),
-                record: self.meta.record(index).unwrap(),
-            }),
-            None => Err(std::io::Error::new(
+        let index = link.target;
+        let record = self.meta.record(index).ok_or_else(|| {
+            std::io::Error::new(
                 std::io::ErrorKind::NotFound,
-                format!("No record for link target: {}", link.target),
-            )),
-        }
+                format!("No record for link target index: {}", index.get()),
+            )
+        })?;
+        let path = self.meta.path_for_index(index).ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!("Could not find path for link target index: {}", index.get()),
+            )
+        })?;
+        Ok(RecordsItem {
+            index,
+            path,
+            record,
+        })
+    }
+
+    /// Compute the relative path from a link's location to its target.
+    ///
+    /// Given the link's path and target's path, computes the relative symlink target
+    /// (e.g., "../x86_64-unknown-linux-musl/libclang_rt.builtins.a").
+    fn compute_relative_symlink_target(
+        &self,
+        link_path: &BoxPath<'_>,
+        target_path: &BoxPath<'_>,
+    ) -> PathBuf {
+        let link_parent = link_path
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_default();
+        let target = target_path.to_path_buf();
+
+        // Use pathdiff to compute relative path, or fall back to target if it fails
+        pathdiff::diff_paths(&target, &link_parent).unwrap_or(target)
     }
 
     pub async fn read_bytes(
@@ -957,8 +992,17 @@ impl BoxFileReader {
                         .map_err(|e| ExtractError::CreateDirFailed(e, parent.to_path_buf()))?;
                 }
 
-                // Use the target as-is (may be relative or absolute)
-                let target = link.target.to_path_buf();
+                // Resolve target index to path and compute relative symlink target
+                let target_path = self.meta.path_for_index(link.target).ok_or_else(|| {
+                    ExtractError::ResolveLinkFailed(
+                        std::io::Error::new(
+                            std::io::ErrorKind::NotFound,
+                            format!("No path for target index: {}", link.target.get()),
+                        ),
+                        link.clone().into_owned(),
+                    )
+                })?;
+                let target = self.compute_relative_symlink_target(path, &target_path);
 
                 tokio::fs::symlink(&target, &link_path)
                     .await
@@ -975,11 +1019,19 @@ impl BoxFileReader {
                         .map_err(|e| ExtractError::CreateDirFailed(e, parent.to_path_buf()))?;
                 }
 
-                // Use the target as-is
-                let target = link.target.to_path_buf();
+                // Resolve target index to path and compute relative symlink target
+                let target_path = self.meta.path_for_index(link.target).ok_or_else(|| {
+                    ExtractError::ResolveLinkFailed(
+                        std::io::Error::new(
+                            std::io::ErrorKind::NotFound,
+                            format!("No path for target index: {}", link.target.get()),
+                        ),
+                        link.clone().into_owned(),
+                    )
+                })?;
+                let target = self.compute_relative_symlink_target(path, &target_path);
 
                 // On Windows, we need to know if it's a dir or file symlink
-                // Try to resolve to check, but fall back to file symlink
                 let is_dir = self
                     .resolve_link(link)
                     .map(|r| r.record.as_directory().is_some())
@@ -1076,8 +1128,17 @@ impl BoxFileReader {
                         .map_err(|e| ExtractError::CreateDirFailed(e, parent.to_path_buf()))?;
                 }
 
-                // Use the target as-is (may be relative or absolute)
-                let target = link.target.to_path_buf();
+                // Resolve target index to path and compute relative symlink target
+                let target_path = self.meta.path_for_index(link.target).ok_or_else(|| {
+                    ExtractError::ResolveLinkFailed(
+                        std::io::Error::new(
+                            std::io::ErrorKind::NotFound,
+                            format!("No path for target index: {}", link.target.get()),
+                        ),
+                        link.clone().into_owned(),
+                    )
+                })?;
+                let target = self.compute_relative_symlink_target(path, &target_path);
 
                 tokio::fs::symlink(&target, &link_path)
                     .await
@@ -1096,8 +1157,17 @@ impl BoxFileReader {
                         .map_err(|e| ExtractError::CreateDirFailed(e, parent.to_path_buf()))?;
                 }
 
-                // Use the target as-is
-                let target = link.target.to_path_buf();
+                // Resolve target index to path and compute relative symlink target
+                let target_path = self.meta.path_for_index(link.target).ok_or_else(|| {
+                    ExtractError::ResolveLinkFailed(
+                        std::io::Error::new(
+                            std::io::ErrorKind::NotFound,
+                            format!("No path for target index: {}", link.target.get()),
+                        ),
+                        link.clone().into_owned(),
+                    )
+                })?;
+                let target = self.compute_relative_symlink_target(path, &target_path);
 
                 // On Windows, we need to know if it's a dir or file symlink
                 let is_dir = self

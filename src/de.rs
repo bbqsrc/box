@@ -210,7 +210,7 @@ impl<'a> DeserializeBorrowed<'a> for DirectoryRecord<'a> {
 impl<'a> DeserializeBorrowed<'a> for LinkRecord<'a> {
     fn deserialize_borrowed(data: &'a [u8], pos: &mut usize) -> std::io::Result<Self> {
         let name = <Cow<'a, str>>::deserialize_borrowed(data, pos)?;
-        let target = BoxPath::deserialize_borrowed(data, pos)?;
+        let target = RecordIndex::deserialize_borrowed(data, pos)?;
         let attrs = AttrMap::deserialize_borrowed(data, pos)?;
 
         Ok(LinkRecord {
@@ -511,7 +511,7 @@ impl DeserializeOwned for LinkRecord<'static> {
     ) -> std::io::Result<Self> {
         let start = reader.stream_position().await?;
         let name = String::deserialize_owned(reader).await?;
-        let target = BoxPath::deserialize_owned(reader).await?;
+        let target = RecordIndex::deserialize_owned(reader).await?;
         let attrs = <HashMap<usize, Vec<u8>>>::deserialize_owned(reader).await?;
 
         let end = reader.stream_position().await?;

@@ -416,22 +416,32 @@ Link records describe symbolic links.
 |-------|------|-------------|
 | `type` | `u8` | Record type: `0x02` |
 | `name` | `String` | Link name |
-| `target` | `BoxPath` | Target path |
+| `target` | `RecordIndex` | Target record index |
 | `attrs` | `AttrMap` | Link attributes |
 
 **Requirements:**
 
 - `name` MUST be a valid filename component.
-- `target` MUST be a valid BoxPath (see Section 9).
+- `target` MUST be a valid RecordIndex pointing to an existing record in the archive.
 
 **Binary Layout:**
 
 ```
 02                          - type (symlink)
 [String: name]
-[String: target (BoxPath)]
+[VLQ: target (RecordIndex)]
 [AttrMap: attrs]
 ```
+
+**Extraction Behavior:**
+
+When extracting a link record, implementations MUST:
+
+1. Resolve the target RecordIndex to obtain the target's full path
+2. Compute the relative path from the link's parent directory to the target
+3. Create a symbolic link with the computed relative path
+
+This ensures that relative symlinks work correctly regardless of where the archive is extracted.
 
 ---
 

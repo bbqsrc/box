@@ -2,7 +2,7 @@ use std::borrow::Cow;
 use std::num::NonZeroU64;
 
 use crate::file::{BoxMetadata, RecordIndex};
-use crate::{AttrMap, compression::Compression, path::BoxPath};
+use crate::{AttrMap, compression::Compression};
 
 #[derive(Debug, Clone)]
 pub enum Record<'a> {
@@ -106,10 +106,9 @@ impl<'a> Record<'a> {
 pub struct LinkRecord<'a> {
     pub name: Cow<'a, str>,
 
-    /// The target path of the symbolic link, which is the place the link points to. A path is always relative (no leading separator),
-    /// always delimited by a `UNIT SEPARATOR U+001F` (`"\x1f"`), and may not contain
-    /// any `.` or `..` path chunks.
-    pub target: BoxPath<'a>,
+    /// The target record index. During extraction, this is resolved to compute
+    /// the relative path from the link's location to the target's location.
+    pub target: RecordIndex,
 
     /// Optional attributes for the given paths, such as Windows or Unix ACLs, last accessed time, etc.
     pub attrs: AttrMap,
@@ -125,7 +124,7 @@ impl LinkRecord<'_> {
     pub fn into_owned(self) -> LinkRecord<'static> {
         LinkRecord {
             name: Cow::Owned(self.name.into_owned()),
-            target: self.target.into_owned(),
+            target: self.target,
             attrs: self.attrs,
         }
     }

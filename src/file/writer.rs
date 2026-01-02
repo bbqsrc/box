@@ -470,17 +470,27 @@ impl BoxFileWriter {
     pub fn link(
         &mut self,
         path: BoxPath<'_>,
-        target: BoxPath<'static>,
+        target: RecordIndex,
         attrs: HashMap<String, Vec<u8>>,
-    ) -> std::io::Result<()> {
+    ) -> std::io::Result<RecordIndex> {
+        // Validate that the target index exists
+        if self.meta.record(target).is_none() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!(
+                    "Symlink target index {} does not exist in archive",
+                    target.get()
+                ),
+            ));
+        }
+
         let record = LinkRecord {
             name: std::borrow::Cow::Owned(path.filename().to_string()),
             target,
             attrs: self.convert_attrs(attrs),
         };
 
-        self.insert_inner(path, record.into())?;
-        Ok(())
+        self.insert_inner(path, record.into())
     }
 
     pub async fn insert<R: tokio::io::AsyncBufRead + Unpin>(
@@ -831,22 +841,11 @@ impl BoxFileWriter {
             }
 
             if file_type.is_symlink() {
+                // Symlinks require their target to be added first (we need RecordIndex).
+                // Skip symlinks here - they should be handled externally after all
+                // files are added (e.g., by bundle.rs which does two-pass processing).
                 if !options.follow_symlinks {
-                    let target_path = tokio::fs::read_link(&file_path).await?;
-                    let parent_path = file_path.parent().unwrap_or(Path::new(""));
-                    let target_path = parent_path.join(&target_path);
-                    let target_box_path = BoxPath::new(&target_path)?;
-                    let link_meta =
-                        crate::fs::metadata_to_attrs(&meta, options.timestamps, options.ownership);
-
-                    if self.meta.index(&box_path).is_none() {
-                        self.link(box_path, target_box_path, link_meta)?;
-                        if file_type.is_dir() {
-                            stats.dirs_added += 1;
-                        } else {
-                            stats.links_added += 1;
-                        }
-                    }
+                    continue;
                 }
             } else if file_type.is_dir() {
                 if self.meta.index(&box_path).is_none() {
