@@ -540,9 +540,11 @@ impl BoxFileReader {
         for (box_path, record, expected_hash) in files {
             let tx = tx.clone();
             let progress = progress.clone();
+            eprintln!("[box] acquiring permit for {}", box_path);
             let permit = semaphore.clone().acquire_owned().await.map_err(|e| {
                 ExtractError::DecompressionFailed(std::io::Error::other(e), box_path.to_path_buf())
             })?;
+            eprintln!("[box] got permit for {}", box_path);
 
             let mmap = mmap.clone();
             let out_base = output_path.to_path_buf();
@@ -556,6 +558,7 @@ impl BoxFileReader {
                     });
                 }
 
+                eprintln!("[box] extracting {}", box_path);
                 let result = extract_single_file_from_mmap(
                     mmap,
                     archive_offset,
@@ -565,10 +568,10 @@ impl BoxFileReader {
                     verify_checksums,
                     expected_hash.as_deref(),
                 )
-                .await
-                .map(|s| (box_path, s));
+                .await;
+                eprintln!("[box] extracted {} result={:?}", box_path, result.is_ok());
 
-                let _ = tx.send(result).await;
+                let _ = tx.send(result.map(|s| (box_path, s))).await;
             });
         }
 
