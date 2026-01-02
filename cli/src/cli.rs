@@ -142,6 +142,10 @@ pub struct ExtractArgs {
     #[arg(short = 'j', long = "jobs")]
     pub jobs: Option<usize>,
 
+    /// Show timing breakdown
+    #[arg(long)]
+    pub timings: bool,
+
     /// Specific files to extract (extracts all if none specified)
     pub files: Vec<PathBuf>,
 }

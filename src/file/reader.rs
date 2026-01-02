@@ -2,8 +2,8 @@ use std::io::SeekFrom;
 use std::num::NonZeroU64;
 use std::ops::AddAssign;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use mmap_io::MemoryMappedFile;
 use mmap_io::segment::Segment;
