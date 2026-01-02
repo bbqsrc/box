@@ -2,6 +2,7 @@ use std::io::SeekFrom;
 use std::num::NonZeroU64;
 use std::ops::AddAssign;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use mmap_io::MemoryMappedFile;
 use mmap_io::segment::Segment;
@@ -526,7 +527,13 @@ impl BoxFileReader {
         let (tx, mut rx) =
             mpsc::channel::<Result<(BoxPath, ExtractStats), ExtractError>>(concurrency * 2);
 
-        let archive_path = self.path.clone();
+        // Open mmap once and share across all tasks
+        let mmap: Arc<MemoryMappedFile> = MemoryMappedFile::open_ro(&self.path)
+            .map_err(|e| {
+                ExtractError::DecompressionFailed(std::io::Error::other(e), self.path.clone())
+            })?
+            .into();
+
         let archive_offset = self.offset;
         let verify_checksums = options.verify_checksums;
 
@@ -537,7 +544,7 @@ impl BoxFileReader {
                 ExtractError::DecompressionFailed(std::io::Error::other(e), box_path.to_path_buf())
             })?;
 
-            let archive_path = archive_path.clone();
+            let mmap = mmap.clone();
             let out_base = output_path.to_path_buf();
 
             tokio::spawn(async move {
@@ -549,8 +556,8 @@ impl BoxFileReader {
                     });
                 }
 
-                let result = extract_single_file(
-                    &archive_path,
+                let result = extract_single_file_from_mmap(
+                    mmap,
                     archive_offset,
                     &out_base,
                     &box_path,
@@ -727,14 +734,20 @@ impl BoxFileReader {
         let semaphore = Arc::new(Semaphore::new(concurrency));
         let (tx, mut rx) = mpsc::channel::<Result<(BoxPath, bool), ExtractError>>(concurrency * 2);
 
-        let archive_path = self.path.clone();
+        // Open mmap once and share across all tasks
+        let mmap: Arc<MemoryMappedFile> = MemoryMappedFile::open_ro(&self.path)
+            .map_err(|e| {
+                ExtractError::DecompressionFailed(std::io::Error::other(e), self.path.clone())
+            })?
+            .into();
+
         let archive_offset = self.offset;
 
         for (box_path, record, expected_hash) in files {
             let tx = tx.clone();
             let progress = progress.clone();
             let semaphore = semaphore.clone();
-            let archive_path = archive_path.clone();
+            let mmap = mmap.clone();
 
             tokio::spawn(async move {
                 let _permit = semaphore.acquire_owned().await.unwrap();
@@ -745,8 +758,8 @@ impl BoxFileReader {
                     });
                 }
 
-                let result = validate_single_file(
-                    &archive_path,
+                let result = validate_single_file_from_mmap(
+                    mmap,
                     archive_offset,
                     &box_path,
                     &record,
@@ -1061,11 +1074,11 @@ impl tokio::io::AsyncWrite for HashingSink<'_> {
     }
 }
 
-/// Extract a single file from the archive.
+/// Extract a single file from the archive using a shared mmap.
 ///
 /// This is a standalone function so it can be spawned as a task.
-async fn extract_single_file(
-    archive_path: &Path,
+async fn extract_single_file_from_mmap(
+    mmap: Arc<MemoryMappedFile>,
     archive_offset: u64,
     output_base: &Path,
     box_path: &BoxPath<'_>,
@@ -1085,12 +1098,9 @@ async fn extract_single_file(
             .map_err(|e| ExtractError::CreateDirFailed(e, parent.to_path_buf()))?;
     }
 
-    // Memory map the archive for this file's data
-    let mmap = MemoryMappedFile::open_ro(archive_path).map_err(|e| {
-        ExtractError::DecompressionFailed(std::io::Error::other(e), box_path.to_path_buf())
-    })?;
+    // Create segment from shared mmap
     let offset = archive_offset + record.data.get();
-    let segment = Segment::new(mmap.into(), offset, record.length).map_err(|e| {
+    let segment = Segment::new(mmap, offset, record.length).map_err(|e| {
         ExtractError::DecompressionFailed(std::io::Error::other(e), box_path.to_path_buf())
     })?;
     let data = segment.as_slice().map_err(|e| {
@@ -1162,22 +1172,19 @@ async fn extract_single_file(
     Ok(stats)
 }
 
-/// Validate a single file's checksum without extracting.
+/// Validate a single file's checksum using a shared mmap.
 ///
 /// Returns `true` if checksum matches, `false` if mismatch.
-async fn validate_single_file(
-    archive_path: &Path,
+async fn validate_single_file_from_mmap(
+    mmap: Arc<MemoryMappedFile>,
     archive_offset: u64,
     box_path: &BoxPath<'_>,
     record: &FileRecord<'_>,
     expected_hash: &[u8],
 ) -> Result<bool, ExtractError> {
-    // Memory map the archive for this file's data
-    let mmap = MemoryMappedFile::open_ro(archive_path).map_err(|e| {
-        ExtractError::VerificationFailed(std::io::Error::other(e), box_path.to_path_buf())
-    })?;
+    // Create segment from shared mmap
     let offset = archive_offset + record.data.get();
-    let segment = Segment::new(mmap.into(), offset, record.length).map_err(|e| {
+    let segment = Segment::new(mmap, offset, record.length).map_err(|e| {
         ExtractError::VerificationFailed(std::io::Error::other(e), box_path.to_path_buf())
     })?;
     let data = segment.as_slice().map_err(|e| {
