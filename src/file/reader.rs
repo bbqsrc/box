@@ -524,8 +524,9 @@ impl BoxFileReader {
 
         // Phase 2: Extract files (parallel)
         let semaphore = Arc::new(Semaphore::new(concurrency));
+        // Unbounded to prevent deadlock - workers block on send if bounded, holding permits
         let (tx, mut rx) =
-            mpsc::channel::<Result<(BoxPath, ExtractStats), ExtractError>>(concurrency * 2);
+            mpsc::unbounded_channel::<Result<(BoxPath, ExtractStats), ExtractError>>();
 
         // Open mmap once and share across all tasks
         let mmap: Arc<MemoryMappedFile> = MemoryMappedFile::open_ro(&self.path)
@@ -571,7 +572,7 @@ impl BoxFileReader {
                 .await;
                 eprintln!("[box] extracted {} result={:?}", box_path, result.is_ok());
 
-                let _ = tx.send(result.map(|s| (box_path, s))).await;
+                let _ = tx.send(result.map(|s| (box_path, s)));
             });
         }
 
