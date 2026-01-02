@@ -579,13 +579,7 @@ impl BoxFileReader {
             stats += file_stats;
             files_extracted += 1;
 
-            eprintln!(
-                "DEBUG: file completed: {} ({}/{})",
-                path, files_extracted, total_files
-            );
-
             if let Some(ref p) = progress {
-                eprintln!("DEBUG: sending Extracted for {}", path);
                 let _ = p.send(ExtractProgress::Extracted {
                     path,
                     files_extracted,
