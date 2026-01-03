@@ -20,7 +20,7 @@ async-compression.workspace = true
 tokio-snappy = { workspace = true, optional = true }
 async-walkdir.workspace = true
 futures.workspace = true
-blake3 = { workspace = true, features = ["traits-preview"] }
+blake3 = { workspace = true, features = ["traits-preview", "rayon", "mmap"] }
 hex.workspace = true
 pathdiff.workspace = true
 unic-normal.workspace = true
@@ -95,7 +95,7 @@ wild = "2.0"
 textwrap = "0.16"
 
 # Other
-mmap-io = { version = "0.9.4", features = ["async"] }
+mmap-io = { version = "0.9.4", features = ["async", "hugepages"] }
 hex = "0.4"
 pathdiff = "0.2"
 unic-normal = "0.9"

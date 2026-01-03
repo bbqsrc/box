@@ -243,7 +243,9 @@ impl BoxFileReader {
         let trailer_ptr = header.trailer.ok_or(OpenError::MissingTrailer)?;
 
         // Memory-map the file and use zero-copy deserialization for the trailer
-        let mmap = MemoryMappedFile::open_ro(&path)
+        let mmap = MemoryMappedFile::builder(&path)
+            .huge_pages(true)
+            .open()
             .map_err(|e| OpenError::ReadFailed(std::io::Error::other(e), path.clone()))?;
 
         // Get file size to calculate trailer segment bounds
@@ -551,10 +553,12 @@ impl BoxFileReader {
         }
         timing.directories = dirs_start.elapsed();
 
-        // Phase 2: Extract files (parallel)
+        // Phase 2: Extract files (parallel) with pipelined validation
         let decompress_start = Instant::now();
         // Open mmap once and share across all tasks
-        let mmap: Arc<MemoryMappedFile> = MemoryMappedFile::open_ro(&self.path)
+        let mmap: Arc<MemoryMappedFile> = MemoryMappedFile::builder(&self.path)
+            .huge_pages(true)
+            .open()
             .map_err(|e| {
                 ExtractError::DecompressionFailed(std::io::Error::other(e), self.path.clone())
             })?
@@ -563,18 +567,22 @@ impl BoxFileReader {
         let archive_offset = self.offset;
         let verify_checksums = options.verify_checksums;
 
-        let mut join_set = tokio::task::JoinSet::new();
+        // Two JoinSets: extraction (async I/O) and validation (blocking mmap hash)
+        let mut extract_set = tokio::task::JoinSet::new();
+        let mut validate_set = tokio::task::JoinSet::new();
         let mut files_iter = files.into_iter();
         let mut files_extracted = 0u64;
 
-        // Seed initial tasks up to concurrency limit
-        for _ in 0..concurrency {
-            if let Some((box_path, record, expected_hash, mode)) = files_iter.next() {
-                let mmap = mmap.clone();
-                let out_base = output_path.to_path_buf();
-                let progress = progress.clone();
-
-                join_set.spawn(async move {
+        // Helper to spawn an extraction task
+        let spawn_extract =
+            |extract_set: &mut tokio::task::JoinSet<_>,
+             box_path: BoxPath<'static>,
+             record: FileRecord<'static>,
+             expected_hash: Option<Vec<u8>>,
+             mmap: Arc<MemoryMappedFile>,
+             out_base: PathBuf,
+             progress: Option<tokio::sync::mpsc::UnboundedSender<ExtractProgress>>| {
+                extract_set.spawn(async move {
                     if let Some(ref p) = progress {
                         let _ = p.send(ExtractProgress::Extracting {
                             path: box_path.clone(),
@@ -587,65 +595,100 @@ impl BoxFileReader {
                         &out_base,
                         &box_path,
                         &record,
-                        verify_checksums,
-                        expected_hash.as_deref(),
-                        mode,
                     )
                     .await;
 
-                    result.map(|s| (box_path, s))
+                    result.map(|r| (box_path, r, expected_hash))
                 });
+            };
+
+        // Seed initial extraction tasks up to concurrency limit
+        for _ in 0..concurrency {
+            if let Some((box_path, record, expected_hash, mode)) = files_iter.next() {
+                spawn_extract(
+                    &mut extract_set,
+                    box_path,
+                    record,
+                    expected_hash,
+                    mmap.clone(),
+                    output_path.to_path_buf(),
+                    progress.clone(),
+                );
             }
         }
 
-        // Process results as they complete, spawning new tasks to maintain concurrency
-        while let Some(result) = join_set.join_next().await {
-            let result = result.map_err(|e| {
-                ExtractError::DecompressionFailed(
-                    std::io::Error::other(e),
-                    output_path.to_path_buf(),
-                )
-            })?;
-
-            let (path, file_stats) = result?;
-            stats += file_stats;
-            files_extracted += 1;
-
-            if let Some(ref p) = progress {
-                let _ = p.send(ExtractProgress::Extracted {
-                    path,
-                    files_extracted,
-                    total_files,
-                });
+        // Process both extraction and validation results as they complete
+        loop {
+            // Check if we're done
+            if extract_set.is_empty() && validate_set.is_empty() {
+                break;
             }
 
-            // Spawn next task if more files remain
-            if let Some((box_path, record, expected_hash, mode)) = files_iter.next() {
-                let mmap = mmap.clone();
-                let out_base = output_path.to_path_buf();
-                let progress = progress.clone();
+            tokio::select! {
+                // Handle extraction completion
+                Some(result) = extract_set.join_next() => {
+                    let result = result.map_err(|e| {
+                        ExtractError::DecompressionFailed(
+                            std::io::Error::other(e),
+                            output_path.to_path_buf(),
+                        )
+                    })?;
 
-                join_set.spawn(async move {
+                    let (path, extract_result, expected_hash) = result?;
+                    stats += extract_result.stats;
+                    files_extracted += 1;
+
                     if let Some(ref p) = progress {
-                        let _ = p.send(ExtractProgress::Extracting {
-                            path: box_path.clone(),
+                        let _ = p.send(ExtractProgress::Extracted {
+                            path: path.clone(),
+                            files_extracted,
+                            total_files,
                         });
                     }
 
-                    let result = extract_single_file_from_mmap(
-                        mmap,
-                        archive_offset,
-                        &out_base,
-                        &box_path,
-                        &record,
-                        verify_checksums,
-                        expected_hash.as_deref(),
-                        mode,
-                    )
-                    .await;
+                    // Spawn validation task if checksum verification requested
+                    if verify_checksums {
+                        if let Some(expected) = expected_hash {
+                            let out_path = extract_result.out_path;
+                            validate_set.spawn_blocking(move || {
+                                validate_file_checksum(&out_path, &expected)
+                            });
+                        }
+                    }
 
-                    result.map(|s| (box_path, s))
-                });
+                    // Spawn next extraction task if more files remain
+                    if let Some((box_path, record, expected_hash, mode)) = files_iter.next() {
+                        spawn_extract(
+                            &mut extract_set,
+                            box_path,
+                            record,
+                            expected_hash,
+                            mmap.clone(),
+                            output_path.to_path_buf(),
+                            progress.clone(),
+                        );
+                    }
+                }
+
+                // Handle validation completion
+                Some(result) = validate_set.join_next(), if !validate_set.is_empty() => {
+                    let result = result.map_err(|e| {
+                        ExtractError::DecompressionFailed(
+                            std::io::Error::other(e),
+                            output_path.to_path_buf(),
+                        )
+                    })?;
+
+                    if let Ok(matches) = result {
+                        if !matches {
+                            stats.checksum_failures += 1;
+                        }
+                    } else if let Err(e) = result {
+                        // Log but don't fail extraction for validation errors
+                        tracing::error!("Validation error: {}", e);
+                        stats.checksum_failures += 1;
+                    }
+                }
             }
         }
         timing.decompress = decompress_start.elapsed();
@@ -816,7 +859,9 @@ impl BoxFileReader {
         let (tx, mut rx) = mpsc::channel::<Result<(BoxPath, bool), ExtractError>>(concurrency * 2);
 
         // Open mmap once and share across all tasks
-        let mmap: Arc<MemoryMappedFile> = MemoryMappedFile::open_ro(&self.path)
+        let mmap: Arc<MemoryMappedFile> = MemoryMappedFile::builder(&self.path)
+            .huge_pages(true)
+            .open()
             .map_err(|e| {
                 ExtractError::DecompressionFailed(std::io::Error::other(e), self.path.clone())
             })?
@@ -940,7 +985,10 @@ impl BoxFileReader {
 
     /// Memory-map the file and return a segment for the record's data.
     pub fn memory_map(&self, record: &FileRecord<'_>) -> std::io::Result<Segment> {
-        let mmap = MemoryMappedFile::open_ro(&self.path).map_err(std::io::Error::other)?;
+        let mmap = MemoryMappedFile::builder(&self.path)
+            .huge_pages(true)
+            .open()
+            .map_err(std::io::Error::other)?;
         let offset = self.offset + record.data.get();
         Segment::new(mmap.into(), offset, record.length).map_err(std::io::Error::other)
     }
@@ -1196,21 +1244,16 @@ impl BoxFileReader {
     }
 }
 
-/// Compute blake3 hash of a file on disk.
+/// Compute blake3 hash of a file on disk using mmap for better performance.
 async fn compute_file_blake3(path: &Path) -> std::io::Result<blake3::Hash> {
-    let mut file = fs::File::open(path).await?;
-    let mut hasher = blake3::Hasher::new();
-    let mut buf = vec![0u8; 64 * 1024];
-
-    loop {
-        let n = file.read(&mut buf).await?;
-        if n == 0 {
-            break;
-        }
-        hasher.update(&buf[..n]);
-    }
-
-    Ok(hasher.finalize())
+    let path = path.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update_mmap(&path)?;
+        Ok(hasher.finalize())
+    })
+    .await
+    .map_err(|e| std::io::Error::other(e))?
 }
 
 /// A writer that computes a hash while writing to a sink.
@@ -1249,21 +1292,23 @@ impl tokio::io::AsyncWrite for HashingSink<'_> {
     }
 }
 
+/// Result of extracting a single file (without checksum verification).
+struct ExtractFileResult {
+    stats: ExtractStats,
+    out_path: PathBuf,
+}
+
 /// Extract a single file from the archive using a shared mmap.
 ///
 /// This is a standalone function so it can be spawned as a task.
-#[allow(clippy::too_many_arguments)]
+/// Does NOT perform checksum verification - that happens separately in the validation pipeline.
 async fn extract_single_file_from_mmap(
     mmap: Arc<MemoryMappedFile>,
     archive_offset: u64,
     output_base: &Path,
     box_path: &BoxPath<'_>,
     record: &FileRecord<'_>,
-    verify_checksum: bool,
-    expected_hash: Option<&[u8]>,
-    mode: u32,
-) -> Result<ExtractStats, ExtractError> {
-    use crate::hashing::HashingWriter;
+) -> Result<ExtractFileResult, ExtractError> {
     use tokio::io::AsyncWriteExt;
 
     let out_path = output_base.join(box_path.to_path_buf());
@@ -1289,75 +1334,59 @@ async fn extract_single_file_from_mmap(
         .await
         .map_err(|e| ExtractError::CreateFileFailed(e, out_path.to_path_buf()))?;
 
-    let cursor = std::io::Cursor::new(data);
-    let buf_reader = tokio::io::BufReader::new(cursor);
+    // Size buffers based on file size, capped at 8MB
+    const MAX_BUFFER_SIZE: usize = 8 * 1024 * 1024;
+    let read_buf_size = (record.length as usize).min(MAX_BUFFER_SIZE);
+    let write_buf_size = (record.decompressed_length as usize).min(MAX_BUFFER_SIZE);
 
-    let mut stats = ExtractStats {
+    let cursor = std::io::Cursor::new(data);
+    let buf_reader = tokio::io::BufReader::with_capacity(read_buf_size, cursor);
+
+    let mut out_file = tokio::io::BufWriter::with_capacity(write_buf_size, out_file);
+
+    record
+        .compression
+        .decompress_write(buf_reader, &mut out_file)
+        .await
+        .map_err(|e| ExtractError::DecompressionFailed(e, box_path.to_path_buf()))?;
+
+    out_file
+        .flush()
+        .await
+        .map_err(|e| ExtractError::DecompressionFailed(e, box_path.to_path_buf()))?;
+
+    let stats = ExtractStats {
         files_extracted: 1,
+        bytes_written: record.decompressed_length,
         ..Default::default()
     };
 
-    // Decompress with optional inline checksum verification
-    if verify_checksum && expected_hash.is_some() {
-        let out_file = tokio::io::BufWriter::new(out_file);
-        let mut hashing_writer = HashingWriter::<_, blake3::Hasher>::new(out_file);
+    Ok(ExtractFileResult { stats, out_path })
+}
 
-        record
-            .compression
-            .decompress_write(buf_reader, &mut hashing_writer)
-            .await
-            .map_err(|e| ExtractError::DecompressionFailed(e, box_path.to_path_buf()))?;
+/// Validate a file's checksum by reading it from disk and computing blake3 hash.
+///
+/// Uses blake3's mmap support for optimized hashing.
+/// Returns true if checksum matches, false if mismatch.
+fn validate_file_checksum(path: &Path, expected_hash: &[u8]) -> Result<bool, ExtractError> {
+    let mut hasher = blake3::Hasher::new();
+    hasher
+        .update_mmap(path)
+        .map_err(|e| ExtractError::VerificationFailed(e, path.to_path_buf()))?;
 
-        // Flush the writer
-        hashing_writer
-            .flush()
-            .await
-            .map_err(|e| ExtractError::DecompressionFailed(e, box_path.to_path_buf()))?;
+    let actual_hash = hasher.finalize();
+    let matches = actual_hash.as_bytes() == expected_hash;
 
-        stats.bytes_written = hashing_writer.bytes_written();
-
-        // Verify checksum
-        let actual_hash = hashing_writer.finalize_bytes();
-        if let Some(expected) = expected_hash
-            && actual_hash != expected
-        {
-            tracing::warn!(
-                "Checksum mismatch for {}: expected {}, got {}",
-                box_path,
-                hex::encode(expected),
-                hex::encode(&actual_hash)
-            );
-            stats.checksum_failures = 1;
-        }
-    } else {
-        let mut out_file = tokio::io::BufWriter::new(out_file);
-
-        record
-            .compression
-            .decompress_write(buf_reader, &mut out_file)
-            .await
-            .map_err(|e| ExtractError::DecompressionFailed(e, box_path.to_path_buf()))?;
-
-        out_file
-            .flush()
-            .await
-            .map_err(|e| ExtractError::DecompressionFailed(e, box_path.to_path_buf()))?;
-
-        stats.bytes_written = record.decompressed_length;
+    if !matches {
+        tracing::warn!(
+            "Checksum mismatch for {}: expected {}, got {}",
+            path.display(),
+            hex::encode(expected_hash),
+            hex::encode(actual_hash.as_bytes())
+        );
     }
 
-    // Set file permissions
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let permissions = std::fs::Permissions::from_mode(mode);
-        fs::set_permissions(&out_path, permissions).await.ok();
-    }
-
-    #[cfg(not(unix))]
-    let _ = mode;
-
-    Ok(stats)
+    Ok(matches)
 }
 
 /// Validate a single file's checksum using a shared mmap.
