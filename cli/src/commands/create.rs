@@ -3,13 +3,15 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
 
 use async_walkdir::WalkDir;
-use box_format::{BoxFileWriter, BoxPath, CompressionConfig, FileJob, ParallelProgress, fs};
-use fastvint::Vi64;
+use box_format::{
+    AttrValue, BOX_EPOCH_UNIX, BoxFileWriter, BoxPath, CompressionConfig, FileJob,
+    ParallelProgress, fs,
+};
 use futures::StreamExt;
 
 use crate::cli::CreateArgs;
 use crate::error::{Error, Result};
-use crate::util::{BOX_EPOCH_UNIX, create_spinner, matches_exclude, parse_paths_with_compression};
+use crate::util::{create_spinner, matches_exclude, parse_paths_with_compression};
 
 /// Timing stats for archive creation phases.
 #[derive(Default)]
@@ -84,15 +86,14 @@ pub async fn run(args: CreateArgs) -> Result<()> {
     let timestamps = args.timestamps || args.archive_metadata;
     let ownership = args.ownership || args.archive_metadata;
 
-    // Set creation timestamp as Vi64 minutes since Box epoch
+    // Set creation timestamp as DateTime (minutes since Box epoch)
     let unix_secs = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
         .unwrap()
         .as_secs() as i64;
     let minutes_since_epoch = (unix_secs - BOX_EPOCH_UNIX) / 60;
-    let now = Vi64::new(minutes_since_epoch);
 
-    bf.set_file_attr("created", now.bytes().to_vec())
+    bf.set_file_attr("created", AttrValue::DateTime(minutes_since_epoch))
         .map_err(|source| Error::SetAttribute {
             key: "created".to_string(),
             source,
@@ -254,19 +255,22 @@ pub async fn run(args: CreateArgs) -> Result<()> {
 
         let link_meta = fs::metadata_to_attrs(&link.meta, timestamps, ownership);
 
-        if is_dir {
-            bf.link(link.box_path.clone(), target_box_path, link_meta)
-                .map_err(|source| Error::CreateLink {
-                    path: link.box_path,
-                    source,
+        let target_index =
+            bf.metadata()
+                .index(&target_box_path)
+                .ok_or_else(|| Error::CreateLink {
+                    path: link.box_path.clone(),
+                    source: std::io::Error::new(
+                        std::io::ErrorKind::NotFound,
+                        format!("Symlink target '{}' not found in archive", target_box_path),
+                    ),
                 })?;
-        } else {
-            bf.link(link.box_path.clone(), target_box_path, link_meta)
-                .map_err(|source| Error::CreateLink {
-                    path: link.box_path,
-                    source,
-                })?;
-        }
+
+        bf.link(link.box_path.clone(), target_index, link_meta)
+            .map_err(|source| Error::CreateLink {
+                path: link.box_path,
+                source,
+            })?;
     }
 
     timing.symlinks = symlinks_start.elapsed();

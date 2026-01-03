@@ -1,10 +1,7 @@
 use std::path::Path;
 
-use box_format::{BoxPath, Compression, CompressionConfig};
+use box_format::{BOX_EPOCH_UNIX, BoxPath, Compression, CompressionConfig};
 use indicatif::{ProgressBar, ProgressStyle};
-
-/// Box epoch: 2020-01-01 00:00:00 UTC (seconds since Unix epoch)
-pub const BOX_EPOCH_UNIX: i64 = 1577836800;
 
 /// A path with its associated compression configuration
 #[derive(Debug, Clone)]

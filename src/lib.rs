@@ -2,6 +2,9 @@
 //!
 //! Use [BoxFileReader][BoxFileReader] to read files, and [BoxFileWriter][BoxFileWriter] to write files.
 
+/// Box epoch: 2026-01-01 00:00:00 UTC (seconds since Unix epoch)
+pub const BOX_EPOCH_UNIX: i64 = 1767225600;
+
 pub mod checksum;
 mod compression;
 mod counting;
@@ -29,7 +32,10 @@ pub use file::writer::{
     AddOptions, AddStats, BoxFileWriter, CompressedData, CompressedFile, FileJob, ParallelProgress,
     calculate_memory_threshold, compress_file,
 };
-pub use file::{AttrMap, BoxMetadata, meta::AttrValue};
+pub use file::{
+    AttrMap, BoxMetadata,
+    meta::{AttrKey, AttrType, AttrValue},
+};
 use header::BoxHeader;
 pub use path::BoxPath;
 pub use record::{DirectoryRecord, FileRecord, LinkRecord, Record};

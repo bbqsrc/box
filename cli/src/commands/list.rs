@@ -60,7 +60,10 @@ fn list_compact(bf: &BoxFileReader) -> Result<()> {
                 println!("{:>12}  {:>12}  {:>6}  {}", "-", "-", "-", path);
             }
             Record::Link(link) => {
-                let target = format_path(&link.target, false);
+                let target = bf
+                    .resolve_link(link)
+                    .map(|item| format_path(&item.path, item.record.as_directory().is_some()))
+                    .unwrap_or_else(|_| format!("<invalid:{}>", link.target.get()));
                 println!(
                     "{:>12}  {:>12}  {:>6}  {} -> {}",
                     "-", "-", "-", path, target
@@ -140,12 +143,10 @@ fn list_long(bf: &BoxFileReader) -> Result<()> {
                 );
             }
             Record::Link(link) => {
-                let target = format_path(
-                    &link.target,
-                    bf.resolve_link(link)
-                        .map(|x| x.record.as_directory().is_some())
-                        .unwrap_or(false),
-                );
+                let target = bf
+                    .resolve_link(link)
+                    .map(|item| format_path(&item.path, item.record.as_directory().is_some()))
+                    .unwrap_or_else(|_| format!("<invalid:{}>", link.target.get()));
                 println!(
                     "{:8}  {:>12}  {:>12}  {:20}  {:9}  {:>16}  {} -> {}",
                     "<link>", "-", "-", time, acl, "-", path, target
@@ -219,7 +220,10 @@ fn list_json(bf: &BoxFileReader) -> Result<()> {
                     .map(|v| format_time(Some(v)))
                     .filter(|s| s != "-"),
                 checksum: None,
-                target: Some(link.target.to_string()),
+                target: bf
+                    .metadata()
+                    .path_for_index(link.target)
+                    .map(|p| p.to_string()),
             },
             Record::File(file) => JsonEntry {
                 path,

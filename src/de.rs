@@ -3,12 +3,13 @@ use std::collections::HashMap;
 use std::num::NonZeroU64;
 
 use fastvint::{AsyncReadVintExt, ReadVintExt};
-use string_interner::DefaultStringInterner;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeek, AsyncSeekExt};
 
 use crate::{
     AttrMap, BoxHeader, BoxMetadata, BoxPath, Compression, DirectoryRecord, FileRecord, LinkRecord,
-    Record, file::RecordIndex,
+    Record,
+    file::RecordIndex,
+    file::meta::{AttrKey, AttrType},
 };
 
 use crate::compression::constants::*;
@@ -248,16 +249,32 @@ impl<'a> DeserializeBorrowed<'a> for Record<'a> {
     }
 }
 
-impl<'a> DeserializeBorrowed<'a> for DefaultStringInterner {
-    fn deserialize_borrowed(data: &'a [u8], pos: &mut usize) -> std::io::Result<Self> {
-        let len = read_vlq_u64(data, pos)? as usize;
-        let mut interner = DefaultStringInterner::new();
-        for _ in 0..len {
-            let s = <&'a str>::deserialize_borrowed(data, pos)?;
-            interner.get_or_intern(s);
-        }
-        Ok(interner)
+/// Deserialize Vec<AttrKey> with version awareness.
+pub(crate) fn deserialize_attr_keys_borrowed<'a>(
+    data: &'a [u8],
+    pos: &mut usize,
+    version: u8,
+) -> std::io::Result<Vec<AttrKey>> {
+    let len = read_vlq_u64(data, pos)? as usize;
+    let mut keys = Vec::with_capacity(len);
+    for _ in 0..len {
+        let attr_type = if version == 0 {
+            // v0: no type tag, default to Json
+            AttrType::Json
+        } else {
+            // v1+: read type tag first
+            let type_tag = read_u8_slice(data, pos)?;
+            AttrType::from_u8(type_tag).ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("unknown attribute type tag: {}", type_tag),
+                )
+            })?
+        };
+        let name = <&'a str>::deserialize_borrowed(data, pos)?.to_string();
+        keys.push(AttrKey { name, attr_type });
     }
+    Ok(keys)
 }
 
 /// Deserialize BoxMetadata with version awareness.
@@ -278,7 +295,7 @@ pub(crate) fn deserialize_metadata_borrowed<'a>(
         records.push(deserialize_record_borrowed(data, pos, version)?);
     }
 
-    let attr_keys = DefaultStringInterner::deserialize_borrowed(data, pos)?;
+    let attr_keys = deserialize_attr_keys_borrowed(data, pos, version)?;
     let attrs = AttrMap::deserialize_borrowed(data, pos)?;
 
     // Skip 0-padding to 8-byte boundary
@@ -583,7 +600,7 @@ pub(crate) async fn deserialize_metadata_owned<R: AsyncRead + AsyncSeek + Unpin 
         records.push(deserialize_record_owned(reader, version).await?);
     }
 
-    let attr_keys = <DefaultStringInterner>::deserialize_owned(reader).await?;
+    let attr_keys = deserialize_attr_keys_owned(reader, version).await?;
     let attrs = <HashMap<usize, Vec<u8>>>::deserialize_owned(reader).await?;
 
     // Skip 0-padding to 8-byte boundary
@@ -710,29 +727,38 @@ impl DeserializeOwned for Vec<u8> {
     }
 }
 
-impl DeserializeOwned for DefaultStringInterner {
-    async fn deserialize_owned<R: AsyncRead + AsyncSeek + Unpin + Send>(
-        reader: &mut R,
-    ) -> std::io::Result<Self>
-    where
-        Self: Sized,
-    {
-        let start = reader.stream_position().await?;
-        let len = reader.read_vu64().await? as usize;
-        let mut interner = DefaultStringInterner::new();
-        for _ in 0..len {
-            let s = String::deserialize_owned(reader).await?;
-            // Symbols are assigned in order: 0, 1, 2... matching the indices
-            interner.get_or_intern(s);
-        }
-        let end = reader.stream_position().await?;
-        tracing::debug!(
-            start = format_args!("{:#x}", start),
-            end = format_args!("{:#x}", end),
-            bytes = end - start,
-            count = len,
-            "deserialized StringInterner"
-        );
-        Ok(interner)
+/// Deserialize Vec<AttrKey> with version awareness (owned).
+pub(crate) async fn deserialize_attr_keys_owned<R: AsyncRead + AsyncSeek + Unpin + Send>(
+    reader: &mut R,
+    version: u8,
+) -> std::io::Result<Vec<AttrKey>> {
+    let start = reader.stream_position().await?;
+    let len = reader.read_vu64().await? as usize;
+    let mut keys = Vec::with_capacity(len);
+    for _ in 0..len {
+        let attr_type = if version == 0 {
+            // v0: no type tag, default to Json
+            AttrType::Json
+        } else {
+            // v1+: read type tag first
+            let type_tag = reader.read_u8().await?;
+            AttrType::from_u8(type_tag).ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("unknown attribute type tag: {}", type_tag),
+                )
+            })?
+        };
+        let name = String::deserialize_owned(reader).await?;
+        keys.push(AttrKey { name, attr_type });
     }
+    let end = reader.stream_position().await?;
+    tracing::debug!(
+        start = format_args!("{:#x}", start),
+        end = format_args!("{:#x}", end),
+        bytes = end - start,
+        count = len,
+        "deserialized AttrKeys"
+    );
+    Ok(keys)
 }

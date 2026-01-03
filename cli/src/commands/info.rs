@@ -1,10 +1,10 @@
 use std::collections::BTreeMap;
 
-use box_format::{AttrMap, AttrValue, BoxFileReader, BoxMetadata, BoxPath, Record};
+use box_format::{AttrMap, AttrValue, BOX_EPOCH_UNIX, BoxFileReader, BoxMetadata, BoxPath, Record};
 
 use crate::cli::InfoArgs;
 use crate::error::{Error, Result};
-use crate::util::{BOX_EPOCH_UNIX, format_size};
+use crate::util::format_size;
 
 /// Resolve a record's attrs map to key names and AttrValue.
 fn resolve_attrs<'a>(
@@ -14,28 +14,9 @@ fn resolve_attrs<'a>(
     let mut map = BTreeMap::new();
     for (key_idx, value) in attrs {
         if let Some(key) = metadata.attr_key_name(*key_idx) {
-            let is_binary_attr = matches!(
-                key,
-                "unix.mode"
-                    | "unix.uid"
-                    | "unix.gid"
-                    | "created"
-                    | "modified"
-                    | "accessed"
-                    | "blake3"
-            );
-            let attr_value = if is_binary_attr {
-                AttrValue::Bytes(value)
-            } else {
-                std::str::from_utf8(value)
-                    .map(|v| {
-                        serde_json::from_str(v)
-                            .map(AttrValue::Json)
-                            .unwrap_or(AttrValue::String(v))
-                    })
-                    .unwrap_or(AttrValue::Bytes(value))
-            };
-            map.insert(key, attr_value);
+            if let Some(attr_type) = metadata.attr_key_type(*key_idx) {
+                map.insert(key, metadata.parse_attr_value(value, attr_type));
+            }
         }
     }
     map
@@ -44,55 +25,46 @@ fn resolve_attrs<'a>(
 /// Format an attribute with its type annotation and value.
 fn format_attr(key: &str, value: &AttrValue<'_>) -> String {
     match value {
-        AttrValue::Bytes(bytes) => match key {
-            "blake3" if bytes.len() == 32 => {
-                let hex: String = bytes.iter().map(|b| format!("{:02x}", b)).collect();
-                format!("{}[u256 hex]: {}", key, hex)
-            }
-            "unix.mode" => {
-                let (val, len) = fastvint::decode_vu32_slice(bytes);
-                if len > 0 {
-                    format!("{}[vu32 oct]: {:o}", key, val)
-                } else {
-                    format!("{}[bytes]: (invalid)", key)
-                }
-            }
-            "unix.uid" | "unix.gid" => {
-                let (val, len) = fastvint::decode_vu32_slice(bytes);
-                if len > 0 {
-                    format!("{}[vu32]: {}", key, val)
-                } else {
-                    format!("{}[bytes]: (invalid)", key)
-                }
-            }
-            "created" | "modified" | "accessed" => {
-                let (minutes, len) = fastvint::decode_vi64_slice(bytes);
-                if len > 0 {
-                    let unix_secs = minutes * 60 + BOX_EPOCH_UNIX;
-                    let time =
-                        std::time::UNIX_EPOCH + std::time::Duration::new(unix_secs as u64, 0);
-                    let datetime: chrono::DateTime<chrono::Utc> = time.into();
-                    let formatted = datetime.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
-                    format!("{}[vi64 dt]: {}", key, formatted)
-                } else {
-                    format!("{}[bytes]: (invalid)", key)
-                }
-            }
-            _ if bytes.is_empty() => format!("{}[bytes]: (empty)", key),
-            _ => {
-                let hex: String = bytes
-                    .iter()
-                    .map(|b| format!("{:02x}", b))
-                    .collect::<Vec<_>>()
-                    .join(" ");
-                format!("{}[{} bytes]: {}", key, bytes.len(), hex)
-            }
-        },
+        AttrValue::Bytes(bytes) if bytes.is_empty() => format!("{}[bytes]: (empty)", key),
+        AttrValue::Bytes(bytes) => {
+            let hex: String = bytes
+                .iter()
+                .map(|b| format!("{:02x}", b))
+                .collect::<Vec<_>>()
+                .join(" ");
+            format!("{}[{} bytes]: {}", key, bytes.len(), hex)
+        }
         AttrValue::String(s) if s.is_empty() => format!("{}[str]: (empty)", key),
         AttrValue::String(s) => format!("{}[str]: {}", key, s),
         AttrValue::Json(json) => {
             let v = serde_json::to_string(json).unwrap_or_else(|_| format!("{:?}", json));
             format!("{}[json]: {}", key, v)
+        }
+        AttrValue::U8(v) => format!("{}[u8]: {}", key, v),
+        AttrValue::Vi32(v) => format!("{}[vi32]: {}", key, v),
+        AttrValue::Vu32(v) => {
+            if key == "unix.mode" {
+                format!("{}[vu32 oct]: {:o}", key, v)
+            } else {
+                format!("{}[vu32]: {}", key, v)
+            }
+        }
+        AttrValue::Vi64(v) => format!("{}[vi64]: {}", key, v),
+        AttrValue::Vu64(v) => format!("{}[vu64]: {}", key, v),
+        AttrValue::U128(bytes) => {
+            let hex: String = bytes.iter().map(|b| format!("{:02x}", b)).collect();
+            format!("{}[u128]: {}", key, hex)
+        }
+        AttrValue::U256(bytes) => {
+            let hex: String = bytes.iter().map(|b| format!("{:02x}", b)).collect();
+            format!("{}[u256]: {}", key, hex)
+        }
+        AttrValue::DateTime(minutes) => {
+            let unix_secs = minutes * 60 + BOX_EPOCH_UNIX;
+            let time = std::time::UNIX_EPOCH + std::time::Duration::new(unix_secs as u64, 0);
+            let datetime: chrono::DateTime<chrono::Utc> = time.into();
+            let formatted = datetime.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+            format!("{}[datetime]: {}", key, formatted)
         }
     }
 }
@@ -186,7 +158,11 @@ fn show_file_info(bf: &BoxFileReader, file_path: &str) -> Result<()> {
         }
         Record::Link(l) => {
             println!("Type:   symlink");
-            println!("Target: {}", l.target);
+            let target_path = metadata
+                .path_for_index(l.target)
+                .map(|p| p.to_string())
+                .unwrap_or_else(|| format!("<invalid:{}>", l.target.get()));
+            println!("Target: {}", target_path);
 
             println!();
             println!("Record:");

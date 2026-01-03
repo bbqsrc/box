@@ -4,7 +4,60 @@ use std::{
     fmt::Display,
 };
 
-use string_interner::{DefaultStringInterner, Symbol};
+/// Attribute type tag stored in the archive
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum AttrType {
+    /// Raw bytes, no parsing
+    Bytes = 0,
+    /// UTF-8 string
+    String = 1,
+    /// UTF-8 JSON
+    Json = 2,
+    /// Single byte (u8)
+    U8 = 3,
+    /// Variable-length signed 32-bit (zigzag)
+    Vi32 = 4,
+    /// Variable-length unsigned 32-bit
+    Vu32 = 5,
+    /// Variable-length signed 64-bit (zigzag)
+    Vi64 = 6,
+    /// Variable-length unsigned 64-bit
+    Vu64 = 7,
+    /// Fixed 16 bytes (128 bits, UUIDs)
+    U128 = 8,
+    /// Fixed 32 bytes (256 bits)
+    U256 = 9,
+    /// Minutes since Box epoch (2026-01-01 00:00:00 UTC), zigzag-encoded i64
+    DateTime = 10,
+}
+
+impl AttrType {
+    /// Convert from u8 tag value
+    pub fn from_u8(value: u8) -> Option<Self> {
+        match value {
+            0 => Some(Self::Bytes),
+            1 => Some(Self::String),
+            2 => Some(Self::Json),
+            3 => Some(Self::U8),
+            4 => Some(Self::Vi32),
+            5 => Some(Self::Vu32),
+            6 => Some(Self::Vi64),
+            7 => Some(Self::Vu64),
+            8 => Some(Self::U128),
+            9 => Some(Self::U256),
+            10 => Some(Self::DateTime),
+            _ => None, // Reserved values 11-255
+        }
+    }
+}
+
+/// Interned attribute key with type information
+#[derive(Debug, Clone)]
+pub struct AttrKey {
+    pub name: String,
+    pub attr_type: AttrType,
+}
 
 use super::AttrMap;
 use crate::Record;
@@ -21,8 +74,8 @@ pub struct BoxMetadata<'a> {
     /// This is to provide compatibility with platforms such as Linux, and allow for error checking a box file.
     pub(crate) records: Vec<Record<'a>>,
 
-    /// Interned attribute keys. Symbol::to_usize() gives the key index.
-    pub(crate) attr_keys: DefaultStringInterner,
+    /// Interned attribute keys with type information.
+    pub(crate) attr_keys: Vec<AttrKey>,
 
     /// The global attributes that apply to this entire box file.
     pub(crate) attrs: AttrMap,
@@ -37,7 +90,7 @@ impl std::fmt::Debug for BoxMetadata<'_> {
         f.debug_struct("BoxMetadata")
             .field("root", &self.root)
             .field("records", &self.records)
-            .field("attr_keys", &self.attr_keys.len())
+            .field("attr_keys_count", &self.attr_keys.len())
             .field("attrs", &self.attrs)
             .field("fst", &self.fst.as_ref().map(|f| f.len()))
             .finish()
@@ -370,37 +423,74 @@ impl<'a> BoxMetadata<'a> {
     pub fn file_attrs(&self) -> BTreeMap<&str, AttrValue<'_>> {
         let mut map = BTreeMap::new();
 
-        for (sym, key) in self.attr_keys.iter() {
-            let k = sym.to_usize();
-            if let Some(v) = self.attrs.get(&k) {
-                // Known binary attribute types - don't try to interpret as string
-                let is_binary_attr = matches!(
-                    key,
-                    "unix.mode"
-                        | "unix.uid"
-                        | "unix.gid"
-                        | "created"
-                        | "modified"
-                        | "accessed"
-                        | "blake3"
-                );
-
-                let value = if is_binary_attr {
-                    AttrValue::Bytes(v)
-                } else {
-                    std::str::from_utf8(v)
-                        .map(|v| {
-                            serde_json::from_str(v)
-                                .map(AttrValue::Json)
-                                .unwrap_or(AttrValue::String(v))
-                        })
-                        .unwrap_or(AttrValue::Bytes(v))
-                };
-                map.insert(key, value);
+        for (idx, attr_key) in self.attr_keys.iter().enumerate() {
+            if let Some(v) = self.attrs.get(&idx) {
+                let value = self.parse_attr_value(v, attr_key.attr_type);
+                map.insert(attr_key.name.as_str(), value);
             }
         }
 
         map
+    }
+
+    /// Parse raw bytes into AttrValue based on the stored type
+    pub fn parse_attr_value<'b>(&self, v: &'b [u8], attr_type: AttrType) -> AttrValue<'b> {
+        match attr_type {
+            AttrType::Bytes => AttrValue::Bytes(v),
+            AttrType::String => std::str::from_utf8(v)
+                .map(AttrValue::String)
+                .unwrap_or(AttrValue::Bytes(v)),
+            AttrType::Json => std::str::from_utf8(v)
+                .map(|s| {
+                    serde_json::from_str(s)
+                        .map(AttrValue::Json)
+                        .unwrap_or(AttrValue::String(s))
+                })
+                .unwrap_or(AttrValue::Bytes(v)),
+            AttrType::U8 => {
+                if v.len() == 1 {
+                    AttrValue::U8(v[0])
+                } else {
+                    AttrValue::Bytes(v)
+                }
+            }
+            AttrType::Vi32 => {
+                let (val, _) = fastvint::decode_vi32_slice(v);
+                AttrValue::Vi32(val)
+            }
+            AttrType::Vu32 => fastvint::ReadVintExt::read_vu64(&mut std::io::Cursor::new(v))
+                .map(|val| AttrValue::Vu32(val as u32))
+                .unwrap_or(AttrValue::Bytes(v)),
+            AttrType::Vi64 => {
+                let (val, _) = fastvint::decode_vi64_slice(v);
+                AttrValue::Vi64(val)
+            }
+            AttrType::Vu64 => fastvint::ReadVintExt::read_vu64(&mut std::io::Cursor::new(v))
+                .map(AttrValue::Vu64)
+                .unwrap_or(AttrValue::Bytes(v)),
+            AttrType::U128 => {
+                if v.len() == 16 {
+                    let mut arr = [0u8; 16];
+                    arr.copy_from_slice(v);
+                    AttrValue::U128(arr)
+                } else {
+                    AttrValue::Bytes(v)
+                }
+            }
+            AttrType::U256 => {
+                if v.len() == 32 {
+                    let mut arr = [0u8; 32];
+                    arr.copy_from_slice(v);
+                    AttrValue::U256(arr)
+                } else {
+                    AttrValue::Bytes(v)
+                }
+            }
+            AttrType::DateTime => {
+                let (val, _) = fastvint::decode_vi64_slice(v);
+                AttrValue::DateTime(val)
+            }
+        }
     }
 
     #[inline(always)]
@@ -412,28 +502,53 @@ impl<'a> BoxMetadata<'a> {
 
     /// Get all attribute keys used in this archive (both file-level and record-level).
     pub fn attr_keys(&self) -> Vec<&str> {
-        self.attr_keys.iter().map(|(_, key)| key).collect()
+        self.attr_keys.iter().map(|k| k.name.as_str()).collect()
     }
 
     /// Get all attribute keys with their indices.
     pub fn attr_keys_with_indices(&self) -> Vec<(usize, &str)> {
-        use string_interner::Symbol;
         self.attr_keys
             .iter()
-            .map(|(sym, key)| (sym.to_usize(), key))
+            .enumerate()
+            .map(|(idx, k)| (idx, k.name.as_str()))
             .collect()
     }
 
-    /// O(1) lookup of attribute key index.
-    #[inline(always)]
-    pub fn attr_key(&self, key: &str) -> Option<usize> {
-        self.attr_keys.get(key).map(|sym| sym.to_usize())
+    /// Get all attribute keys with their types.
+    pub fn attr_keys_with_types(&self) -> &[AttrKey] {
+        &self.attr_keys
     }
 
-    /// O(1) lookup or insert of attribute key index.
+    /// O(n) lookup of attribute key index.
     #[inline(always)]
-    pub fn attr_key_or_create(&mut self, key: &str) -> usize {
-        self.attr_keys.get_or_intern(key).to_usize()
+    pub fn attr_key(&self, key: &str) -> Option<usize> {
+        self.attr_keys.iter().position(|k| k.name == key)
+    }
+
+    /// O(n) lookup or insert of attribute key index with type.
+    /// Returns an error if the key exists with a different type.
+    #[inline(always)]
+    pub fn attr_key_or_create(&mut self, key: &str, attr_type: AttrType) -> std::io::Result<usize> {
+        if let Some(idx) = self.attr_key(key) {
+            let existing = &self.attr_keys[idx];
+            if existing.attr_type != attr_type {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!(
+                        "attribute '{}' already exists with type {:?}, cannot set as {:?}",
+                        key, existing.attr_type, attr_type
+                    ),
+                ));
+            }
+            Ok(idx)
+        } else {
+            let idx = self.attr_keys.len();
+            self.attr_keys.push(AttrKey {
+                name: key.to_string(),
+                attr_type,
+            });
+            Ok(idx)
+        }
     }
 
     /// Get the raw archive-level attrs map (for debugging).
@@ -469,25 +584,132 @@ impl<'a> BoxMetadata<'a> {
 
     /// Resolve an attribute key index to its string name.
     pub fn attr_key_name(&self, idx: usize) -> Option<&str> {
-        use string_interner::Symbol;
-        let sym = string_interner::DefaultSymbol::try_from_usize(idx)?;
-        self.attr_keys.resolve(sym)
+        self.attr_keys.get(idx).map(|k| k.name.as_str())
+    }
+
+    /// Resolve an attribute key index to its type.
+    pub fn attr_key_type(&self, idx: usize) -> Option<AttrType> {
+        self.attr_keys.get(idx).map(|k| k.attr_type)
     }
 }
 
 #[derive(Debug)]
 pub enum AttrValue<'a> {
-    String(&'a str),
     Bytes(&'a [u8]),
+    String(&'a str),
     Json(serde_json::Value),
+    U8(u8),
+    Vi32(i32),
+    Vu32(u32),
+    Vi64(i64),
+    Vu64(u64),
+    U128([u8; 16]),
+    U256([u8; 32]),
+    /// Minutes since Box epoch (2026-01-01 00:00:00 UTC)
+    DateTime(i64),
 }
 
 impl AttrValue<'_> {
-    pub fn as_bytes(&self) -> Cow<'_, [u8]> {
+    /// Get the AttrType for this value
+    pub fn attr_type(&self) -> AttrType {
         match self {
-            AttrValue::String(x) => Cow::Borrowed(x.as_bytes()),
+            AttrValue::Bytes(_) => AttrType::Bytes,
+            AttrValue::String(_) => AttrType::String,
+            AttrValue::Json(_) => AttrType::Json,
+            AttrValue::U8(_) => AttrType::U8,
+            AttrValue::Vi32(_) => AttrType::Vi32,
+            AttrValue::Vu32(_) => AttrType::Vu32,
+            AttrValue::Vi64(_) => AttrType::Vi64,
+            AttrValue::Vu64(_) => AttrType::Vu64,
+            AttrValue::U128(_) => AttrType::U128,
+            AttrValue::U256(_) => AttrType::U256,
+            AttrValue::DateTime(_) => AttrType::DateTime,
+        }
+    }
+}
+
+impl From<String> for AttrValue<'static> {
+    fn from(s: String) -> Self {
+        AttrValue::String(Box::leak(s.into_boxed_str()))
+    }
+}
+
+impl<'a> From<&'a str> for AttrValue<'a> {
+    fn from(s: &'a str) -> Self {
+        AttrValue::String(s)
+    }
+}
+
+impl From<Vec<u8>> for AttrValue<'static> {
+    fn from(v: Vec<u8>) -> Self {
+        AttrValue::Bytes(Box::leak(v.into_boxed_slice()))
+    }
+}
+
+impl<'a> From<&'a [u8]> for AttrValue<'a> {
+    fn from(v: &'a [u8]) -> Self {
+        AttrValue::Bytes(v)
+    }
+}
+
+impl From<serde_json::Value> for AttrValue<'static> {
+    fn from(v: serde_json::Value) -> Self {
+        AttrValue::Json(v)
+    }
+}
+
+impl From<u8> for AttrValue<'static> {
+    fn from(v: u8) -> Self {
+        AttrValue::U8(v)
+    }
+}
+
+impl From<i32> for AttrValue<'static> {
+    fn from(v: i32) -> Self {
+        AttrValue::Vi32(v)
+    }
+}
+
+impl From<u32> for AttrValue<'static> {
+    fn from(v: u32) -> Self {
+        AttrValue::Vu32(v)
+    }
+}
+
+impl From<i64> for AttrValue<'static> {
+    fn from(v: i64) -> Self {
+        AttrValue::Vi64(v)
+    }
+}
+
+impl From<u64> for AttrValue<'static> {
+    fn from(v: u64) -> Self {
+        AttrValue::Vu64(v)
+    }
+}
+
+impl AttrValue<'_> {
+    pub fn as_raw_bytes(&self) -> Cow<'_, [u8]> {
+        match self {
             AttrValue::Bytes(x) => Cow::Borrowed(*x),
+            AttrValue::String(x) => Cow::Borrowed(x.as_bytes()),
             AttrValue::Json(x) => Cow::Owned(serde_json::to_vec(x).unwrap()),
+            AttrValue::U8(x) => Cow::Owned(vec![*x]),
+            AttrValue::Vi32(x) => Cow::Owned(fastvint::encode_vi32(*x).bytes().to_vec()),
+            AttrValue::Vu32(x) => {
+                let mut buf = Vec::new();
+                fastvint::WriteVintExt::write_vu64(&mut buf, *x as u64).unwrap();
+                Cow::Owned(buf)
+            }
+            AttrValue::Vi64(x) => Cow::Owned(fastvint::encode_vi64(*x).bytes().to_vec()),
+            AttrValue::Vu64(x) => {
+                let mut buf = Vec::new();
+                fastvint::WriteVintExt::write_vu64(&mut buf, *x).unwrap();
+                Cow::Owned(buf)
+            }
+            AttrValue::U128(x) => Cow::Borrowed(x.as_slice()),
+            AttrValue::U256(x) => Cow::Borrowed(x.as_slice()),
+            AttrValue::DateTime(x) => Cow::Owned(fastvint::encode_vi64(*x).bytes().to_vec()),
         }
     }
 }
@@ -495,7 +717,6 @@ impl AttrValue<'_> {
 impl Display for AttrValue<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            AttrValue::String(v) => f.write_str(v),
             AttrValue::Bytes(bytes) => {
                 let mut bytes = bytes.iter();
                 if let Some(v) = bytes.next() {
@@ -506,10 +727,29 @@ impl Display for AttrValue<'_> {
                 }
                 Ok(())
             }
+            AttrValue::String(v) => f.write_str(v),
             AttrValue::Json(value) => {
                 let v = serde_json::to_string_pretty(value).unwrap();
                 f.write_str(&v)
             }
+            AttrValue::U8(v) => write!(f, "{}", v),
+            AttrValue::Vi32(v) => write!(f, "{}", v),
+            AttrValue::Vu32(v) => write!(f, "{}", v),
+            AttrValue::Vi64(v) => write!(f, "{}", v),
+            AttrValue::Vu64(v) => write!(f, "{}", v),
+            AttrValue::U128(bytes) => {
+                for b in bytes {
+                    f.write_fmt(format_args!("{:02x}", b))?;
+                }
+                Ok(())
+            }
+            AttrValue::U256(bytes) => {
+                for b in bytes {
+                    f.write_fmt(format_args!("{:02x}", b))?;
+                }
+                Ok(())
+            }
+            AttrValue::DateTime(v) => write!(f, "{} minutes since epoch", v),
         }
     }
 }

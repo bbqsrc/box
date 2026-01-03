@@ -160,7 +160,7 @@ The following vector types are used in the format:
 | Type | Usage | Element Encoding |
 |------|-------|------------------|
 | `Vec<Record>` | `BoxMetadata.records` | Record (see Section 8) |
-| `Vec<String>` | `attr_keys` | String (VLQ length + UTF-8) |
+| `Vec<AttrKey>` | `attr_keys` | Type tag + String (see Section 7.3) |
 
 ### 4.5 Vec\<u8\> (Byte Array)
 
@@ -322,11 +322,36 @@ The `records` field contains all `Record` structures. Records are referenced by 
 
 ### 7.3 Attribute Keys (attr_keys)
 
-Attribute keys are interned to reduce storage size. The `attr_keys` field is a vector of strings where the index corresponds to the key's symbol value.
+Attribute keys are interned to reduce storage size. Each key stores both its name and its value type. The `attr_keys` field is encoded as:
+
+```
+[VLQ: count]
+For each key:
+    [u8: type_tag]
+    [VLQ: string length]
+    [UTF-8 bytes]
+```
+
+**Type Tag Values:**
+
+| Value | Type | Description |
+|-------|------|-------------|
+| 0 | Bytes | Raw bytes, no interpretation |
+| 1 | String | UTF-8 string |
+| 2 | Json | UTF-8 JSON |
+| 3 | U8 | Single byte (u8) |
+| 4 | Vi32 | Zigzag-encoded i32 |
+| 5 | Vu32 | VLQ-encoded u32 |
+| 6 | Vi64 | Zigzag-encoded i64 |
+| 7 | Vu64 | VLQ-encoded u64 |
+| 8 | U128 | Fixed 16 bytes (128 bits) |
+| 9 | U256 | Fixed 32 bytes (256 bits) |
+| 10 | DateTime | Minutes since Box epoch (2026-01-01 00:00:00 UTC), zigzag-encoded i64 |
+| 11-255 | Reserved | Reserved for future use |
 
 When serializing: keys are written in symbol order (0, 1, 2, ...).
 
-When deserializing: strings are assigned symbols in the order read.
+When deserializing: strings are assigned symbols in the order read. The type tag determines how the attribute value is interpreted.
 
 ### 7.4 Archive Attributes (attrs)
 
@@ -585,9 +610,9 @@ This section defines well-known attributes. Implementations MAY define additiona
 | `modified` | Vi64 | Modification time (minutes since Box epoch) |
 | `accessed` | Vi64 | Access time (minutes since Box epoch) |
 
-**Box Epoch:** 2020-01-01 00:00:00 UTC (Unix timestamp 1577836800).
+**Box Epoch:** 2026-01-01 00:00:00 UTC (Unix timestamp 1767225600).
 
-Timestamps are OPTIONAL and stored as signed variable-length integers (Vi64, zigzag encoded) representing minutes since the Box epoch. The signed format supports dates before 2020. Minute precision is sufficient for typical archive use cases.
+Timestamps are OPTIONAL and stored as signed variable-length integers (Vi64, zigzag encoded) representing minutes since the Box epoch. The signed format supports dates before 2026. Minute precision is sufficient for typical archive use cases.
 
 When timestamps are absent, implementations SHOULD use the archive file's own creation/modification time as a fallback.
 
@@ -640,18 +665,19 @@ Writers SHOULD omit `unix.mode` when it matches the default for the record type 
 
 ### 12.4 Attribute Value Encoding
 
-Attribute values are stored as raw bytes (`Vec<u8>`). The interpretation depends on the attribute:
+Attribute values are stored as raw bytes (`Vec<u8>`). The type tag stored with the attribute key (see Section 7.3) determines how to interpret the value.
 
-| Attribute Type | Encoding |
-|----------------|----------|
-| Timestamps (`created`, `modified`, `accessed`) | Vi64 (variable, 1-9 bytes, zigzag encoded) |
-| Timestamp seconds extensions (`.seconds`) | u8 (1 byte) |
-| Timestamp nanoseconds extensions (`.nanoseconds`) | Vu64 (variable, 1-9 bytes) |
-| Unix permissions (`unix.mode`, `unix.uid`, `unix.gid`) | Vu32 (variable, 1-5 bytes) |
-| Checksums (`blake3`) | Raw hash bytes (32 bytes for Blake3) |
-| Custom attributes | Application-defined (typically UTF-8 or raw bytes) |
+**Standard Attribute Types:**
 
-Implementations MAY interpret UTF-8 attribute values as JSON for display purposes, but this is not required.
+| Attribute | Type Tag | Encoding |
+|-----------|----------|----------|
+| `created`, `modified`, `accessed` | DateTime (10) | Zigzag-encoded i64 (minutes since Box epoch) |
+| `created.seconds`, `modified.seconds`, `accessed.seconds` | U8 (3) | Single byte (0-59) |
+| `created.nanoseconds`, `modified.nanoseconds`, `accessed.nanoseconds` | Vu64 (7) | VLQ-encoded u64 |
+| `unix.mode`, `unix.uid`, `unix.gid` | Vu32 (5) | VLQ-encoded u32 |
+| `blake3` | U256 (9) | Fixed 32 bytes |
+
+Applications MAY define custom attributes with any type tag.
 
 ---
 

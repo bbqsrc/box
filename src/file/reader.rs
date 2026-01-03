@@ -10,7 +10,7 @@ use mmap_io::segment::Segment;
 use tokio::fs::{self, File, OpenOptions};
 use tokio::io::{AsyncReadExt, AsyncSeekExt, BufReader};
 
-use super::meta::Records;
+use super::meta::{AttrValue, Records};
 use super::{BoxMetadata, meta::RecordsItem};
 use crate::path::IntoBoxPathError;
 use crate::{
@@ -307,6 +307,11 @@ impl BoxFileReader {
     #[inline(always)]
     pub fn metadata(&self) -> &BoxMetadata<'static> {
         &self.meta
+    }
+
+    /// Get file-level attributes with type-aware parsing.
+    pub fn file_attrs(&self) -> std::collections::BTreeMap<&str, AttrValue<'_>> {
+        self.meta.file_attrs()
     }
 
     #[inline(always)]

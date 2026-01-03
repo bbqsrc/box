@@ -2,12 +2,9 @@
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use box_format::{BoxMetadata, Record, RecordIndex};
+use box_format::{BOX_EPOCH_UNIX, BoxMetadata, Record, RecordIndex};
 
 use crate::bindings::{FSItemIdentifier, FSItemType};
-
-/// Box epoch: 2020-01-01 00:00:00 UTC (seconds since Unix epoch)
-const BOX_EPOCH_UNIX: i64 = 1577836800;
 
 /// Wrapper around Box records that provides FSKit-compatible metadata.
 #[derive(Debug)]

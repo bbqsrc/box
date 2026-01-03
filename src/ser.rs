@@ -3,11 +3,9 @@ use std::io::SeekFrom;
 use fastvint::AsyncWriteVintExt;
 use tokio::io::{AsyncSeek, AsyncSeekExt, AsyncWrite, AsyncWriteExt};
 
-use string_interner::DefaultStringInterner;
-
 use crate::{
     AttrMap, BoxHeader, BoxMetadata, BoxPath, Compression, DirectoryRecord, FileRecord, LinkRecord,
-    Record, file::RecordIndex,
+    Record, file::RecordIndex, file::meta::AttrKey,
 };
 
 /// Write a u32 in little-endian format
@@ -80,17 +78,17 @@ impl Serialize for Vec<u8> {
     }
 }
 
-impl Serialize for DefaultStringInterner {
+impl Serialize for Vec<AttrKey> {
     async fn write<W: AsyncWrite + AsyncSeek + Unpin + Send>(
         &self,
         writer: &mut W,
     ) -> std::io::Result<()> {
-        // Write as Vec<String> for file format compatibility
-        // StringInterner iterates in symbol order (0, 1, 2, ...)
+        // v1 format: count, (type_tag, len, bytes)*
         writer.write_vu64(self.len() as u64).await?;
-        for (_sym, string) in self.iter() {
-            writer.write_vu64(string.len() as u64).await?;
-            writer.write_all(string.as_bytes()).await?;
+        for attr_key in self.iter() {
+            writer.write_u8(attr_key.attr_type as u8).await?;
+            writer.write_vu64(attr_key.name.len() as u64).await?;
+            writer.write_all(attr_key.name.as_bytes()).await?;
         }
         Ok(())
     }

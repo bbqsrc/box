@@ -1,7 +1,6 @@
 //! Time conversion utilities for Box epoch to Windows FILETIME.
 
-/// Box epoch: 2020-01-01 00:00:00 UTC (seconds since Unix epoch)
-pub const BOX_EPOCH_UNIX: i64 = 1577836800;
+pub use box_format::BOX_EPOCH_UNIX;
 
 /// Difference between Unix epoch (1970-01-01) and Windows epoch (1601-01-01)
 /// in 100-nanosecond intervals.
@@ -37,7 +36,7 @@ mod tests {
 
     #[test]
     fn test_box_epoch_to_filetime() {
-        // Box epoch (2020-01-01 00:00:00 UTC) should convert to a valid FILETIME
+        // Box epoch (2026-01-01 00:00:00 UTC) should convert to a valid FILETIME
         let ft = box_to_filetime(0);
         // Should be positive and reasonable
         assert!(ft > UNIX_TO_WINDOWS_EPOCH_DIFF);

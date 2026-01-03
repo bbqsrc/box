@@ -11,10 +11,7 @@ use fuser::{
 use libc::ENOENT;
 use tokio::runtime::Runtime;
 
-use box_format::{BoxFileReader, BoxMetadata, RecordIndex};
-
-/// Box epoch: 2020-01-01 00:00:00 UTC (seconds since Unix epoch)
-const BOX_EPOCH_UNIX: i64 = 1577836800;
+use box_format::{BOX_EPOCH_UNIX, BoxFileReader, BoxMetadata, RecordIndex};
 
 /// LRU cache with size limit for decompressed file contents
 struct LruCache {

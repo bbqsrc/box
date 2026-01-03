@@ -14,6 +14,7 @@ use tokio::io::{AsyncSeekExt, AsyncWriteExt, BufReader, BufWriter};
 
 use crate::{
     compression::{ByteCount, Compression, CompressionConfig},
+    file::meta::AttrType,
     hashing::HashingReader,
     header::BoxHeader,
     path::BoxPath,
@@ -323,17 +324,20 @@ impl BoxFileWriter {
         super::meta::Records::new(self.metadata(), &self.metadata().root, None)
     }
 
-    fn convert_attrs(&mut self, attrs: HashMap<String, Vec<u8>>) -> HashMap<usize, Vec<u8>> {
+    fn convert_attrs(
+        &mut self,
+        attrs: HashMap<String, Vec<u8>>,
+    ) -> std::io::Result<HashMap<usize, Vec<u8>>> {
         // Set archive-level uid/gid defaults from first file if not already set
         if let Some(uid) = attrs.get("unix.uid") {
-            let uid_key = self.meta.attr_key_or_create("unix.uid");
+            let uid_key = self.meta.attr_key_or_create("unix.uid", AttrType::Vu32)?;
             self.meta
                 .attrs
                 .entry(uid_key)
                 .or_insert_with(|| uid.clone());
         }
         if let Some(gid) = attrs.get("unix.gid") {
-            let gid_key = self.meta.attr_key_or_create("unix.gid");
+            let gid_key = self.meta.attr_key_or_create("unix.gid", AttrType::Vu32)?;
             self.meta
                 .attrs
                 .entry(gid_key)
@@ -367,10 +371,21 @@ impl BoxFileWriter {
             {
                 continue;
             }
-            let key = self.meta.attr_key_or_create(&k);
+            // Determine type based on well-known attribute names
+            let attr_type = match k.as_str() {
+                "unix.mode" | "unix.uid" | "unix.gid" => AttrType::Vu32,
+                "created" | "modified" | "accessed" => AttrType::DateTime,
+                "created.seconds" | "modified.seconds" | "accessed.seconds" => AttrType::U8,
+                "created.nanoseconds" | "modified.nanoseconds" | "accessed.nanoseconds" => {
+                    AttrType::Vu64
+                }
+                "blake3" => AttrType::U256,
+                _ => AttrType::Bytes,
+            };
+            let key = self.meta.attr_key_or_create(&k, attr_type)?;
             result.insert(key, v);
         }
-        result
+        Ok(result)
     }
 
     fn insert_inner(
@@ -439,7 +454,7 @@ impl BoxFileWriter {
         let record = DirectoryRecord {
             name: std::borrow::Cow::Owned(path.filename().to_string()),
             entries: vec![],
-            attrs: self.convert_attrs(attrs),
+            attrs: self.convert_attrs(attrs)?,
         };
 
         self.insert_inner(path, record.into())?;
@@ -487,7 +502,7 @@ impl BoxFileWriter {
         let record = LinkRecord {
             name: std::borrow::Cow::Owned(path.filename().to_string()),
             target,
-            attrs: self.convert_attrs(attrs),
+            attrs: self.convert_attrs(attrs)?,
         };
 
         self.insert_inner(path, record.into())
@@ -500,7 +515,7 @@ impl BoxFileWriter {
         value: R,
         attrs: HashMap<String, Vec<u8>>,
     ) -> std::io::Result<&FileRecord<'static>> {
-        let attrs = self.convert_attrs(attrs);
+        let attrs = self.convert_attrs(attrs)?;
         let next_addr = self.next_write_addr();
         let byte_count = self.write_data(config, next_addr.get(), value).await?;
 
@@ -540,7 +555,7 @@ impl BoxFileWriter {
         R: tokio::io::AsyncRead + Unpin,
         C: Checksum,
     {
-        let attrs = self.convert_attrs(attrs);
+        let attrs = self.convert_attrs(attrs)?;
         let next_addr = self.next_write_addr();
 
         // Wrap the reader in HashingReader to compute checksum while reading
@@ -568,7 +583,7 @@ impl BoxFileWriter {
 
         // Set checksum attribute if NAME is not empty
         if !C::NAME.is_empty() {
-            let key = self.meta.attr_key_or_create(C::NAME);
+            let key = self.meta.attr_key_or_create(C::NAME, AttrType::U256)?;
             self.meta
                 .record_mut(index)
                 .unwrap()
@@ -676,7 +691,7 @@ impl BoxFileWriter {
         self.file_pos = self.next_write_pos;
 
         // Convert string attrs to internal keys
-        let attrs = self.convert_attrs(file.attrs);
+        let attrs = self.convert_attrs(file.attrs)?;
 
         // Create record with the correct offset
         let record = FileRecord {
@@ -692,7 +707,7 @@ impl BoxFileWriter {
 
         // Set checksum attribute if present
         if let Some((attr_name, hash)) = file.checksum {
-            let key = self.meta.attr_key_or_create(&attr_name);
+            let key = self.meta.attr_key_or_create(&attr_name, AttrType::U256)?;
             self.meta
                 .record_mut(index)
                 .unwrap()
@@ -707,7 +722,7 @@ impl BoxFileWriter {
         &mut self,
         path: &BoxPath<'_>,
         key: S,
-        value: Vec<u8>,
+        value: super::meta::AttrValue<'_>,
     ) -> std::io::Result<()> {
         let index = match self.iter().find(|r| &r.path == path) {
             Some(v) => v.index,
@@ -719,17 +734,25 @@ impl BoxFileWriter {
             }
         };
 
-        let key = self.meta.attr_key_or_create(key.as_ref());
+        let attr_type = value.attr_type();
+        let key_idx = self.meta.attr_key_or_create(key.as_ref(), attr_type)?;
+        let bytes = value.as_raw_bytes().into_owned();
         let record = self.meta.record_mut(index).unwrap();
-        record.attrs_mut().insert(key, value);
+        record.attrs_mut().insert(key_idx, bytes);
 
         Ok(())
     }
 
-    pub fn set_file_attr<S: AsRef<str>>(&mut self, key: S, value: Vec<u8>) -> std::io::Result<()> {
-        let key = self.meta.attr_key_or_create(key.as_ref());
+    pub fn set_file_attr<S: AsRef<str>>(
+        &mut self,
+        key: S,
+        value: super::meta::AttrValue<'_>,
+    ) -> std::io::Result<()> {
+        let attr_type = value.attr_type();
+        let key_idx = self.meta.attr_key_or_create(key.as_ref(), attr_type)?;
+        let bytes = value.as_raw_bytes().into_owned();
 
-        self.meta.attrs.insert(key, value);
+        self.meta.attrs.insert(key_idx, bytes);
 
         Ok(())
     }

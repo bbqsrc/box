@@ -4,8 +4,7 @@ use std::collections::HashMap;
 
 use fastvint::Vi64;
 
-/// Box epoch: 2020-01-01 00:00:00 UTC (seconds since Unix epoch)
-pub const BOX_EPOCH_UNIX: i64 = 1577836800;
+use crate::BOX_EPOCH_UNIX;
 
 /// Default mode for files (0o644 = rw-r--r--)
 pub const DEFAULT_FILE_MODE: u32 = 0o100644;
