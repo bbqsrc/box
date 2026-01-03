@@ -306,6 +306,12 @@ impl BoxFileReader {
         self.header.version
     }
 
+    /// Returns true if this archive allows `\xNN` escape sequences in paths.
+    #[inline(always)]
+    pub fn allow_escapes(&self) -> bool {
+        self.header.allow_escapes
+    }
+
     #[inline(always)]
     pub fn metadata(&self) -> &BoxMetadata<'static> {
         &self.meta

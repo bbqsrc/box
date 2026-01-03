@@ -123,4 +123,8 @@ pub enum Error {
 
     #[error("File not found in archive: `{}`", path.display())]
     FileNotFound { path: PathBuf },
+
+    #[error("Archive contains escaped paths")]
+    #[diagnostic(help("Use --allow-escapes to extract archives with escaped paths"))]
+    AllowEscapesRequired,
 }

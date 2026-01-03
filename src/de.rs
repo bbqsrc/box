@@ -557,7 +557,9 @@ impl DeserializeOwned for BoxHeader {
         }
 
         let version = reader.read_u8().await?;
-        reader.read_exact(&mut [0u8; 3]).await?; // skip reserved1
+        let flags = reader.read_u8().await?;
+        let allow_escapes = (flags & 1) != 0;
+        reader.read_exact(&mut [0u8; 2]).await?; // skip reserved1 remaining
         let alignment = read_u32_le(reader).await?;
         reader.read_exact(&mut [0u8; 4]).await?; // skip reserved2
         let trailer = read_u64_le(reader).await?;
@@ -575,6 +577,7 @@ impl DeserializeOwned for BoxHeader {
         Ok(BoxHeader {
             magic_bytes,
             version,
+            allow_escapes,
             alignment,
             trailer: NonZeroU64::new(trailer),
         })

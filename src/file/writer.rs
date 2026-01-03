@@ -275,6 +275,21 @@ impl BoxFileWriter {
         Self::create_inner(path, BoxHeader::with_alignment(alignment)).await
     }
 
+    /// This will create a new `.box` file that allows `\xNN` escape sequences in paths.
+    /// Use this for archives that need to store systemd-style filenames.
+    pub async fn create_with_escapes<P: AsRef<Path>>(path: P) -> std::io::Result<BoxFileWriter> {
+        Self::create_inner(path, BoxHeader::with_escapes(true)).await
+    }
+
+    /// This will create a new `.box` file with custom alignment and escape settings.
+    pub async fn create_with_options<P: AsRef<Path>>(
+        path: P,
+        alignment: u32,
+        allow_escapes: bool,
+    ) -> std::io::Result<BoxFileWriter> {
+        Self::create_inner(path, BoxHeader::with_options(alignment, allow_escapes)).await
+    }
+
     async fn create_inner<P: AsRef<Path>>(
         path: P,
         header: BoxHeader,
@@ -313,6 +328,23 @@ impl BoxFileWriter {
 
     pub fn version(&self) -> u8 {
         self.header.version
+    }
+
+    /// Returns true if this archive allows `\xNN` escape sequences in paths.
+    pub fn allow_escapes(&self) -> bool {
+        self.header.allow_escapes
+    }
+
+    /// Create a BoxPath using the appropriate sanitization for this archive.
+    fn make_box_path<P: AsRef<Path>>(
+        &self,
+        path: P,
+    ) -> std::result::Result<BoxPath<'static>, crate::path::IntoBoxPathError> {
+        if self.header.allow_escapes {
+            BoxPath::new_with_escapes(path)
+        } else {
+            BoxPath::new(path)
+        }
     }
 
     /// Will return the metadata for the `.box` if it has been provided.
@@ -810,7 +842,7 @@ impl BoxFileWriter {
 
         if path_meta.is_file() {
             // Single file
-            let box_path = BoxPath::new(path)?;
+            let box_path = self.make_box_path(path)?;
             let record = self
                 .insert_file(
                     path,
@@ -854,7 +886,7 @@ impl BoxFileWriter {
                 continue;
             }
 
-            let box_path = BoxPath::new(&file_path)?;
+            let box_path = self.make_box_path(&file_path)?;
 
             // Ensure parent directories exist
             if let Some(parent) = box_path.parent()

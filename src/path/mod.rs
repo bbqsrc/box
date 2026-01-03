@@ -4,6 +4,8 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use unic_ucd::GeneralCategory;
+
 mod error;
 
 pub use self::error::IntoBoxPathError;
@@ -31,7 +33,6 @@ pub struct BoxPath<'a>(pub(crate) Cow<'a, str>);
 pub fn sanitize<P: AsRef<Path>>(path: P) -> Option<Vec<String>> {
     use std::path::Component;
     use unic_normal::StrNormalForm;
-    use unic_ucd::GeneralCategory;
 
     let mut out = vec![];
 
@@ -62,6 +63,81 @@ pub fn sanitize<P: AsRef<Path>>(path: P) -> Option<Vec<String>> {
     Some(out)
 }
 
+/// Check if a character is allowed in a filename (used for both direct chars and decoded escapes).
+fn is_char_allowed(c: char) -> bool {
+    let cat = GeneralCategory::of(c);
+    // Reject: backslash, control chars, separators (except space)
+    !(c == '\\' || c == '/' || cat == GeneralCategory::Control || (cat.is_separator() && c != ' '))
+}
+
+/// Validate a path component that may contain `\xNN` escape sequences.
+/// Returns true if the component is valid (all escapes decode to allowed chars,
+/// and non-escape chars are also allowed).
+fn validate_component_with_escapes(s: &str) -> bool {
+    let bytes = s.as_bytes();
+    let mut i = 0;
+
+    while i < bytes.len() {
+        if bytes[i] == b'\\' {
+            // Check for \xNN pattern
+            if i + 3 < bytes.len() && bytes[i + 1] == b'x' {
+                let hex_str = &s[i + 2..i + 4];
+                if let Ok(byte_val) = u8::from_str_radix(hex_str, 16) {
+                    // Validate the decoded character is allowed
+                    if byte_val < 0x80 {
+                        // ASCII range - check directly
+                        if !is_char_allowed(byte_val as char) {
+                            return false;
+                        }
+                    }
+                    // Non-ASCII escapes are allowed (they'd form part of UTF-8 sequences)
+                    i += 4;
+                    continue;
+                }
+            }
+            // Invalid escape or bare backslash - reject
+            return false;
+        } else {
+            // Regular character - validate it
+            let c = s[i..].chars().next().unwrap();
+            if !is_char_allowed(c) {
+                return false;
+            }
+            i += c.len_utf8();
+        }
+    }
+
+    true
+}
+
+/// Sanitize a path, allowing `\xNN` escape sequences.
+/// Used when the archive has the allow_escapes flag set.
+pub fn sanitize_with_escapes<P: AsRef<Path>>(path: P) -> Option<Vec<String>> {
+    use std::path::Component;
+    use unic_normal::StrNormalForm;
+
+    let mut out = vec![];
+
+    for component in path.as_ref().components() {
+        match component {
+            Component::CurDir | Component::RootDir | Component::Prefix(_) => {}
+            Component::ParentDir => {
+                out.pop();
+            }
+            Component::Normal(os_str) => out.push(
+                os_str
+                    .to_str()
+                    .map(|x| x.trim())
+                    .filter(|x| !x.is_empty())
+                    .filter(|x| validate_component_with_escapes(x))
+                    .map(|x| x.nfc().collect::<String>())?,
+            ),
+        }
+    }
+
+    Some(out)
+}
+
 impl AsRef<[u8]> for BoxPath<'_> {
     #[inline(always)]
     fn as_ref(&self) -> &[u8] {
@@ -72,6 +148,20 @@ impl AsRef<[u8]> for BoxPath<'_> {
 impl BoxPath<'static> {
     pub fn new<P: AsRef<Path>>(path: P) -> std::result::Result<BoxPath<'static>, IntoBoxPathError> {
         let out = sanitize(&path).ok_or(IntoBoxPathError::UnrepresentableStr)?;
+
+        if out.is_empty() {
+            return Err(IntoBoxPathError::EmptyPath);
+        }
+
+        Ok(BoxPath(Cow::Owned(out.join(PATH_BOX_SEP))))
+    }
+
+    /// Create a BoxPath allowing `\xNN` escape sequences.
+    /// Use this when the archive has the allow_escapes flag set.
+    pub fn new_with_escapes<P: AsRef<Path>>(
+        path: P,
+    ) -> std::result::Result<BoxPath<'static>, IntoBoxPathError> {
+        let out = sanitize_with_escapes(&path).ok_or(IntoBoxPathError::UnrepresentableStr)?;
 
         if out.is_empty() {
             return Err(IntoBoxPathError::EmptyPath);
@@ -229,5 +319,64 @@ mod tests {
         let box_path = BoxPath::new("/");
         println!("{:?}", box_path);
         assert!(box_path.is_err());
+    }
+
+    // Escape sequence tests
+
+    #[test]
+    fn escape_dash_allowed() {
+        // \x2d is dash, which is allowed
+        let box_path = BoxPath::new_with_escapes(r"foo\x2dbar");
+        assert!(box_path.is_ok());
+        assert_eq!(box_path.unwrap().0, r"foo\x2dbar");
+    }
+
+    #[test]
+    fn escape_slash_rejected() {
+        // \x2f is forward slash, not allowed in filenames
+        let box_path = BoxPath::new_with_escapes(r"foo\x2fbar");
+        assert!(box_path.is_err());
+    }
+
+    #[test]
+    fn escape_null_rejected() {
+        // \x00 is null, not allowed
+        let box_path = BoxPath::new_with_escapes(r"foo\x00bar");
+        assert!(box_path.is_err());
+    }
+
+    #[test]
+    fn escape_backslash_rejected() {
+        // \x5c is backslash, not allowed
+        let box_path = BoxPath::new_with_escapes(r"foo\x5cbar");
+        assert!(box_path.is_err());
+    }
+
+    #[test]
+    fn bare_backslash_rejected() {
+        // Bare backslash without valid escape is rejected
+        let box_path = BoxPath::new_with_escapes(r"foo\bar");
+        assert!(box_path.is_err());
+    }
+
+    #[test]
+    fn invalid_hex_rejected() {
+        // \xZZ is not valid hex
+        let box_path = BoxPath::new_with_escapes(r"foo\xZZbar");
+        assert!(box_path.is_err());
+    }
+
+    #[test]
+    fn escape_without_flag_rejected() {
+        // Standard BoxPath::new should reject escapes
+        let box_path = BoxPath::new(r"foo\x2dbar");
+        assert!(box_path.is_err());
+    }
+
+    #[test]
+    fn systemd_style_path() {
+        // Typical systemd escaped path
+        let box_path = BoxPath::new_with_escapes(r"dev\x2ddisk\x2dby\x2duuid\x2d1234.device");
+        assert!(box_path.is_ok());
     }
 }

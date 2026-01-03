@@ -108,6 +108,10 @@ pub struct CreateArgs {
     #[arg(short = 'j', long = "jobs")]
     pub jobs: Option<usize>,
 
+    /// Allow \xNN escape sequences in paths (for systemd-style filenames)
+    #[arg(long)]
+    pub allow_escapes: bool,
+
     /// Files and directories to archive
     #[arg(
         trailing_var_arg = true,
@@ -145,6 +149,10 @@ pub struct ExtractArgs {
     /// Show timing breakdown
     #[arg(long)]
     pub timings: bool,
+
+    /// Allow \xNN escape sequences in paths (required for archives with escaped paths)
+    #[arg(long)]
+    pub allow_escapes: bool,
 
     /// Specific files to extract (extracts all if none specified)
     pub files: Vec<PathBuf>,

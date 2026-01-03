@@ -4,6 +4,7 @@ use std::num::NonZeroU64;
 pub(crate) struct BoxHeader {
     pub(crate) magic_bytes: [u8; 4],
     pub(crate) version: u8,
+    pub(crate) allow_escapes: bool,
     pub(crate) alignment: u32,
     pub(crate) trailer: Option<NonZeroU64>,
 }
@@ -22,6 +23,7 @@ impl BoxHeader {
         BoxHeader {
             magic_bytes: *MAGIC_BYTES,
             version: VERSION,
+            allow_escapes: false,
             alignment: 0,
             trailer,
         }
@@ -30,6 +32,21 @@ impl BoxHeader {
     pub(crate) fn with_alignment(alignment: u32) -> BoxHeader {
         BoxHeader {
             alignment,
+            ..Default::default()
+        }
+    }
+
+    pub(crate) fn with_escapes(allow_escapes: bool) -> BoxHeader {
+        BoxHeader {
+            allow_escapes,
+            ..Default::default()
+        }
+    }
+
+    pub(crate) fn with_options(alignment: u32, allow_escapes: bool) -> BoxHeader {
+        BoxHeader {
+            alignment,
+            allow_escapes,
             ..Default::default()
         }
     }

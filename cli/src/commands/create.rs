@@ -72,15 +72,13 @@ pub async fn run(args: CreateArgs) -> Result<()> {
     }
 
     // Create the archive
-    let mut bf = if args.alignment == 0 {
-        BoxFileWriter::create(archive_path).await
-    } else {
-        BoxFileWriter::create_with_alignment(archive_path, args.alignment).await
-    }
-    .map_err(|source| Error::CreateArchive {
-        path: archive_path.clone(),
-        source,
-    })?;
+    let mut bf =
+        BoxFileWriter::create_with_options(archive_path, args.alignment, args.allow_escapes)
+            .await
+            .map_err(|source| Error::CreateArchive {
+                path: archive_path.clone(),
+                source,
+            })?;
 
     // Calculate effective metadata flags (-A implies both --timestamps and --ownership)
     let timestamps = args.timestamps || args.archive_metadata;

@@ -207,7 +207,8 @@ The Header is located at byte offset 0 and is exactly 32 bytes.
 |--------|------|-------|-------------|
 | 0x00 | 4 | `magic` | Magic bytes: `0xFF 0x42 0x4F 0x58` (`\xFFBOX`) |
 | 0x04 | 1 | `version` | Format version number |
-| 0x05 | 3 | `reserved1` | Reserved bytes |
+| 0x05 | 1 | `flags` | Feature flags (see Section 5.4) |
+| 0x06 | 2 | `reserved1` | Reserved bytes |
 | 0x08 | 4 | `alignment` | Data alignment boundary (`u32`) |
 | 0x0C | 4 | `reserved2` | Reserved bytes |
 | 0x10 | 8 | `trailer` | Byte offset to trailer (`u64`) |
@@ -233,15 +234,28 @@ Implementations SHOULD reject archives with version numbers they do not support.
 
 Implementations MAY support reading version 0 archives for backward compatibility. Version 0 archives include `root` in BoxMetadata and `entries` in DirectoryRecord; version 1 archives do not.
 
-### 5.4 Reserved Fields
+### 5.4 Flags
 
-The `reserved1` (3 bytes), `reserved2` (4 bytes), and `reserved3` (8 bytes) fields are reserved for future use.
+The flags byte at offset 0x05 contains feature flags:
+
+| Bit | Name | Description |
+|-----|------|-------------|
+| 0 | `ALLOW_ESCAPES` | Path components may contain `\xNN` escape sequences (see Section 9.6) |
+| 1-7 | Reserved | Must be 0 |
+
+Writers MUST set undefined bits to zero.
+
+Readers SHOULD ignore undefined bits but MAY reject archives where reserved flag bits are non-zero.
+
+### 5.5 Reserved Fields
+
+The `reserved1` (2 bytes), `reserved2` (4 bytes), and `reserved3` (8 bytes) fields are reserved for future use.
 
 Writers MUST set these fields to zero.
 
 Readers SHOULD ignore these fields but MAY reject archives where reserved fields are non-zero.
 
-### 5.5 Alignment
+### 5.6 Alignment
 
 The alignment field specifies the byte boundary for file data alignment.
 
@@ -250,19 +264,20 @@ The alignment field specifies the byte boundary for file data alignment.
 
 When alignment is non-zero, padding bytes MAY be inserted before file data. Padding bytes MUST be zero.
 
-### 5.6 Trailer Offset
+### 5.7 Trailer Offset
 
 The trailer field contains the byte offset to the start of the Trailer (BoxMetadata) section. The Trailer begins at byte offset `n`.
 
 A valid, non-empty archive MUST have a non-zero trailer offset.
 
-### 5.7 Binary Layout
+### 5.8 Binary Layout
 
 ```
 Offset  00 01 02 03 04 05 06 07 08 09 0A 0B 0C 0D 0E 0F
-        FF 42 4F 58 VV RR RR RR AA AA AA AA RR RR RR RR
-        └─ magic ─┘ │  └ res1 ┘ └ alignmt ┘ └─ res2 ──┘
-                 version
+        FF 42 4F 58 VV FF RR RR AA AA AA AA RR RR RR RR
+        └─ magic ─┘ │  │  └r1┘ └ alignmt ┘ └─ res2 ──┘
+                 ver│ flags
+                    sion
 
 Offset  10 11 12 13 14 15 16 17 18 19 1A 1B 1C 1D 1E 1F
         TT TT TT TT TT TT TT TT RR RR RR RR RR RR RR RR
@@ -520,6 +535,32 @@ Implementations MUST reject paths that:
 | `./self` | `self` |
 | `/` | Error (empty path) |
 | `\0` | Error (control character) |
+
+### 9.6 Escape Sequences (Optional)
+
+When the `ALLOW_ESCAPES` flag (Section 5.4) is set in the header, path components MAY contain `\xNN` escape sequences where NN is a two-digit hexadecimal value (0-9, A-F, a-f).
+
+**Validation Rules:**
+
+1. Each `\x` MUST be followed by exactly two hexadecimal digits
+2. The decoded byte value MUST represent a character that would be valid unescaped
+3. Specifically, the decoded value MUST NOT be:
+   - A control character (0x00-0x1F, 0x7F)
+   - A forward slash (0x2F)
+   - A backslash (0x5C)
+4. Non-ASCII escaped bytes (0x80-0xFF) are allowed as they may form part of UTF-8 sequences
+
+**Use Case:**
+
+This extension supports storing systemd-style filenames where characters are escaped. For example, `dev\x2ddisk\x2dby\x2duuid\x2d1234.device` where `\x2d` represents a dash.
+
+**Behavior Without Flag:**
+
+Archives without the `ALLOW_ESCAPES` flag MUST reject any backslash characters in path components. This is the default behavior and provides maximum compatibility.
+
+**Security Considerations:**
+
+Implementations MUST validate escape sequences during both archive creation and extraction. Escape sequences that decode to prohibited characters (path separators, control characters) MUST be rejected to prevent path traversal attacks.
 
 ---
 

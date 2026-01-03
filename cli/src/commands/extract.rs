@@ -16,6 +16,11 @@ pub async fn run(args: ExtractArgs) -> Result<()> {
             source,
         })?;
 
+    // Check if archive has escaped paths but CLI flag not provided
+    if bf.allow_escapes() && !args.allow_escapes {
+        return Err(Error::AllowEscapesRequired);
+    }
+
     let output_path = args
         .output
         .unwrap_or_else(|| std::env::current_dir().expect("no current directory"));

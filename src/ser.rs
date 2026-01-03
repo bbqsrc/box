@@ -203,7 +203,8 @@ impl Serialize for BoxHeader {
     ) -> std::io::Result<()> {
         writer.write_all(&self.magic_bytes).await?;
         writer.write_u8(self.version).await?;
-        writer.write_all(&[0u8; 3]).await?; // reserved1
+        writer.write_u8(self.allow_escapes as u8).await?; // flags byte (bit 0 = allow_escapes)
+        writer.write_all(&[0u8; 2]).await?; // reserved1 remaining
         write_u32_le(writer, self.alignment).await?;
         writer.write_all(&[0u8; 4]).await?; // reserved2
         write_u64_le(writer, self.trailer.map(|x| x.get()).unwrap_or(0)).await?;
