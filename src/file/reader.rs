@@ -585,6 +585,7 @@ impl BoxFileReader {
              box_path: BoxPath<'static>,
              record: FileRecord<'static>,
              expected_hash: Option<Vec<u8>>,
+             mode: u32,
              mmap: Arc<MemoryMappedFile>,
              out_base: PathBuf,
              progress: Option<tokio::sync::mpsc::UnboundedSender<ExtractProgress>>| {
@@ -601,6 +602,7 @@ impl BoxFileReader {
                         &out_base,
                         &box_path,
                         &record,
+                        mode,
                     )
                     .await;
 
@@ -616,6 +618,7 @@ impl BoxFileReader {
                     box_path,
                     record,
                     expected_hash,
+                    mode,
                     mmap.clone(),
                     output_path.to_path_buf(),
                     progress.clone(),
@@ -669,6 +672,7 @@ impl BoxFileReader {
                             box_path,
                             record,
                             expected_hash,
+                            mode,
                             mmap.clone(),
                             output_path.to_path_buf(),
                             progress.clone(),
@@ -1308,12 +1312,14 @@ struct ExtractFileResult {
 ///
 /// This is a standalone function so it can be spawned as a task.
 /// Does NOT perform checksum verification - that happens separately in the validation pipeline.
+#[allow(clippy::too_many_arguments)]
 async fn extract_single_file_from_mmap(
     mmap: Arc<MemoryMappedFile>,
     archive_offset: u64,
     output_base: &Path,
     box_path: &BoxPath<'_>,
     record: &FileRecord<'_>,
+    mode: u32,
 ) -> Result<ExtractFileResult, ExtractError> {
     use tokio::io::AsyncWriteExt;
 
@@ -1360,6 +1366,16 @@ async fn extract_single_file_from_mmap(
         .flush()
         .await
         .map_err(|e| ExtractError::DecompressionFailed(e, box_path.to_path_buf()))?;
+
+    // Set file permissions
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let permissions = std::fs::Permissions::from_mode(mode);
+        fs::set_permissions(&out_path, permissions).await.ok();
+    }
+    #[cfg(not(unix))]
+    let _ = mode;
 
     let stats = ExtractStats {
         files_extracted: 1,
