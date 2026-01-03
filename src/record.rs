@@ -9,6 +9,7 @@ pub enum Record<'a> {
     File(FileRecord<'a>),
     Directory(DirectoryRecord<'a>),
     Link(LinkRecord<'a>),
+    ExternalLink(ExternalLinkRecord<'a>),
 }
 
 impl<'a> Record<'a> {
@@ -61,11 +62,28 @@ impl<'a> Record<'a> {
     }
 
     #[inline(always)]
+    pub fn as_external_link(&self) -> Option<&ExternalLinkRecord<'a>> {
+        match self {
+            Record::ExternalLink(link) => Some(link),
+            _ => None,
+        }
+    }
+
+    #[inline(always)]
+    pub fn as_external_link_mut(&mut self) -> Option<&mut ExternalLinkRecord<'a>> {
+        match self {
+            Record::ExternalLink(link) => Some(link),
+            _ => None,
+        }
+    }
+
+    #[inline(always)]
     pub fn name(&self) -> &str {
         match self {
             Record::File(file) => &file.name,
             Record::Directory(dir) => &dir.name,
             Record::Link(link) => &link.name,
+            Record::ExternalLink(link) => &link.name,
         }
     }
 
@@ -81,6 +99,7 @@ impl<'a> Record<'a> {
             Record::Directory(dir) => &dir.attrs,
             Record::File(file) => &file.attrs,
             Record::Link(link) => &link.attrs,
+            Record::ExternalLink(link) => &link.attrs,
         }
     }
 
@@ -90,6 +109,7 @@ impl<'a> Record<'a> {
             Record::Directory(dir) => &mut dir.attrs,
             Record::File(file) => &mut file.attrs,
             Record::Link(link) => &mut link.attrs,
+            Record::ExternalLink(link) => &mut link.attrs,
         }
     }
 
@@ -98,6 +118,7 @@ impl<'a> Record<'a> {
             Record::File(file) => Record::File(file.into_owned()),
             Record::Directory(dir) => Record::Directory(dir.into_owned()),
             Record::Link(link) => Record::Link(link.into_owned()),
+            Record::ExternalLink(link) => Record::ExternalLink(link.into_owned()),
         }
     }
 }
@@ -133,6 +154,41 @@ impl LinkRecord<'_> {
 impl<'a> From<LinkRecord<'a>> for Record<'a> {
     fn from(link: LinkRecord<'a>) -> Self {
         Record::Link(link)
+    }
+}
+
+/// A symlink that points outside the archive (external target).
+#[derive(Debug, Clone)]
+pub struct ExternalLinkRecord<'a> {
+    pub name: Cow<'a, str>,
+
+    /// The target path, normalized and relative (e.g., "../../../etc/environment").
+    /// Uses `/` as separator.
+    pub target: Cow<'a, str>,
+
+    /// Optional attributes for the given paths, such as Windows or Unix ACLs, last accessed time, etc.
+    pub attrs: AttrMap,
+}
+
+impl ExternalLinkRecord<'_> {
+    #[inline(always)]
+    pub fn attr<S: AsRef<str>>(&self, metadata: &BoxMetadata<'_>, key: S) -> Option<&[u8]> {
+        let key = metadata.attr_key(key.as_ref())?;
+        self.attrs.get(&key).map(|x| &**x)
+    }
+
+    pub fn into_owned(self) -> ExternalLinkRecord<'static> {
+        ExternalLinkRecord {
+            name: Cow::Owned(self.name.into_owned()),
+            target: Cow::Owned(self.target.into_owned()),
+            attrs: self.attrs,
+        }
+    }
+}
+
+impl<'a> From<ExternalLinkRecord<'a>> for Record<'a> {
+    fn from(link: ExternalLinkRecord<'a>) -> Self {
+        Record::ExternalLink(link)
     }
 }
 

@@ -112,6 +112,10 @@ pub struct CreateArgs {
     #[arg(long)]
     pub allow_escapes: bool,
 
+    /// Allow symlinks pointing outside the archive
+    #[arg(long)]
+    pub allow_external_symlinks: bool,
+
     /// Files and directories to archive
     #[arg(
         trailing_var_arg = true,
@@ -153,6 +157,10 @@ pub struct ExtractArgs {
     /// Allow \xNN escape sequences in paths (required for archives with escaped paths)
     #[arg(long)]
     pub allow_escapes: bool,
+
+    /// Allow extracting archives with external symlinks (pointing outside the archive)
+    #[arg(long)]
+    pub allow_external_symlinks: bool,
 
     /// Specific files to extract (extracts all if none specified)
     pub files: Vec<PathBuf>,

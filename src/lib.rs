@@ -38,4 +38,4 @@ pub use file::{
 };
 use header::BoxHeader;
 pub use path::BoxPath;
-pub use record::{DirectoryRecord, FileRecord, LinkRecord, Record};
+pub use record::{DirectoryRecord, ExternalLinkRecord, FileRecord, LinkRecord, Record};

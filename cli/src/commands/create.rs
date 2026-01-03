@@ -72,13 +72,17 @@ pub async fn run(args: CreateArgs) -> Result<()> {
     }
 
     // Create the archive
-    let mut bf =
-        BoxFileWriter::create_with_options(archive_path, args.alignment, args.allow_escapes)
-            .await
-            .map_err(|source| Error::CreateArchive {
-                path: archive_path.clone(),
-                source,
-            })?;
+    let mut bf = BoxFileWriter::create_with_options(
+        archive_path,
+        args.alignment,
+        args.allow_escapes,
+        args.allow_external_symlinks,
+    )
+    .await
+    .map_err(|source| Error::CreateArchive {
+        path: archive_path.clone(),
+        source,
+    })?;
 
     // Calculate effective metadata flags (-A implies both --timestamps and --ownership)
     let timestamps = args.timestamps || args.archive_metadata;
@@ -217,7 +221,7 @@ pub async fn run(args: CreateArgs) -> Result<()> {
     // Process symlinks (must be sequential)
     let symlinks_start = Instant::now();
     for (link, _is_dir) in symlinks {
-        let target_path = tokio::fs::read_link(&link.fs_path)
+        let raw_target = tokio::fs::read_link(&link.fs_path)
             .await
             .map_err(|source| Error::ReadLink {
                 path: link.fs_path.clone(),
@@ -225,20 +229,7 @@ pub async fn run(args: CreateArgs) -> Result<()> {
             })?;
 
         let parent_path = link.fs_path.parent().unwrap_or(Path::new(""));
-        let target_path = parent_path.join(&target_path);
-
-        // Verify target exists
-        let _ = tokio::fs::canonicalize(&target_path)
-            .await
-            .map_err(|source| Error::CanonicalizePath {
-                path: link.fs_path.clone(),
-                source,
-            })?;
-
-        let target_box_path = BoxPath::new(&target_path).map_err(|source| Error::InvalidPath {
-            path: target_path.to_path_buf(),
-            source,
-        })?;
+        let resolved_target = parent_path.join(&raw_target);
 
         // Ensure parent directory exists
         if let Some(parent) = link.box_path.parent()
@@ -256,22 +247,39 @@ pub async fn run(args: CreateArgs) -> Result<()> {
 
         let link_meta = fs::metadata_to_attrs(&link.meta, timestamps, ownership);
 
-        let target_index =
-            bf.metadata()
-                .index(&target_box_path)
-                .ok_or_else(|| Error::CreateLink {
-                    path: link.box_path.clone(),
-                    source: std::io::Error::new(
-                        std::io::ErrorKind::NotFound,
-                        format!("Symlink target '{}' not found in archive", target_box_path),
-                    ),
-                })?;
+        // Try to resolve as internal link first
+        let target_box_path = BoxPath::new(&resolved_target).ok();
+        let target_index = target_box_path
+            .as_ref()
+            .and_then(|p| bf.metadata().index(p));
 
-        bf.link(link.box_path.clone(), target_index, link_meta)
-            .map_err(|source| Error::CreateLink {
-                path: link.box_path,
-                source,
-            })?;
+        if let Some(target_index) = target_index {
+            // Internal symlink - target exists in archive
+            bf.link(link.box_path.clone(), target_index, link_meta)
+                .map_err(|source| Error::CreateLink {
+                    path: link.box_path,
+                    source,
+                })?;
+        } else {
+            // External symlink - target not in archive
+            if !args.allow_external_symlinks {
+                return Err(Error::ExternalSymlinkDetected {
+                    link_path: link.box_path.to_path_buf(),
+                    target: raw_target.to_string_lossy().to_string(),
+                });
+            }
+
+            // Use the raw target path (preserving relative components like ../)
+            let target_str = raw_target.to_string_lossy();
+            // Normalize path separators to forward slashes
+            let normalized_target = target_str.replace('\\', "/");
+
+            bf.external_link(link.box_path.clone(), &normalized_target, link_meta)
+                .map_err(|source| Error::CreateLink {
+                    path: link.box_path,
+                    source,
+                })?;
+        }
     }
 
     timing.symlinks = symlinks_start.elapsed();

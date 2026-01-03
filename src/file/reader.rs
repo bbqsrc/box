@@ -106,6 +106,11 @@ pub enum ExtractError {
 
     #[error("Archive has escaped paths but allow_escapes was not set in ExtractOptions")]
     AllowEscapesRequired,
+
+    #[error(
+        "Archive has external symlinks but allow_external_symlinks was not set in ExtractOptions"
+    )]
+    ExternalSymlinksRequired,
 }
 
 /// Timing breakdown for extraction phases.
@@ -156,6 +161,8 @@ pub struct ExtractOptions {
     pub verify_checksums: bool,
     /// Allow extracting archives with `\xNN` escape sequences in paths.
     pub allow_escapes: bool,
+    /// Allow extracting archives with external symlinks (pointing outside the archive).
+    pub allow_external_symlinks: bool,
 }
 
 impl Default for ExtractOptions {
@@ -163,6 +170,7 @@ impl Default for ExtractOptions {
         Self {
             verify_checksums: true,
             allow_escapes: false,
+            allow_external_symlinks: false,
         }
     }
 }
@@ -318,6 +326,12 @@ impl BoxFileReader {
         self.header.allow_escapes
     }
 
+    /// Returns true if this archive contains external symlinks (pointing outside the archive).
+    #[inline(always)]
+    pub fn allow_external_symlinks(&self) -> bool {
+        self.header.allow_external_symlinks
+    }
+
     #[inline(always)]
     pub fn metadata(&self) -> &BoxMetadata<'static> {
         &self.meta
@@ -392,6 +406,9 @@ impl BoxFileReader {
         if self.header.allow_escapes {
             return Err(ExtractError::AllowEscapesRequired);
         }
+        if self.header.allow_external_symlinks {
+            return Err(ExtractError::ExternalSymlinksRequired);
+        }
         let output_path = output_path.as_ref();
         let record = self
             .meta
@@ -426,6 +443,9 @@ impl BoxFileReader {
         if self.header.allow_escapes && !options.allow_escapes {
             return Err(ExtractError::AllowEscapesRequired);
         }
+        if self.header.allow_external_symlinks && !options.allow_external_symlinks {
+            return Err(ExtractError::ExternalSymlinksRequired);
+        }
         let output_path = output_path.as_ref();
         let mut stats = ExtractStats::default();
         let start = Instant::now();
@@ -453,6 +473,9 @@ impl BoxFileReader {
     ) -> Result<ExtractStats, ExtractError> {
         if self.header.allow_escapes && !options.allow_escapes {
             return Err(ExtractError::AllowEscapesRequired);
+        }
+        if self.header.allow_external_symlinks && !options.allow_external_symlinks {
+            return Err(ExtractError::ExternalSymlinksRequired);
         }
         let output_path = output_path.as_ref();
         let mut stats = ExtractStats::default();
@@ -502,6 +525,9 @@ impl BoxFileReader {
         if self.header.allow_escapes && !options.allow_escapes {
             return Err(ExtractError::AllowEscapesRequired);
         }
+        if self.header.allow_external_symlinks && !options.allow_external_symlinks {
+            return Err(ExtractError::ExternalSymlinksRequired);
+        }
         let output_path = output_path.as_ref();
         let mut timing = ExtractTiming::default();
 
@@ -525,7 +551,9 @@ impl BoxFileReader {
                     let mode = 0u32;
                     files.push((item.path.clone(), f.clone(), expected_hash, mode));
                 }
-                Record::Link(_) => symlinks.push((item.path.clone(), item.record.clone())),
+                Record::Link(_) | Record::ExternalLink(_) => {
+                    symlinks.push((item.path.clone(), item.record.clone()))
+                }
             }
         }
 
@@ -1128,6 +1156,43 @@ impl BoxFileReader {
                         .map_err(|e| ExtractError::CreateLinkFailed(e, link_path, target))
                 }
             }
+            #[cfg(unix)]
+            Record::ExternalLink(link) => {
+                let link_path = output_path.join(path.to_path_buf());
+
+                // Create parent directory if needed
+                if let Some(parent) = link_path.parent() {
+                    fs::create_dir_all(parent)
+                        .await
+                        .map_err(|e| ExtractError::CreateDirFailed(e, parent.to_path_buf()))?;
+                }
+
+                // External symlinks use the target path directly
+                let target = PathBuf::from(link.target.as_ref());
+
+                tokio::fs::symlink(&target, &link_path)
+                    .await
+                    .map_err(|e| ExtractError::CreateLinkFailed(e, link_path, target))
+            }
+            #[cfg(windows)]
+            Record::ExternalLink(link) => {
+                let link_path = output_path.join(path.to_path_buf());
+
+                // Create parent directory if needed
+                if let Some(parent) = link_path.parent() {
+                    fs::create_dir_all(parent)
+                        .await
+                        .map_err(|e| ExtractError::CreateDirFailed(e, parent.to_path_buf()))?;
+                }
+
+                // External symlinks use the target path directly
+                // On Windows, we default to file symlinks for external targets
+                let target = PathBuf::from(link.target.as_ref());
+
+                tokio::fs::symlink_file(&target, &link_path)
+                    .await
+                    .map_err(|e| ExtractError::CreateLinkFailed(e, link_path, target))
+            }
         }
     }
 
@@ -1265,6 +1330,47 @@ impl BoxFileReader {
                         .await
                         .map_err(|e| ExtractError::CreateLinkFailed(e, link_path, target))?;
                 }
+                stats.links_created += 1;
+                Ok(())
+            }
+            #[cfg(unix)]
+            Record::ExternalLink(link) => {
+                let link_path = output_path.join(path.to_path_buf());
+
+                // Create parent directory if needed
+                if let Some(parent) = link_path.parent() {
+                    fs::create_dir_all(parent)
+                        .await
+                        .map_err(|e| ExtractError::CreateDirFailed(e, parent.to_path_buf()))?;
+                }
+
+                // External symlinks use the target path directly
+                let target = PathBuf::from(link.target.as_ref());
+
+                tokio::fs::symlink(&target, &link_path)
+                    .await
+                    .map_err(|e| ExtractError::CreateLinkFailed(e, link_path, target))?;
+                stats.links_created += 1;
+                Ok(())
+            }
+            #[cfg(windows)]
+            Record::ExternalLink(link) => {
+                let link_path = output_path.join(path.to_path_buf());
+
+                // Create parent directory if needed
+                if let Some(parent) = link_path.parent() {
+                    fs::create_dir_all(parent)
+                        .await
+                        .map_err(|e| ExtractError::CreateDirFailed(e, parent.to_path_buf()))?;
+                }
+
+                // External symlinks use the target path directly
+                // On Windows, we default to file symlinks for external targets
+                let target = PathBuf::from(link.target.as_ref());
+
+                tokio::fs::symlink_file(&target, &link_path)
+                    .await
+                    .map_err(|e| ExtractError::CreateLinkFailed(e, link_path, target))?;
                 stats.links_created += 1;
                 Ok(())
             }

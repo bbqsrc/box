@@ -241,7 +241,8 @@ The flags byte at offset 0x05 contains feature flags:
 | Bit | Name | Description |
 |-----|------|-------------|
 | 0 | `ALLOW_ESCAPES` | Path components may contain `\xNN` escape sequences (see Section 9.6) |
-| 1-7 | Reserved | Must be 0 |
+| 1 | `ALLOW_EXTERNAL_SYMLINKS` | Archive contains symlinks pointing outside the archive (see Section 8.5) |
+| 2-7 | Reserved | Must be 0 |
 
 Writers MUST set undefined bits to zero.
 
@@ -385,6 +386,7 @@ Records describe entries in the archive. Each record begins with a 1-byte type i
 | 0x00 | File |
 | 0x01 | Directory |
 | 0x02 | Symbolic Link |
+| 0x03 | External Symbolic Link |
 
 Implementations MUST reject records with unknown type identifiers.
 
@@ -482,6 +484,50 @@ When extracting a link record, implementations MUST:
 3. Create a symbolic link with the computed relative path
 
 This ensures that relative symlinks work correctly regardless of where the archive is extracted.
+
+### 8.5 External Link Record (Type 0x03)
+
+External link records describe symbolic links that point outside the archive.
+
+**Structure:**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `type` | `u8` | Record type: `0x03` |
+| `name` | `String` | Link name |
+| `target` | `String` | Target path (relative, may point outside archive) |
+| `attrs` | `AttrMap` | Link attributes |
+
+**Requirements:**
+
+- `name` MUST be a valid filename component.
+- `target` MUST be a relative path using `/` as the separator.
+- `target` MAY contain `..` components that traverse outside the archive root.
+- The `ALLOW_EXTERNAL_SYMLINKS` header flag (Section 5.4) MUST be set when external links are present.
+
+**Binary Layout:**
+
+```
+03                          - type (external symlink)
+[String: name]
+[String: target]
+[AttrMap: attrs]
+```
+
+**Extraction Behavior:**
+
+When extracting an external link record, implementations:
+
+1. Create a symbolic link using the stored target path directly
+2. The path is relative from the symlink's location
+
+**Security Considerations:**
+
+External symlinks can point to arbitrary locations outside the extraction directory. This presents security risks:
+
+- Implementations MUST require explicit user consent before extracting archives containing external symlinks.
+- This feature is opt-in at both archive creation time (setting the header flag) and extraction time.
+- Extraction tools SHOULD warn users when processing archives with external symlinks.
 
 ---
 

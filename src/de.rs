@@ -6,8 +6,8 @@ use fastvint::{AsyncReadVintExt, ReadVintExt};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeek, AsyncSeekExt};
 
 use crate::{
-    AttrMap, BoxHeader, BoxMetadata, BoxPath, Compression, DirectoryRecord, FileRecord, LinkRecord,
-    Record,
+    AttrMap, BoxHeader, BoxMetadata, BoxPath, Compression, DirectoryRecord, ExternalLinkRecord,
+    FileRecord, LinkRecord, Record,
     file::RecordIndex,
     file::meta::{AttrKey, AttrType},
 };
@@ -222,6 +222,20 @@ impl<'a> DeserializeBorrowed<'a> for LinkRecord<'a> {
     }
 }
 
+impl<'a> DeserializeBorrowed<'a> for ExternalLinkRecord<'a> {
+    fn deserialize_borrowed(data: &'a [u8], pos: &mut usize) -> std::io::Result<Self> {
+        let name = <Cow<'a, str>>::deserialize_borrowed(data, pos)?;
+        let target = <Cow<'a, str>>::deserialize_borrowed(data, pos)?;
+        let attrs = AttrMap::deserialize_borrowed(data, pos)?;
+
+        Ok(ExternalLinkRecord {
+            name,
+            target,
+            attrs,
+        })
+    }
+}
+
 /// Deserialize Record with version awareness.
 pub(crate) fn deserialize_record_borrowed<'a>(
     data: &'a [u8],
@@ -233,6 +247,7 @@ pub(crate) fn deserialize_record_borrowed<'a>(
         0 => Record::File(FileRecord::deserialize_borrowed(data, pos)?),
         1 => Record::Directory(deserialize_directory_borrowed(data, pos, version)?),
         2 => Record::Link(LinkRecord::deserialize_borrowed(data, pos)?),
+        3 => Record::ExternalLink(ExternalLinkRecord::deserialize_borrowed(data, pos)?),
         _ => {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
@@ -504,6 +519,7 @@ pub(crate) async fn deserialize_record_owned<R: AsyncRead + AsyncSeek + Unpin + 
         0 => Record::File(FileRecord::deserialize_owned(reader).await?),
         1 => Record::Directory(deserialize_directory_owned(reader, version).await?),
         2 => Record::Link(LinkRecord::deserialize_owned(reader).await?),
+        3 => Record::ExternalLink(ExternalLinkRecord::deserialize_owned(reader).await?),
         _ => {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
@@ -542,6 +558,26 @@ impl DeserializeOwned for LinkRecord<'static> {
     }
 }
 
+impl DeserializeOwned for ExternalLinkRecord<'static> {
+    async fn deserialize_owned<R: AsyncRead + AsyncSeek + Unpin + Send>(
+        reader: &mut R,
+    ) -> std::io::Result<Self> {
+        let start = reader.stream_position().await?;
+        let name = String::deserialize_owned(reader).await?;
+        let target = String::deserialize_owned(reader).await?;
+        let attrs = <HashMap<usize, Vec<u8>>>::deserialize_owned(reader).await?;
+
+        let end = reader.stream_position().await?;
+        tracing::debug!(start = format_args!("{:#x}", start), end = format_args!("{:#x}", end), bytes = end - start, %name, "deserialized ExternalLinkRecord");
+
+        Ok(ExternalLinkRecord {
+            name: Cow::Owned(name),
+            target: Cow::Owned(target),
+            attrs,
+        })
+    }
+}
+
 impl DeserializeOwned for BoxHeader {
     async fn deserialize_owned<R: AsyncRead + AsyncSeek + Unpin + Send>(
         reader: &mut R,
@@ -558,7 +594,8 @@ impl DeserializeOwned for BoxHeader {
 
         let version = reader.read_u8().await?;
         let flags = reader.read_u8().await?;
-        let allow_escapes = (flags & 1) != 0;
+        let allow_escapes = (flags & 0x01) != 0;
+        let allow_external_symlinks = (flags & 0x02) != 0;
         reader.read_exact(&mut [0u8; 2]).await?; // skip reserved1 remaining
         let alignment = read_u32_le(reader).await?;
         reader.read_exact(&mut [0u8; 4]).await?; // skip reserved2
@@ -578,6 +615,7 @@ impl DeserializeOwned for BoxHeader {
             magic_bytes,
             version,
             allow_escapes,
+            allow_external_symlinks,
             alignment,
             trailer: NonZeroU64::new(trailer),
         })

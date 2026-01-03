@@ -4,8 +4,8 @@ use fastvint::AsyncWriteVintExt;
 use tokio::io::{AsyncSeek, AsyncSeekExt, AsyncWrite, AsyncWriteExt};
 
 use crate::{
-    AttrMap, BoxHeader, BoxMetadata, BoxPath, Compression, DirectoryRecord, FileRecord, LinkRecord,
-    Record, file::RecordIndex, file::meta::AttrKey,
+    AttrMap, BoxHeader, BoxMetadata, BoxPath, Compression, DirectoryRecord, ExternalLinkRecord,
+    FileRecord, LinkRecord, Record, file::RecordIndex, file::meta::AttrKey,
 };
 
 /// Write a u32 in little-endian format
@@ -183,6 +183,20 @@ impl Serialize for LinkRecord<'_> {
     }
 }
 
+impl Serialize for ExternalLinkRecord<'_> {
+    async fn write<W: AsyncWrite + AsyncSeek + Unpin + Send>(
+        &self,
+        writer: &mut W,
+    ) -> std::io::Result<()> {
+        // Record id - 3 for external symlink
+        writer.write_u8(0x3).await?;
+        self.name.write(writer).await?;
+        self.target.write(writer).await?;
+        self.attrs.write(writer).await?;
+        Ok(())
+    }
+}
+
 impl Serialize for Record<'_> {
     async fn write<W: AsyncWrite + AsyncSeek + Unpin + Send>(
         &self,
@@ -192,6 +206,7 @@ impl Serialize for Record<'_> {
             Record::File(file) => file.write(writer).await,
             Record::Directory(directory) => directory.write(writer).await,
             Record::Link(link) => link.write(writer).await,
+            Record::ExternalLink(link) => link.write(writer).await,
         }
     }
 }
@@ -203,7 +218,9 @@ impl Serialize for BoxHeader {
     ) -> std::io::Result<()> {
         writer.write_all(&self.magic_bytes).await?;
         writer.write_u8(self.version).await?;
-        writer.write_u8(self.allow_escapes as u8).await?; // flags byte (bit 0 = allow_escapes)
+        // flags byte: bit 0 = allow_escapes, bit 1 = allow_external_symlinks
+        let flags = (self.allow_escapes as u8) | ((self.allow_external_symlinks as u8) << 1);
+        writer.write_u8(flags).await?;
         writer.write_all(&[0u8; 2]).await?; // reserved1 remaining
         write_u32_le(writer, self.alignment).await?;
         writer.write_all(&[0u8; 4]).await?; // reserved2

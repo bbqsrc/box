@@ -5,6 +5,7 @@ pub(crate) struct BoxHeader {
     pub(crate) magic_bytes: [u8; 4],
     pub(crate) version: u8,
     pub(crate) allow_escapes: bool,
+    pub(crate) allow_external_symlinks: bool,
     pub(crate) alignment: u32,
     pub(crate) trailer: Option<NonZeroU64>,
 }
@@ -24,6 +25,7 @@ impl BoxHeader {
             magic_bytes: *MAGIC_BYTES,
             version: VERSION,
             allow_escapes: false,
+            allow_external_symlinks: false,
             alignment: 0,
             trailer,
         }
@@ -43,10 +45,15 @@ impl BoxHeader {
         }
     }
 
-    pub(crate) fn with_options(alignment: u32, allow_escapes: bool) -> BoxHeader {
+    pub(crate) fn with_options(
+        alignment: u32,
+        allow_escapes: bool,
+        allow_external_symlinks: bool,
+    ) -> BoxHeader {
         BoxHeader {
             alignment,
             allow_escapes,
+            allow_external_symlinks,
             ..Default::default()
         }
     }

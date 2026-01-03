@@ -18,7 +18,7 @@ use crate::{
     hashing::HashingReader,
     header::BoxHeader,
     path::BoxPath,
-    record::{DirectoryRecord, FileRecord, LinkRecord, Record},
+    record::{DirectoryRecord, ExternalLinkRecord, FileRecord, LinkRecord, Record},
     ser::Serialize,
 };
 
@@ -286,8 +286,13 @@ impl BoxFileWriter {
         path: P,
         alignment: u32,
         allow_escapes: bool,
+        allow_external_symlinks: bool,
     ) -> std::io::Result<BoxFileWriter> {
-        Self::create_inner(path, BoxHeader::with_options(alignment, allow_escapes)).await
+        Self::create_inner(
+            path,
+            BoxHeader::with_options(alignment, allow_escapes, allow_external_symlinks),
+        )
+        .await
     }
 
     async fn create_inner<P: AsRef<Path>>(
@@ -534,6 +539,28 @@ impl BoxFileWriter {
         let record = LinkRecord {
             name: std::borrow::Cow::Owned(path.filename().to_string()),
             target,
+            attrs: self.convert_attrs(attrs)?,
+        };
+
+        self.insert_inner(path, record.into())
+    }
+
+    /// Add an external symlink pointing outside the archive.
+    ///
+    /// The target path should be a relative path (e.g., "../../../etc/environment").
+    /// This will set the `allow_external_symlinks` flag in the header.
+    pub fn external_link(
+        &mut self,
+        path: BoxPath<'_>,
+        target: &str,
+        attrs: HashMap<String, Vec<u8>>,
+    ) -> std::io::Result<RecordIndex> {
+        // Mark that this archive contains external symlinks
+        self.header.allow_external_symlinks = true;
+
+        let record = ExternalLinkRecord {
+            name: std::borrow::Cow::Owned(path.filename().to_string()),
+            target: std::borrow::Cow::Owned(target.to_string()),
             attrs: self.convert_attrs(attrs)?,
         };
 

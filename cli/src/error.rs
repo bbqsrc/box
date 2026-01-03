@@ -127,4 +127,14 @@ pub enum Error {
     #[error("Archive contains escaped paths")]
     #[diagnostic(help("Use --allow-escapes to extract archives with escaped paths"))]
     AllowEscapesRequired,
+
+    #[error("Archive contains external symlinks")]
+    #[diagnostic(help("Use --allow-external-symlinks to extract archives with external symlinks"))]
+    ExternalSymlinksRequired,
+
+    #[error("External symlink detected: `{}` -> `{target}`", link_path.display())]
+    #[diagnostic(help(
+        "Use --allow-external-symlinks to include external symlinks in the archive"
+    ))]
+    ExternalSymlinkDetected { link_path: PathBuf, target: String },
 }
