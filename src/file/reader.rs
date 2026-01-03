@@ -103,6 +103,9 @@ pub enum ExtractError {
 
     #[error("Verification failed. Path: '{}'", .1.display())]
     VerificationFailed(#[source] std::io::Error, PathBuf),
+
+    #[error("Archive has escaped paths but allow_escapes was not set in ExtractOptions")]
+    AllowEscapesRequired,
 }
 
 /// Timing breakdown for extraction phases.
@@ -151,12 +154,15 @@ impl AddAssign for ExtractStats {
 pub struct ExtractOptions {
     /// Verify blake3 checksums during extraction.
     pub verify_checksums: bool,
+    /// Allow extracting archives with `\xNN` escape sequences in paths.
+    pub allow_escapes: bool,
 }
 
 impl Default for ExtractOptions {
     fn default() -> Self {
         Self {
             verify_checksums: true,
+            allow_escapes: false,
         }
     }
 }
@@ -383,6 +389,9 @@ impl BoxFileReader {
         path: &BoxPath<'_>,
         output_path: P,
     ) -> Result<(), ExtractError> {
+        if self.header.allow_escapes {
+            return Err(ExtractError::AllowEscapesRequired);
+        }
         let output_path = output_path.as_ref();
         let record = self
             .meta
@@ -414,6 +423,9 @@ impl BoxFileReader {
         output_path: P,
         options: ExtractOptions,
     ) -> Result<ExtractStats, ExtractError> {
+        if self.header.allow_escapes && !options.allow_escapes {
+            return Err(ExtractError::AllowEscapesRequired);
+        }
         let output_path = output_path.as_ref();
         let mut stats = ExtractStats::default();
         let start = Instant::now();
@@ -439,6 +451,9 @@ impl BoxFileReader {
         output_path: P,
         options: ExtractOptions,
     ) -> Result<ExtractStats, ExtractError> {
+        if self.header.allow_escapes && !options.allow_escapes {
+            return Err(ExtractError::AllowEscapesRequired);
+        }
         let output_path = output_path.as_ref();
         let mut stats = ExtractStats::default();
 
@@ -484,6 +499,9 @@ impl BoxFileReader {
         concurrency: usize,
         progress: Option<tokio::sync::mpsc::UnboundedSender<ExtractProgress>>,
     ) -> Result<ExtractStats, ExtractError> {
+        if self.header.allow_escapes && !options.allow_escapes {
+            return Err(ExtractError::AllowEscapesRequired);
+        }
         let output_path = output_path.as_ref();
         let mut timing = ExtractTiming::default();
 

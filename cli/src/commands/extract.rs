@@ -38,6 +38,7 @@ pub async fn run(args: ExtractArgs) -> Result<()> {
 
     let options = ExtractOptions {
         verify_checksums: !args.no_checksum,
+        allow_escapes: args.allow_escapes,
     };
 
     let stats: ExtractStats = if args.files.is_empty() {
