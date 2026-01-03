@@ -564,10 +564,10 @@ impl<'a> BoxMetadata<'a> {
         // Try FST first if available
         if let Some(fst) = &self.fst {
             for (path_bytes, idx) in fst.prefix_iter(&[]) {
-                if idx == target.get() {
-                    if let Ok(path_str) = std::str::from_utf8(&path_bytes) {
-                        return Some(BoxPath(Cow::Owned(path_str.to_string())));
-                    }
+                if idx == target.get()
+                    && let Ok(path_str) = std::str::from_utf8(&path_bytes)
+                {
+                    return Some(BoxPath(Cow::Owned(path_str.to_string())));
                 }
             }
         }

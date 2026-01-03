@@ -1,3 +1,5 @@
+#![allow(unused_assignments)] // miette bug workaround
+
 use std::path::PathBuf;
 
 use box_format::BoxPath;
@@ -15,8 +17,8 @@ pub enum Error {
         source: IntoBoxPathError,
     },
 
-    #[error("Cannot open archive `{}`", .path.display())]
     #[diagnostic(help("Is this a valid .box file?"))]
+    #[error("Cannot open archive `{}`", .path.display())]
     OpenArchive {
         path: PathBuf,
         #[source]
@@ -105,8 +107,8 @@ pub enum Error {
         source: box_format::ExtractError,
     },
 
-    #[error("Archive already exists: `{}`", path.display())]
     #[diagnostic(help("Use -f/--force to overwrite"))]
+    #[error("Archive already exists: `{}`", path.display())]
     ArchiveExists { path: PathBuf },
 
     #[error("No files specified to add to archive")]

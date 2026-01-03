@@ -494,7 +494,7 @@ impl BoxFileReader {
                         .attr(self.metadata(), "blake3")
                         .map(|h| h.to_vec());
                     #[cfg(unix)]
-                    let mode = self.get_mode(&item.record);
+                    let mode = self.get_mode(item.record);
                     #[cfg(not(unix))]
                     let mode = 0u32;
                     files.push((item.path.clone(), f.clone(), expected_hash, mode));
@@ -1252,6 +1252,7 @@ impl tokio::io::AsyncWrite for HashingSink<'_> {
 /// Extract a single file from the archive using a shared mmap.
 ///
 /// This is a standalone function so it can be spawned as a task.
+#[allow(clippy::too_many_arguments)]
 async fn extract_single_file_from_mmap(
     mmap: Arc<MemoryMappedFile>,
     archive_offset: u64,

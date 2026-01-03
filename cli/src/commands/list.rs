@@ -42,10 +42,7 @@ pub async fn run(args: ListArgs) -> Result<()> {
 }
 
 fn list_compact(bf: &BoxFileReader) -> Result<()> {
-    println!(
-        "{:>12}  {:>12}  {:>6}  {}",
-        "Compressed", "Size", "Ratio", "Path"
-    );
+    println!("{:>12}  {:>12}  {:>6}  Path", "Compressed", "Size", "Ratio");
     println!("{}", "-".repeat(60));
 
     let mut total_compressed = 0u64;
@@ -124,8 +121,8 @@ fn list_long(bf: &BoxFileReader) -> Result<()> {
 
     println!();
     println!(
-        "{:8}  {:>12}  {:>12}  {:20}  {:9}  {:>16}  {}",
-        "Method", "Compressed", "Size", "Created", "Perms", "Checksum", "Path"
+        "{:8}  {:>12}  {:>12}  {:20}  {:9}  {:>16}  Path",
+        "Method", "Compressed", "Size", "Created", "Perms", "Checksum"
     );
     println!("{}", "-".repeat(100));
 

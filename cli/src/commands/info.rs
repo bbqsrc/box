@@ -13,10 +13,10 @@ fn resolve_attrs<'a>(
 ) -> BTreeMap<&'a str, AttrValue<'a>> {
     let mut map = BTreeMap::new();
     for (key_idx, value) in attrs {
-        if let Some(key) = metadata.attr_key_name(*key_idx) {
-            if let Some(attr_type) = metadata.attr_key_type(*key_idx) {
-                map.insert(key, metadata.parse_attr_value(value, attr_type));
-            }
+        if let Some(key) = metadata.attr_key_name(*key_idx)
+            && let Some(attr_type) = metadata.attr_key_type(*key_idx)
+        {
+            map.insert(key, metadata.parse_attr_value(value, attr_type));
         }
     }
     map
@@ -25,7 +25,7 @@ fn resolve_attrs<'a>(
 /// Format an attribute with its type annotation and value.
 fn format_attr(key: &str, value: &AttrValue<'_>) -> String {
     match value {
-        AttrValue::Bytes(bytes) if bytes.is_empty() => format!("{}[bytes]: (empty)", key),
+        AttrValue::Bytes([]) => format!("{}[bytes]: (empty)", key),
         AttrValue::Bytes(bytes) => {
             let hex: String = bytes
                 .iter()
@@ -34,7 +34,7 @@ fn format_attr(key: &str, value: &AttrValue<'_>) -> String {
                 .join(" ");
             format!("{}[{} bytes]: {}", key, bytes.len(), hex)
         }
-        AttrValue::String(s) if s.is_empty() => format!("{}[str]: (empty)", key),
+        AttrValue::String("") => format!("{}[str]: (empty)", key),
         AttrValue::String(s) => format!("{}[str]: {}", key, s),
         AttrValue::Json(json) => {
             let v = serde_json::to_string(json).unwrap_or_else(|_| format!("{:?}", json));

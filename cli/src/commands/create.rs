@@ -128,25 +128,26 @@ pub async fn run(args: CreateArgs) -> Result<()> {
                 source: box_format::path::IntoBoxPathError::EmptyPath,
             })?;
 
-            for entry in glob::glob(&pwc.path).map_err(|_| Error::InvalidPath {
-                path: PathBuf::from(&pwc.path),
-                source: box_format::path::IntoBoxPathError::EmptyPath,
-            })? {
-                if let Ok(path) = entry {
-                    collect_path(
-                        &path,
-                        &pwc.config,
-                        &exclude_patterns,
-                        args.include_hidden,
-                        !args.no_recursive,
-                        &archive_canonical,
-                        archive_filename,
-                        &mut entries,
-                        &mut known_dirs,
-                        &mut known_files,
-                    )
-                    .await?;
-                }
+            for path in glob::glob(&pwc.path)
+                .map_err(|_| Error::InvalidPath {
+                    path: PathBuf::from(&pwc.path),
+                    source: box_format::path::IntoBoxPathError::EmptyPath,
+                })?
+                .flatten()
+            {
+                collect_path(
+                    &path,
+                    &pwc.config,
+                    &exclude_patterns,
+                    args.include_hidden,
+                    !args.no_recursive,
+                    &archive_canonical,
+                    archive_filename,
+                    &mut entries,
+                    &mut known_dirs,
+                    &mut known_files,
+                )
+                .await?;
             }
         } else {
             let path = PathBuf::from(&pwc.path);
@@ -191,15 +192,16 @@ pub async fn run(args: CreateArgs) -> Result<()> {
     for dir in directories {
         if !created_dirs.contains(&dir.box_path) && bf.metadata().index(&dir.box_path).is_none() {
             // Ensure parent exists
-            if let Some(parent) = dir.box_path.parent() {
-                if !created_dirs.contains(&parent) && bf.metadata().index(&parent).is_none() {
-                    let parent_owned = parent.into_owned();
-                    bf.mkdir_all(parent_owned.clone(), std::collections::HashMap::new())
-                        .map_err(|source| Error::CreateDirectory {
-                            path: parent_owned,
-                            source,
-                        })?;
-                }
+            if let Some(parent) = dir.box_path.parent()
+                && !created_dirs.contains(&parent)
+                && bf.metadata().index(&parent).is_none()
+            {
+                let parent_owned = parent.into_owned();
+                bf.mkdir_all(parent_owned.clone(), std::collections::HashMap::new())
+                    .map_err(|source| Error::CreateDirectory {
+                        path: parent_owned,
+                        source,
+                    })?;
             }
 
             let dir_meta = fs::metadata_to_attrs(&dir.meta, timestamps, ownership);
@@ -216,7 +218,7 @@ pub async fn run(args: CreateArgs) -> Result<()> {
 
     // Process symlinks (must be sequential)
     let symlinks_start = Instant::now();
-    for (link, is_dir) in symlinks {
+    for (link, _is_dir) in symlinks {
         let target_path = tokio::fs::read_link(&link.fs_path)
             .await
             .map_err(|source| Error::ReadLink {
@@ -241,16 +243,17 @@ pub async fn run(args: CreateArgs) -> Result<()> {
         })?;
 
         // Ensure parent directory exists
-        if let Some(parent) = link.box_path.parent() {
-            if !created_dirs.contains(&parent) && bf.metadata().index(&parent).is_none() {
-                let parent_owned = parent.into_owned();
-                bf.mkdir_all(parent_owned.clone(), std::collections::HashMap::new())
-                    .map_err(|source| Error::CreateDirectory {
-                        path: parent_owned.clone(),
-                        source,
-                    })?;
-                created_dirs.insert(parent_owned);
-            }
+        if let Some(parent) = link.box_path.parent()
+            && !created_dirs.contains(&parent)
+            && bf.metadata().index(&parent).is_none()
+        {
+            let parent_owned = parent.into_owned();
+            bf.mkdir_all(parent_owned.clone(), std::collections::HashMap::new())
+                .map_err(|source| Error::CreateDirectory {
+                    path: parent_owned.clone(),
+                    source,
+                })?;
+            created_dirs.insert(parent_owned);
         }
 
         let link_meta = fs::metadata_to_attrs(&link.meta, timestamps, ownership);
@@ -289,16 +292,17 @@ pub async fn run(args: CreateArgs) -> Result<()> {
 
         for file in files {
             // Ensure parent directory exists
-            if let Some(parent) = file.box_path.parent() {
-                if !created_dirs.contains(&parent) && bf.metadata().index(&parent).is_none() {
-                    let parent_owned = parent.into_owned();
-                    bf.mkdir_all(parent_owned.clone(), std::collections::HashMap::new())
-                        .map_err(|source| Error::CreateDirectory {
-                            path: parent_owned.clone(),
-                            source,
-                        })?;
-                    created_dirs.insert(parent_owned);
-                }
+            if let Some(parent) = file.box_path.parent()
+                && !created_dirs.contains(&parent)
+                && bf.metadata().index(&parent).is_none()
+            {
+                let parent_owned = parent.into_owned();
+                bf.mkdir_all(parent_owned.clone(), std::collections::HashMap::new())
+                    .map_err(|source| Error::CreateDirectory {
+                        path: parent_owned.clone(),
+                        source,
+                    })?;
+                created_dirs.insert(parent_owned);
             }
 
             let f = tokio::fs::File::open(&file.fs_path)
@@ -349,16 +353,17 @@ pub async fn run(args: CreateArgs) -> Result<()> {
 
         // Ensure all parent directories exist before parallel processing
         for file in &files {
-            if let Some(parent) = file.box_path.parent() {
-                if !created_dirs.contains(&parent) && bf.metadata().index(&parent).is_none() {
-                    let parent_owned = parent.into_owned();
-                    bf.mkdir_all(parent_owned.clone(), std::collections::HashMap::new())
-                        .map_err(|source| Error::CreateDirectory {
-                            path: parent_owned.clone(),
-                            source,
-                        })?;
-                    created_dirs.insert(parent_owned);
-                }
+            if let Some(parent) = file.box_path.parent()
+                && !created_dirs.contains(&parent)
+                && bf.metadata().index(&parent).is_none()
+            {
+                let parent_owned = parent.into_owned();
+                bf.mkdir_all(parent_owned.clone(), std::collections::HashMap::new())
+                    .map_err(|source| Error::CreateDirectory {
+                        path: parent_owned.clone(),
+                        source,
+                    })?;
+                created_dirs.insert(parent_owned);
             }
         }
 
@@ -500,6 +505,7 @@ pub async fn run(args: CreateArgs) -> Result<()> {
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn collect_path(
     path: &Path,
     config: &CompressionConfig,
@@ -584,7 +590,7 @@ async fn collect_path(
                     path: file_path.to_path_buf(),
                     source,
                 })?;
-            if archive_canonical == &canonical_path {
+            if archive_canonical == canonical_path {
                 continue;
             }
         }

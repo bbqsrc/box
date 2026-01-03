@@ -28,10 +28,10 @@ pub fn parse_paths_with_compression(args: &[String]) -> Vec<PathWithCompression>
             "--xz" => current_config = CompressionConfig::new(Compression::Xz),
             "--snappy" => current_config = CompressionConfig::new(Compression::Snappy),
             "-O" => {
-                if let Some(opt) = iter.next() {
-                    if let Some((key, value)) = opt.split_once('=') {
-                        current_config.set_option(key, value);
-                    }
+                if let Some(opt) = iter.next()
+                    && let Some((key, value)) = opt.split_once('=')
+                {
+                    current_config.set_option(key, value);
                 }
             }
             path => {
