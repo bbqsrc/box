@@ -206,7 +206,12 @@ pub async fn run(args: CreateArgs) -> Result<()> {
                     })?;
             }
 
-            let dir_meta = fs::metadata_to_attrs(&dir.meta, timestamps, ownership);
+            let mut dir_meta = fs::metadata_to_attrs(&dir.meta, timestamps, ownership);
+            if args.xattrs {
+                if let Ok(xattrs) = fs::read_xattrs(&dir.fs_path) {
+                    dir_meta.extend(xattrs);
+                }
+            }
             bf.mkdir(dir.box_path.clone(), dir_meta)
                 .map_err(|source| Error::CreateDirectory {
                     path: dir.box_path.clone(),
@@ -245,7 +250,12 @@ pub async fn run(args: CreateArgs) -> Result<()> {
             created_dirs.insert(parent_owned);
         }
 
-        let link_meta = fs::metadata_to_attrs(&link.meta, timestamps, ownership);
+        let mut link_meta = fs::metadata_to_attrs(&link.meta, timestamps, ownership);
+        if args.xattrs {
+            if let Ok(xattrs) = fs::read_xattrs(&link.fs_path) {
+                link_meta.extend(xattrs);
+            }
+        }
 
         // Try to resolve as internal link first
         let target_box_path = BoxPath::new(&resolved_target).ok();
@@ -318,7 +328,12 @@ pub async fn run(args: CreateArgs) -> Result<()> {
                     source,
                 })?;
 
-            let file_meta = fs::metadata_to_attrs(&file.meta, timestamps, ownership);
+            let mut file_meta = fs::metadata_to_attrs(&file.meta, timestamps, ownership);
+            if args.xattrs {
+                if let Ok(xattrs) = fs::read_xattrs(&file.fs_path) {
+                    file_meta.extend(xattrs);
+                }
+            }
 
             let record = if !args.no_checksum {
                 bf.insert_streaming::<_, blake3::Hasher>(

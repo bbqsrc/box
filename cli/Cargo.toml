@@ -12,7 +12,7 @@ name = "box"
 path = "src/main.rs"
 
 [dependencies]
-box-format.workspace = true
+box-format = { workspace = true, features = ["xattr"] }
 fastvint.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "fs"] }
 async-walkdir.workspace = true

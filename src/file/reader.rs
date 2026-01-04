@@ -163,6 +163,8 @@ pub struct ExtractOptions {
     pub allow_escapes: bool,
     /// Allow extracting archives with external symlinks (pointing outside the archive).
     pub allow_external_symlinks: bool,
+    /// Restore extended attributes (Linux only).
+    pub xattrs: bool,
 }
 
 impl Default for ExtractOptions {
@@ -171,6 +173,7 @@ impl Default for ExtractOptions {
             verify_checksums: true,
             allow_escapes: false,
             allow_external_symlinks: false,
+            xattrs: false,
         }
     }
 }
@@ -549,7 +552,19 @@ impl BoxFileReader {
                     let mode = self.get_mode(item.record);
                     #[cfg(not(unix))]
                     let mode = 0u32;
-                    files.push((item.path.clone(), f.clone(), expected_hash, mode));
+
+                    // Collect xattrs if option enabled
+                    let xattrs: Vec<(String, Vec<u8>)> = if options.xattrs {
+                        item.record
+                            .attrs_iter(self.metadata())
+                            .filter(|(k, _)| k.starts_with("linux.xattr."))
+                            .map(|(k, v)| (k.to_string(), v.to_vec()))
+                            .collect()
+                    } else {
+                        Vec::new()
+                    };
+
+                    files.push((item.path.clone(), f.clone(), expected_hash, mode, xattrs));
                 }
                 Record::Link(_) | Record::ExternalLink(_) => {
                     symlinks.push((item.path.clone(), item.record.clone()))
@@ -594,7 +609,15 @@ impl BoxFileReader {
             #[cfg(windows)]
             {
                 // Windows does not have unix-style permissions
-                let _ = record;
+                let _ = &record;
+            }
+
+            // Restore extended attributes if requested
+            if options.xattrs {
+                let xattr_iter = record
+                    .attrs_iter(self.metadata())
+                    .filter(|(k, _)| k.starts_with("linux.xattr."));
+                crate::fs::write_xattrs(&new_dir, xattr_iter);
             }
 
             stats.dirs_created += 1;
@@ -632,6 +655,7 @@ impl BoxFileReader {
              record: FileRecord<'static>,
              expected_hash: Option<Vec<u8>>,
              mode: u32,
+             xattrs: Vec<(String, Vec<u8>)>,
              mmap: Arc<MemoryMappedFile>,
              out_base: PathBuf,
              progress: Option<tokio::sync::mpsc::UnboundedSender<ExtractProgress>>| {
@@ -649,6 +673,7 @@ impl BoxFileReader {
                         &box_path,
                         &record,
                         mode,
+                        xattrs,
                     )
                     .await;
 
@@ -658,13 +683,14 @@ impl BoxFileReader {
 
         // Seed initial extraction tasks up to concurrency limit
         for _ in 0..concurrency {
-            if let Some((box_path, record, expected_hash, mode)) = files_iter.next() {
+            if let Some((box_path, record, expected_hash, mode, xattrs)) = files_iter.next() {
                 spawn_extract(
                     &mut extract_set,
                     box_path,
                     record,
                     expected_hash,
                     mode,
+                    xattrs,
                     mmap.clone(),
                     output_path.to_path_buf(),
                     progress.clone(),
@@ -712,13 +738,14 @@ impl BoxFileReader {
                     }
 
                     // Spawn next extraction task if more files remain
-                    if let Some((box_path, record, expected_hash, mode)) = files_iter.next() {
+                    if let Some((box_path, record, expected_hash, mode, xattrs)) = files_iter.next() {
                         spawn_extract(
                             &mut extract_set,
                             box_path,
                             record,
                             expected_hash,
                             mode,
+                            xattrs,
                             mmap.clone(),
                             output_path.to_path_buf(),
                             progress.clone(),
@@ -1250,6 +1277,14 @@ impl BoxFileReader {
                     }
                 }
 
+                // Restore extended attributes if requested
+                if options.xattrs {
+                    let xattr_iter = record
+                        .attrs_iter(self.metadata())
+                        .filter(|(k, _)| k.starts_with("linux.xattr."));
+                    crate::fs::write_xattrs(&out_path, xattr_iter);
+                }
+
                 Ok(())
             }
             Record::Directory(_dir) => {
@@ -1444,6 +1479,7 @@ async fn extract_single_file_from_mmap(
     box_path: &BoxPath<'_>,
     record: &FileRecord<'_>,
     mode: u32,
+    xattrs: Vec<(String, Vec<u8>)>,
 ) -> Result<ExtractFileResult, ExtractError> {
     use tokio::io::AsyncWriteExt;
 
@@ -1500,6 +1536,12 @@ async fn extract_single_file_from_mmap(
     }
     #[cfg(not(unix))]
     let _ = mode;
+
+    // Restore extended attributes
+    if !xattrs.is_empty() {
+        let xattr_iter = xattrs.iter().map(|(k, v)| (k.as_str(), v.as_slice()));
+        crate::fs::write_xattrs(&out_path, xattr_iter);
+    }
 
     let stats = ExtractStats {
         files_extracted: 1,

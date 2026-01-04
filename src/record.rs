@@ -113,6 +113,18 @@ impl<'a> Record<'a> {
         }
     }
 
+    /// Iterate over attributes with resolved key names.
+    pub fn attrs_iter<'b>(
+        &'b self,
+        metadata: &'b BoxMetadata<'_>,
+    ) -> impl Iterator<Item = (&'b str, &'b [u8])> {
+        self.attrs().iter().filter_map(move |(key_idx, value)| {
+            metadata
+                .attr_key_name(*key_idx)
+                .map(|name| (name, value.as_slice()))
+        })
+    }
+
     pub fn into_owned(self) -> Record<'static> {
         match self {
             Record::File(file) => Record::File(file.into_owned()),

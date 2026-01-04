@@ -123,3 +123,39 @@ pub fn is_hidden(path: &std::path::Path) -> bool {
         .map(|m| (m.file_attributes() & FILE_ATTRIBUTE_HIDDEN) != 0)
         .unwrap_or(false)
 }
+
+/// Read all extended attributes from a path.
+/// Returns HashMap where keys are "linux.xattr.<name>" (e.g., "linux.xattr.user.myattr").
+#[cfg(all(feature = "xattr", target_os = "linux"))]
+pub fn read_xattrs(path: &std::path::Path) -> std::io::Result<HashMap<String, Vec<u8>>> {
+    let mut attrs = HashMap::new();
+    for name in xattr::list(path)? {
+        if let Some(name_str) = name.to_str() {
+            if let Some(value) = xattr::get(path, &name)? {
+                attrs.insert(format!("linux.xattr.{}", name_str), value);
+            }
+        }
+    }
+    Ok(attrs)
+}
+
+#[cfg(not(all(feature = "xattr", target_os = "linux")))]
+pub fn read_xattrs(_path: &std::path::Path) -> std::io::Result<HashMap<String, Vec<u8>>> {
+    Ok(HashMap::new())
+}
+
+/// Write extended attributes to a path.
+/// Expects keys in "linux.xattr.<name>" format.
+#[cfg(all(feature = "xattr", target_os = "linux"))]
+pub fn write_xattrs<'a>(path: &std::path::Path, attrs: impl Iterator<Item = (&'a str, &'a [u8])>) {
+    for (key, value) in attrs {
+        if let Some(name) = key.strip_prefix("linux.xattr.") {
+            if let Err(e) = xattr::set(path, name, value) {
+                tracing::warn!("Failed to set xattr {} on {}: {}", name, path.display(), e);
+            }
+        }
+    }
+}
+
+#[cfg(not(all(feature = "xattr", target_os = "linux")))]
+pub fn write_xattrs<'a>(_path: &std::path::Path, _attrs: impl Iterator<Item = (&'a str, &'a [u8])>) {}

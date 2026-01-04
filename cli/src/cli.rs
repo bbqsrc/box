@@ -116,6 +116,10 @@ pub struct CreateArgs {
     #[arg(long)]
     pub allow_external_symlinks: bool,
 
+    /// Preserve extended attributes (Linux only)
+    #[arg(long)]
+    pub xattrs: bool,
+
     /// Files and directories to archive
     #[arg(
         trailing_var_arg = true,
@@ -161,6 +165,10 @@ pub struct ExtractArgs {
     /// Allow extracting archives with external symlinks (pointing outside the archive)
     #[arg(long)]
     pub allow_external_symlinks: bool,
+
+    /// Restore extended attributes (Linux only)
+    #[arg(long)]
+    pub xattrs: bool,
 
     /// Specific files to extract (extracts all if none specified)
     pub files: Vec<PathBuf>,

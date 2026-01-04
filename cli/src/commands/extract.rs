@@ -45,6 +45,7 @@ pub async fn run(args: ExtractArgs) -> Result<()> {
         verify_checksums: !args.no_checksum,
         allow_escapes: args.allow_escapes,
         allow_external_symlinks: args.allow_external_symlinks,
+        xattrs: args.xattrs,
     };
 
     let stats: ExtractStats = if args.files.is_empty() {
