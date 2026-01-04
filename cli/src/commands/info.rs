@@ -178,6 +178,24 @@ fn show_file_info(bf: &BoxFileReader, file_path: &str) -> Result<()> {
                 }
             }
         }
+        Record::ExternalLink(l) => {
+            println!("Type:   external symlink");
+            println!("Target: {} (external)", l.target);
+
+            println!();
+            println!("Record:");
+            println!("  Index: {}", index.get());
+
+            // Show attributes
+            let attrs = resolve_attrs(&l.attrs, metadata);
+            if !attrs.is_empty() {
+                println!();
+                println!("Attributes:");
+                for (key, value) in attrs {
+                    println!("  {}", format_attr(key, &value));
+                }
+            }
+        }
     }
 
     Ok(())
@@ -201,7 +219,7 @@ fn show_archive_info(bf: &BoxFileReader, args: &InfoArgs) -> Result<()> {
                 total_compressed += f.length;
             }
             Record::Directory(_) => dir_count += 1,
-            Record::Link(_) => link_count += 1,
+            Record::Link(_) | Record::ExternalLink(_) => link_count += 1,
         }
     }
 

@@ -66,6 +66,12 @@ fn list_compact(bf: &BoxFileReader) -> Result<()> {
                     "-", "-", "-", path, target
                 );
             }
+            Record::ExternalLink(link) => {
+                println!(
+                    "{:>12}  {:>12}  {:>6}  {} -> {} (external)",
+                    "-", "-", "-", path, link.target
+                );
+            }
             Record::File(file) => {
                 let ratio = if file.decompressed_length == 0 {
                     0.0
@@ -149,6 +155,12 @@ fn list_long(bf: &BoxFileReader) -> Result<()> {
                     "<link>", "-", "-", time, acl, "-", path, target
                 );
             }
+            Record::ExternalLink(link) => {
+                println!(
+                    "{:8}  {:>12}  {:>12}  {:20}  {:9}  {:>16}  {} -> {} (external)",
+                    "<xlink>", "-", "-", time, acl, "-", path, link.target
+                );
+            }
             Record::File(file) => {
                 let checksum = format_checksum(file, bf.metadata());
                 println!(
@@ -221,6 +233,19 @@ fn list_json(bf: &BoxFileReader) -> Result<()> {
                     .metadata()
                     .path_for_index(link.target)
                     .map(|p| p.to_string()),
+            },
+            Record::ExternalLink(link) => JsonEntry {
+                path,
+                entry_type: "external_link".to_string(),
+                size: None,
+                compressed_size: None,
+                compression: None,
+                created: record
+                    .attr(bf.metadata(), "created")
+                    .map(|v| format_time(Some(v)))
+                    .filter(|s| s != "-"),
+                checksum: None,
+                target: Some(link.target.to_string()),
             },
             Record::File(file) => JsonEntry {
                 path,
