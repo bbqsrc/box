@@ -107,7 +107,7 @@ impl<'a> DeserializeBorrowed<'a> for Vec<RecordIndex> {
     }
 }
 
-impl<'a> DeserializeBorrowed<'a> for Vec<u8> {
+impl<'a> DeserializeBorrowed<'a> for Box<[u8]> {
     fn deserialize_borrowed(data: &'a [u8], pos: &mut usize) -> std::io::Result<Self> {
         let len = read_vlq_u64(data, pos)? as usize;
         if *pos + len > data.len() {
@@ -116,7 +116,7 @@ impl<'a> DeserializeBorrowed<'a> for Vec<u8> {
                 "unexpected end of data reading bytes",
             ));
         }
-        let bytes = data[*pos..*pos + len].to_vec();
+        let bytes = data[*pos..*pos + len].to_vec().into_boxed_slice();
         *pos += len;
         Ok(bytes)
     }
@@ -126,10 +126,10 @@ impl<'a> DeserializeBorrowed<'a> for AttrMap {
     fn deserialize_borrowed(data: &'a [u8], pos: &mut usize) -> std::io::Result<Self> {
         let _byte_count = read_u64_le_slice(data, pos)?;
         let len = read_vlq_u64(data, pos)? as usize;
-        let mut map: HashMap<usize, Vec<u8>> = HashMap::with_capacity(len);
+        let mut map: HashMap<usize, Box<[u8]>> = HashMap::with_capacity(len);
         for _ in 0..len {
             let key = read_vlq_u64(data, pos)? as usize;
-            let value = <Vec<u8>>::deserialize_borrowed(data, pos)?;
+            let value = <Box<[u8]>>::deserialize_borrowed(data, pos)?;
             map.insert(key, value);
         }
         Ok(map)
@@ -415,11 +415,11 @@ impl DeserializeOwned for AttrMap {
         let start = reader.stream_position().await?;
         let _byte_count = read_u64_le(reader).await?;
         let len = reader.read_vu64().await?;
-        let mut buf: HashMap<usize, Vec<u8>> = HashMap::with_capacity(len as usize);
+        let mut buf: HashMap<usize, Box<[u8]>> = HashMap::with_capacity(len as usize);
         for _ in 0..len {
             let key = reader.read_vu64().await?;
             let value = <Vec<u8>>::deserialize_owned(reader).await?;
-            buf.insert(key as usize, value);
+            buf.insert(key as usize, value.into_boxed_slice());
         }
         let end = reader.stream_position().await?;
         tracing::debug!(
@@ -443,7 +443,7 @@ impl DeserializeOwned for FileRecord<'static> {
         let decompressed_length = read_u64_le(reader).await?;
         let data = read_u64_le(reader).await?;
         let name = String::deserialize_owned(reader).await?;
-        let attrs = <HashMap<usize, Vec<u8>>>::deserialize_owned(reader).await?;
+        let attrs = <HashMap<usize, Box<[u8]>>>::deserialize_owned(reader).await?;
 
         let end = reader.stream_position().await?;
         tracing::debug!(start = format_args!("{:#x}", start), end = format_args!("{:#x}", end), bytes = end - start, %name, "deserialized FileRecord");
@@ -496,7 +496,7 @@ pub(crate) async fn deserialize_directory_owned<R: AsyncRead + AsyncSeek + Unpin
         Vec::new()
     };
 
-    let attrs = <HashMap<usize, Vec<u8>>>::deserialize_owned(reader).await?;
+    let attrs = <HashMap<usize, Box<[u8]>>>::deserialize_owned(reader).await?;
 
     let end = reader.stream_position().await?;
     tracing::debug!(start = format_args!("{:#x}", start), end = format_args!("{:#x}", end), bytes = end - start, %name, "deserialized DirectoryRecord");
@@ -545,7 +545,7 @@ impl DeserializeOwned for LinkRecord<'static> {
         let start = reader.stream_position().await?;
         let name = String::deserialize_owned(reader).await?;
         let target = RecordIndex::deserialize_owned(reader).await?;
-        let attrs = <HashMap<usize, Vec<u8>>>::deserialize_owned(reader).await?;
+        let attrs = <HashMap<usize, Box<[u8]>>>::deserialize_owned(reader).await?;
 
         let end = reader.stream_position().await?;
         tracing::debug!(start = format_args!("{:#x}", start), end = format_args!("{:#x}", end), bytes = end - start, %name, "deserialized LinkRecord");
@@ -565,7 +565,7 @@ impl DeserializeOwned for ExternalLinkRecord<'static> {
         let start = reader.stream_position().await?;
         let name = String::deserialize_owned(reader).await?;
         let target = String::deserialize_owned(reader).await?;
-        let attrs = <HashMap<usize, Vec<u8>>>::deserialize_owned(reader).await?;
+        let attrs = <HashMap<usize, Box<[u8]>>>::deserialize_owned(reader).await?;
 
         let end = reader.stream_position().await?;
         tracing::debug!(start = format_args!("{:#x}", start), end = format_args!("{:#x}", end), bytes = end - start, %name, "deserialized ExternalLinkRecord");
@@ -642,7 +642,7 @@ pub(crate) async fn deserialize_metadata_owned<R: AsyncRead + AsyncSeek + Unpin 
     }
 
     let attr_keys = deserialize_attr_keys_owned(reader, version).await?;
-    let attrs = <HashMap<usize, Vec<u8>>>::deserialize_owned(reader).await?;
+    let attrs = <HashMap<usize, Box<[u8]>>>::deserialize_owned(reader).await?;
 
     // Skip 0-padding to 8-byte boundary
     loop {

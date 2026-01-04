@@ -29,7 +29,7 @@ pub mod writer;
 
 pub use self::meta::BoxMetadata;
 
-pub type AttrMap = HashMap<usize, Vec<u8>>;
+pub type AttrMap = HashMap<usize, Box<[u8]>>;
 
 #[cfg(test)]
 mod tests {

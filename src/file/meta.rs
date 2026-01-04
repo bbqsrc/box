@@ -498,10 +498,10 @@ impl<'a> BoxMetadata<'a> {
     }
 
     #[inline(always)]
-    pub fn file_attr<S: AsRef<str>>(&self, key: S) -> Option<&Vec<u8>> {
+    pub fn file_attr<S: AsRef<str>>(&self, key: S) -> Option<&[u8]> {
         let key = self.attr_key(key.as_ref())?;
 
-        self.attrs.get(&key)
+        self.attrs.get(&key).map(|v| &**v)
     }
 
     /// Get all attribute keys used in this archive (both file-level and record-level).

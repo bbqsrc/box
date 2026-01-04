@@ -67,7 +67,7 @@ impl<'a> Serialize for std::borrow::Cow<'a, str> {
     }
 }
 
-impl Serialize for Vec<u8> {
+impl Serialize for Box<[u8]> {
     async fn write<W: AsyncWrite + AsyncSeek + Unpin + Send>(
         &self,
         writer: &mut W,

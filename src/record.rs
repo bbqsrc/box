@@ -135,7 +135,7 @@ impl<'a> Record<'a> {
         self.attrs().iter().filter_map(move |(key_idx, value)| {
             metadata
                 .attr_key_name(*key_idx)
-                .map(|name| (name, value.as_slice()))
+                .map(|name| (name, &**value))
         })
     }
 

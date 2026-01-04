@@ -364,51 +364,51 @@ impl BoxFileWriter {
     fn convert_attrs(
         &mut self,
         attrs: HashMap<String, Vec<u8>>,
-    ) -> std::io::Result<HashMap<usize, Vec<u8>>> {
+    ) -> std::io::Result<HashMap<usize, Box<[u8]>>> {
         // Set archive-level uid/gid defaults from first file if not already set
         if let Some(uid) = attrs.get("unix.uid") {
             let uid_key = self.meta.attr_key_or_create("unix.uid", AttrType::Vu32)?;
             self.meta
                 .attrs
                 .entry(uid_key)
-                .or_insert_with(|| uid.clone());
+                .or_insert_with(|| uid.clone().into_boxed_slice());
         }
         if let Some(gid) = attrs.get("unix.gid") {
             let gid_key = self.meta.attr_key_or_create("unix.gid", AttrType::Vu32)?;
             self.meta
                 .attrs
                 .entry(gid_key)
-                .or_insert_with(|| gid.clone());
+                .or_insert_with(|| gid.clone().into_boxed_slice());
         }
 
-        // Get archive defaults for filtering
-        let default_uid = self
-            .meta
-            .attr_key("unix.uid")
-            .and_then(|k| self.meta.attrs.get(&k).cloned());
-        let default_gid = self
-            .meta
-            .attr_key("unix.gid")
-            .and_then(|k| self.meta.attrs.get(&k).cloned());
+        // Filter out uid/gid that match archive defaults (scoped to release borrows)
+        let attrs: Vec<_> = {
+            let default_uid = self
+                .meta
+                .attr_key("unix.uid")
+                .and_then(|k| self.meta.attrs.get(&k).map(|v| &**v));
+            let default_gid = self
+                .meta
+                .attr_key("unix.gid")
+                .and_then(|k| self.meta.attrs.get(&k).map(|v| &**v));
 
-        // Filter out uid/gid that match archive defaults, then convert keys
+            attrs
+                .into_iter()
+                .filter(|(k, v)| {
+                    if k == "unix.uid" && default_uid.is_some_and(|d| v.as_slice() == d) {
+                        return false;
+                    }
+                    if k == "unix.gid" && default_gid.is_some_and(|d| v.as_slice() == d) {
+                        return false;
+                    }
+                    true
+                })
+                .collect()
+        };
+
+        // Convert keys (now safe to mutate self.meta)
         let mut result = HashMap::new();
         for (k, v) in attrs {
-            // Skip uid if matches archive default
-            if k == "unix.uid"
-                && let Some(ref default) = default_uid
-                && &v == default
-            {
-                continue;
-            }
-            // Skip gid if matches archive default
-            if k == "unix.gid"
-                && let Some(ref default) = default_gid
-                && &v == default
-            {
-                continue;
-            }
-            // Determine type based on well-known attribute names
             let attr_type = match k.as_str() {
                 "unix.mode" | "unix.uid" | "unix.gid" => AttrType::Vu32,
                 "created" | "modified" | "accessed" => AttrType::DateTime,
@@ -420,7 +420,7 @@ impl BoxFileWriter {
                 _ => AttrType::Bytes,
             };
             let key = self.meta.attr_key_or_create(&k, attr_type)?;
-            result.insert(key, v);
+            result.insert(key, v.into_boxed_slice());
         }
         Ok(result)
     }
@@ -647,7 +647,7 @@ impl BoxFileWriter {
                 .record_mut(index)
                 .unwrap()
                 .attrs_mut()
-                .insert(key, hash_bytes);
+                .insert(key, hash_bytes.into_boxed_slice());
         }
 
         Ok(self.meta.record(index).unwrap().as_file().unwrap())
@@ -766,12 +766,12 @@ impl BoxFileWriter {
 
         // Set checksum attribute if present
         if let Some((attr_name, hash)) = file.checksum {
-            let key = self.meta.attr_key_or_create(&attr_name, AttrType::U256)?;
+            let key = self.meta.attr_key_or_create(attr_name, AttrType::U256)?;
             self.meta
                 .record_mut(index)
                 .unwrap()
                 .attrs_mut()
-                .insert(key, hash);
+                .insert(key, hash.into_boxed_slice());
         }
 
         Ok(self.meta.record(index).unwrap().as_file().unwrap())
@@ -795,7 +795,7 @@ impl BoxFileWriter {
 
         let attr_type = value.attr_type();
         let key_idx = self.meta.attr_key_or_create(key.as_ref(), attr_type)?;
-        let bytes = value.as_raw_bytes().into_owned();
+        let bytes = value.as_raw_bytes().into_owned().into_boxed_slice();
         let record = self.meta.record_mut(index).unwrap();
         record.attrs_mut().insert(key_idx, bytes);
 
@@ -809,7 +809,7 @@ impl BoxFileWriter {
     ) -> std::io::Result<()> {
         let attr_type = value.attr_type();
         let key_idx = self.meta.attr_key_or_create(key.as_ref(), attr_type)?;
-        let bytes = value.as_raw_bytes().into_owned();
+        let bytes = value.as_raw_bytes().into_owned().into_boxed_slice();
 
         self.meta.attrs.insert(key_idx, bytes);
 

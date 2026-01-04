@@ -359,7 +359,7 @@ impl BoxFileReader {
             return Some(value);
         }
         // Fall back to archive-level attr
-        self.meta.file_attr(key).map(|v| v.as_slice())
+        self.meta.file_attr(key)
     }
 
     /// Get the unix mode for a record, with fallback to defaults.
