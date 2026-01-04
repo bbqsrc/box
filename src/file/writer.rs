@@ -67,7 +67,7 @@ pub struct CompressedFile {
     /// File attributes (will be converted to internal keys at write time).
     pub attrs: HashMap<String, Vec<u8>>,
     /// Optional checksum: (attribute_name, hash_bytes).
-    pub checksum: Option<(String, Vec<u8>)>,
+    pub checksum: Option<(&'static str, Vec<u8>)>,
 }
 
 /// 8MB buffer for efficient sequential writes
@@ -489,7 +489,7 @@ impl BoxFileWriter {
         tracing::trace!("mkdir: {}", path);
 
         let record = DirectoryRecord {
-            name: std::borrow::Cow::Owned(path.filename().to_string()),
+            name: Cow::Owned(path.filename().to_string()),
             entries: vec![],
             attrs: self.convert_attrs(attrs)?,
         };
@@ -537,7 +537,7 @@ impl BoxFileWriter {
         }
 
         let record = LinkRecord {
-            name: std::borrow::Cow::Owned(path.filename().to_string()),
+            name: Cow::Owned(path.filename().to_string()),
             target,
             attrs: self.convert_attrs(attrs)?,
         };
@@ -559,8 +559,8 @@ impl BoxFileWriter {
         self.header.allow_external_symlinks = true;
 
         let record = ExternalLinkRecord {
-            name: std::borrow::Cow::Owned(path.filename().to_string()),
-            target: std::borrow::Cow::Owned(target.to_string()),
+            name: Cow::Owned(path.filename().to_string()),
+            target: Cow::Owned(target.to_string()),
             attrs: self.convert_attrs(attrs)?,
         };
 
@@ -585,7 +585,7 @@ impl BoxFileWriter {
             compression: config.compression,
             length: byte_count.write,
             decompressed_length: byte_count.read,
-            name: std::borrow::Cow::Owned(path.filename().to_string()),
+            name: Cow::Owned(path.filename().to_string()),
             data: next_addr,
             attrs,
         };
@@ -633,7 +633,7 @@ impl BoxFileWriter {
             compression: config.compression,
             length: byte_count.write,
             decompressed_length: byte_count.read,
-            name: std::borrow::Cow::Owned(path.filename().to_string()),
+            name: Cow::Owned(path.filename().to_string()),
             data: next_addr,
             attrs,
         };
@@ -757,7 +757,7 @@ impl BoxFileWriter {
             compression: file.compression,
             length: file.compressed_length,
             decompressed_length: file.decompressed_length,
-            name: std::borrow::Cow::Owned(file.box_path.filename().to_string()),
+            name: Cow::Owned(file.box_path.filename().to_string()),
             data: next_addr,
             attrs,
         };
@@ -1302,7 +1302,7 @@ pub async fn compress_file<C: Checksum>(
     let checksum = if C::NAME.is_empty() {
         None
     } else {
-        Some((C::NAME.to_string(), hash_bytes))
+        Some((C::NAME, hash_bytes))
     };
 
     Ok(CompressedFile {

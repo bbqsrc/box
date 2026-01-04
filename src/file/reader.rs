@@ -544,10 +544,11 @@ impl BoxFileReader {
             match item.record {
                 Record::Directory(_) => directories.push((item.path.clone(), item.record.clone())),
                 Record::File(f) => {
-                    let expected_hash = item
-                        .record
-                        .attr(self.metadata(), "blake3")
-                        .map(|h| h.to_vec());
+                    let expected_hash: Option<[u8; 32]> =
+                        match item.record.attr_value(self.metadata(), "blake3") {
+                            Some(AttrValue::U256(h)) => Some(*h),
+                            _ => None,
+                        };
                     #[cfg(unix)]
                     let mode = self.get_mode(item.record);
                     #[cfg(not(unix))]
@@ -653,7 +654,7 @@ impl BoxFileReader {
             |extract_set: &mut tokio::task::JoinSet<_>,
              box_path: BoxPath<'static>,
              record: FileRecord<'static>,
-             expected_hash: Option<Vec<u8>>,
+             expected_hash: Option<[u8; 32]>,
              mode: u32,
              xattrs: Vec<(String, Vec<u8>)>,
              mmap: Arc<MemoryMappedFile>,
@@ -856,12 +857,14 @@ impl BoxFileReader {
             if let Record::File(file) = item.record {
                 stats.files_checked += 1;
 
-                let expected_hash = item.record.attr(self.metadata(), "blake3");
-                if expected_hash.is_none() {
-                    stats.files_without_checksum += 1;
-                    continue;
-                }
-                let expected_hash = expected_hash.unwrap();
+                let expected_hash: [u8; 32] =
+                    match item.record.attr_value(self.metadata(), "blake3") {
+                        Some(AttrValue::U256(h)) => *h,
+                        _ => {
+                            stats.files_without_checksum += 1;
+                            continue;
+                        }
+                    };
 
                 // Decompress to compute hash
                 let mut hasher = blake3::Hasher::new();
@@ -885,7 +888,7 @@ impl BoxFileReader {
                     .map_err(|e| ExtractError::VerificationFailed(e, item.path.to_path_buf()))?;
 
                 let actual_hash = hasher.finalize();
-                if actual_hash.as_bytes() != expected_hash {
+                if actual_hash.as_bytes() != &expected_hash {
                     tracing::warn!(
                         "Checksum mismatch for {}: expected {}, got {}",
                         item.path,
@@ -924,10 +927,13 @@ impl BoxFileReader {
 
         for item in self.meta.iter() {
             if let Record::File(f) = item.record {
-                if let Some(expected_hash) = item.record.attr(self.metadata(), "blake3") {
-                    files.push((item.path.clone(), f.clone(), expected_hash.to_vec()));
-                } else {
-                    files_without_checksum += 1;
+                match item.record.attr_value(self.metadata(), "blake3") {
+                    Some(AttrValue::U256(h)) => {
+                        files.push((item.path.clone(), f.clone(), *h));
+                    }
+                    _ => {
+                        files_without_checksum += 1;
+                    }
                 }
             }
         }
@@ -1259,21 +1265,23 @@ impl BoxFileReader {
                 stats.bytes_written += file.decompressed_length;
 
                 // Verify checksum if requested
-                if options.verify_checksums
-                    && let Some(expected_hash) = record.attr(self.metadata(), "blake3")
-                {
-                    let actual_hash = compute_file_blake3(&out_path)
-                        .await
-                        .map_err(|e| ExtractError::VerificationFailed(e, out_path.to_path_buf()))?;
+                if options.verify_checksums {
+                    if let Some(AttrValue::U256(expected_hash)) =
+                        record.attr_value(self.metadata(), "blake3")
+                    {
+                        let actual_hash = compute_file_blake3(&out_path).await.map_err(|e| {
+                            ExtractError::VerificationFailed(e, out_path.to_path_buf())
+                        })?;
 
-                    if actual_hash.as_bytes() != expected_hash {
-                        tracing::warn!(
-                            "Checksum mismatch for {}: expected {}, got {}",
-                            path,
-                            hex::encode(expected_hash),
-                            hex::encode(actual_hash.as_bytes())
-                        );
-                        stats.checksum_failures += 1;
+                        if actual_hash.as_bytes() != &*expected_hash {
+                            tracing::warn!(
+                                "Checksum mismatch for {}: expected {}, got {}",
+                                path,
+                                hex::encode(&*expected_hash),
+                                hex::encode(actual_hash.as_bytes())
+                            );
+                            stats.checksum_failures += 1;
+                        }
                     }
                 }
 
@@ -1556,7 +1564,7 @@ async fn extract_single_file_from_mmap(
 ///
 /// Uses blake3's mmap support for optimized hashing.
 /// Returns true if checksum matches, false if mismatch.
-fn validate_file_checksum(path: &Path, expected_hash: &[u8]) -> Result<bool, ExtractError> {
+fn validate_file_checksum(path: &Path, expected_hash: &[u8; 32]) -> Result<bool, ExtractError> {
     let mut hasher = blake3::Hasher::new();
     hasher
         .update_mmap(path)
@@ -1585,7 +1593,7 @@ async fn validate_single_file_from_mmap(
     archive_offset: u64,
     box_path: &BoxPath<'_>,
     record: &FileRecord<'_>,
-    expected_hash: &[u8],
+    expected_hash: &[u8; 32],
 ) -> Result<bool, ExtractError> {
     // Create segment from shared mmap
     let offset = archive_offset + record.data.get();

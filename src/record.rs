@@ -1,6 +1,7 @@
 use std::borrow::Cow;
 use std::num::NonZeroU64;
 
+use crate::AttrValue;
 use crate::file::{BoxMetadata, RecordIndex};
 use crate::{AttrMap, compression::Compression};
 
@@ -91,6 +92,19 @@ impl<'a> Record<'a> {
     pub fn attr<S: AsRef<str>>(&self, metadata: &BoxMetadata<'_>, key: S) -> Option<&[u8]> {
         let key = metadata.attr_key(key.as_ref())?;
         self.attrs().get(&key).map(|x| &**x)
+    }
+
+    /// Get a typed attribute value.
+    #[inline(always)]
+    pub fn attr_value<S: AsRef<str>>(
+        &self,
+        metadata: &BoxMetadata<'_>,
+        key: S,
+    ) -> Option<AttrValue<'_>> {
+        let key_idx = metadata.attr_key(key.as_ref())?;
+        let attr_type = metadata.attr_key_type(key_idx)?;
+        let raw = self.attrs().get(&key_idx)?;
+        Some(metadata.parse_attr_value(raw, attr_type))
     }
 
     #[inline(always)]

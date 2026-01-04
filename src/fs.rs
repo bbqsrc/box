@@ -158,4 +158,8 @@ pub fn write_xattrs<'a>(path: &std::path::Path, attrs: impl Iterator<Item = (&'a
 }
 
 #[cfg(not(all(feature = "xattr", target_os = "linux")))]
-pub fn write_xattrs<'a>(_path: &std::path::Path, _attrs: impl Iterator<Item = (&'a str, &'a [u8])>) {}
+pub fn write_xattrs<'a>(
+    _path: &std::path::Path,
+    _attrs: impl Iterator<Item = (&'a str, &'a [u8])>,
+) {
+}

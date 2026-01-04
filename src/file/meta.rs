@@ -470,18 +470,22 @@ impl<'a> BoxMetadata<'a> {
                 .unwrap_or(AttrValue::Bytes(v)),
             AttrType::U128 => {
                 if v.len() == 16 {
-                    let mut arr = [0u8; 16];
-                    arr.copy_from_slice(v);
-                    AttrValue::U128(arr)
+                    v.as_chunks()
+                        .0
+                        .get(0)
+                        .map(|arr| AttrValue::U128(arr))
+                        .unwrap()
                 } else {
                     AttrValue::Bytes(v)
                 }
             }
             AttrType::U256 => {
                 if v.len() == 32 {
-                    let mut arr = [0u8; 32];
-                    arr.copy_from_slice(v);
-                    AttrValue::U256(arr)
+                    v.as_chunks()
+                        .0
+                        .get(0)
+                        .map(|arr| AttrValue::U256(arr))
+                        .unwrap()
                 } else {
                     AttrValue::Bytes(v)
                 }
@@ -603,8 +607,8 @@ pub enum AttrValue<'a> {
     Vu32(u32),
     Vi64(i64),
     Vu64(u64),
-    U128([u8; 16]),
-    U256([u8; 32]),
+    U128(&'a [u8; 16]),
+    U256(&'a [u8; 32]),
     /// Minutes since Box epoch (2026-01-01 00:00:00 UTC)
     DateTime(i64),
 }
@@ -738,13 +742,13 @@ impl Display for AttrValue<'_> {
             AttrValue::Vi64(v) => write!(f, "{}", v),
             AttrValue::Vu64(v) => write!(f, "{}", v),
             AttrValue::U128(bytes) => {
-                for b in bytes {
+                for b in bytes.iter() {
                     f.write_fmt(format_args!("{:02x}", b))?;
                 }
                 Ok(())
             }
             AttrValue::U256(bytes) => {
-                for b in bytes {
+                for b in bytes.iter() {
                     f.write_fmt(format_args!("{:02x}", b))?;
                 }
                 Ok(())
