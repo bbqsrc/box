@@ -38,7 +38,7 @@ string-interner.workspace = true
 xattr = { workspace = true, optional = true }
 
 [features]
-default = ["brotli", "xz", "deflate", "zstd", "snappy", "writer", "reader"]
+default = ["brotli", "xz", "deflate", "zstd", "snappy", "writer", "reader", "xattr"]
 reader = []
 writer = ["reader"]
 
@@ -119,3 +119,4 @@ block2 = "0.6"
 # Workspace crates
 box-format = { version = "0.4.0", path = "." }
 box-fst = { version = "0.1.0", path = "crates/fst" }
+mimalloc = { version = "0.1", features = ["v3"] }
