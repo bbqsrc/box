@@ -306,7 +306,7 @@ The Data Section immediately follows the Header and contains the actual file con
 
 == Layout <sec:data-layout>
 
-File data is stored contiguously, with optional padding between files when alignment is enabled. The Data Section starts at offset `0x20` (32 bytes) and extends to the trailer offset.
+File data is stored contiguously, with optional padding between files when alignment is enabled. The Data Section starts immediately after the Header. When alignment is disabled, this is offset `0x20` (32 bytes). When alignment is enabled, padding bytes (`0x00`) are inserted so that the first file's data begins at an aligned offset. The Data Section extends to the trailer offset.
 
 #figure(
   table(
@@ -314,7 +314,8 @@ File data is stored contiguously, with optional padding between files when align
     align: (right, center),
     stroke: 0.5pt,
     inset: 8pt,
-    [Offset 0x20 →], [*File 1 Data*],
+    [Offset 0x20 →], [\[Padding\] _(if alignment > 1)_],
+    [], [*File 1 Data*],
     [], [\[Padding\] _(if alignment > 1)_],
     [], [*File 2 Data*],
     [], [\[Padding\]],
