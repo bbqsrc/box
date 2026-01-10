@@ -4,6 +4,14 @@ version = "0.1.0"
 authors = ["Brendan Molloy <brendan@bbqsrc.net>"]
 edition = "2024"
 
+[lib]
+name = "fusebox"
+path = "src/lib.rs"
+
+[[bin]]
+name = "fusebox"
+path = "src/main.rs"
+
 [dependencies]
 box-format.workspace = true
 fastvint.workspace = true
