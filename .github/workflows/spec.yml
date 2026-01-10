@@ -1,0 +1,55 @@
+name: Publish Spec
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'SPEC.typ'
+      - 'spec.css'
+      - '.github/workflows/spec.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install typst
+        uses: typst-community/setup-typst@v4
+
+      - name: Build HTML
+        run: typst c SPEC.typ --format html --features html
+
+      - name: Inject stylesheet
+        run: |
+          sed -i 's|</head>|<link rel="stylesheet" href="spec.css"></head>|' SPEC.html
+
+      - name: Prepare pages
+        run: |
+          mkdir -p _site
+          mv SPEC.html _site/index.html
+          cp spec.css _site/
+
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v3
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
