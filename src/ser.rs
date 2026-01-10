@@ -218,8 +218,8 @@ impl Serialize for BoxHeader {
     ) -> std::io::Result<()> {
         writer.write_all(&self.magic_bytes).await?;
         writer.write_u8(self.version).await?;
-        // flags byte: bit 0 = allow_escapes, bit 1 = allow_external_symlinks
-        let flags = (self.allow_escapes as u8) | ((self.allow_external_symlinks as u8) << 1);
+        // flags byte: bit 1 = allow_escapes, bit 0 = allow_external_symlinks
+        let flags = ((self.allow_escapes as u8) << 1)| self.allow_external_symlinks as u8;
         writer.write_u8(flags).await?;
         writer.write_all(&[0u8; 2]).await?; // reserved1 remaining
         write_u32_le(writer, self.alignment).await?;

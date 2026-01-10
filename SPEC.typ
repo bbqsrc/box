@@ -12,11 +12,6 @@
   numbering: "1",
 )
 
-#set text(
-  font: "New Computer Modern",
-  size: 11pt,
-)
-
 #set heading(numbering: "1.1")
 
 #show link: underline
@@ -253,7 +248,7 @@ The leading `0xFF` byte is invalid UTF-8, causing any attempt to parse the file 
 
 == Version <sec:version>
 
-The current format version is `0x02` (2). Implementations SHOULD reject archives with unknown major versions.
+The current format version is `0x01` (1). Implementations SHOULD reject archives with unknown major versions.
 
 == Flags <sec:flags>
 
@@ -264,7 +259,8 @@ The flags byte is a bitfield:
   align: (left, left, left),
   table.header([*Bit*], [*Name*], [*Description*]),
   [0], [`EXTERNAL_SYMLINKS`], [Archive contains external symlinks (see @sec:external-symlink)],
-  [1-7], [Reserved], [Must be 0],
+  [1], [`ALLOW_ESCAPES`], [Archive paths may contain `..` components],
+  [2-7], [Reserved], [Must be 0],
 )
 
 == Alignment <sec:alignment>
@@ -818,7 +814,7 @@ For applications requiring higher precision:
   [`accessed.nanoseconds`], [Vu64], [Sub-minute precision in nanoseconds (0-59,999,999,999)],
 )
 
-The `.seconds` attributes are deprecated in favor of `.nanoseconds`. New implementations SHOULD use `.nanoseconds` for sub-minute precision. The nanoseconds value represents the full sub-minute component (0 to 59,999,999,999), not just the sub-second portion.
+Seconds and nanoseconds attributes are OPTIONAL. If present, they provide additional precision beyond the minute-level timestamp. If `nanoseconds` is present, these take precedence over the `seconds` attribute.
 
 == Unix Permissions <sec:unix-permissions>
 
@@ -1010,9 +1006,9 @@ The Hot Section contains compact node headers optimized for cache efficiency. Ea
 
 The lookup data format depends on the `INDEXED` flag:
 
-- *If INDEXED (≥17 edges):* 256-byte lookup table where `table[byte]` returns the edge index for that byte value, or `0xFF` if no edge exists for that byte.
+- *If INDEXED (>16 edges):* 256-byte lookup table where `table[byte]` returns the edge index for that byte value, or `0xFF` if no edge exists for that byte.
 
-- *If not INDEXED (\<17 edges):* Array of `edge_count` bytes containing the first byte of each edge label, sorted in ascending order. Used for binary search or SIMD-accelerated lookups.
+- *If not INDEXED (<=16 edges):* Array of `edge_count` bytes containing the first byte of each edge label, sorted in ascending order. Used for binary search or SIMD-accelerated lookups.
 
 *Offsets Array:*
 
@@ -1090,10 +1086,10 @@ For the Path FST, the result is a `RecordIndex` value. For the Block FST, the re
 
 The FST uses an adaptive node format inspired by Adaptive Radix Trees (ART):
 
-- Nodes with fewer than 17 edges use compact format (sorted first-bytes array)
-- Nodes with 17 or more edges use indexed format (256-byte lookup table)
+- Nodes with more than 16 edges use indexed format (256-byte lookup table)
+- Nodes with 16 or fewer edges use compact format (sorted first-bytes array)
 
-The threshold of 17 balances memory usage against lookup performance.
+The threshold of >16 balances memory usage against lookup performance.
 
 *Hot/Cold Separation:*
 

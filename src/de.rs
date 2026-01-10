@@ -594,8 +594,8 @@ impl DeserializeOwned for BoxHeader {
 
         let version = reader.read_u8().await?;
         let flags = reader.read_u8().await?;
-        let allow_escapes = (flags & 0x01) != 0;
-        let allow_external_symlinks = (flags & 0x02) != 0;
+        let allow_external_symlinks = (flags & 0x01) != 0;
+        let allow_escapes = (flags & 0x02) != 0;
         reader.read_exact(&mut [0u8; 2]).await?; // skip reserved1 remaining
         let alignment = read_u32_le(reader).await?;
         reader.read_exact(&mut [0u8; 4]).await?; // skip reserved2
