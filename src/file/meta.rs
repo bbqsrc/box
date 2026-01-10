@@ -80,9 +80,20 @@ pub struct BoxMetadata<'a> {
     /// The global attributes that apply to this entire box file.
     pub(crate) attrs: AttrMap,
 
+    /// Zstd dictionary for compression/decompression.
+    /// When present, all Zstd-compressed content (files and chunked blocks) uses this dictionary.
+    /// None means no dictionary training was performed.
+    pub(crate) dictionary: Option<Box<[u8]>>,
+
     /// Parsed FST for O(key_length) path lookups and iteration.
     /// None for old archives without FST support.
     pub(crate) fst: Option<box_fst::Fst<Cow<'a, [u8]>>>,
+
+    /// Block FST for seeking within chunked files.
+    /// Keys are 16 bytes: record_index (u64 BE) + logical_offset (u64 BE).
+    /// Values are physical offsets within the compressed data.
+    /// None for archives without chunked files or block index.
+    pub(crate) block_fst: Option<box_fst::Fst<Cow<'a, [u8]>>>,
 }
 
 impl std::fmt::Debug for BoxMetadata<'_> {
@@ -92,7 +103,9 @@ impl std::fmt::Debug for BoxMetadata<'_> {
             .field("records", &self.records)
             .field("attr_keys_count", &self.attr_keys.len())
             .field("attrs", &self.attrs)
+            .field("dictionary", &self.dictionary.as_ref().map(|d| d.len()))
             .field("fst", &self.fst.as_ref().map(|f| f.len()))
+            .field("block_fst", &self.block_fst.as_ref().map(|f| f.len()))
             .finish()
     }
 }
@@ -560,6 +573,12 @@ impl<'a> BoxMetadata<'a> {
         &self.attrs
     }
 
+    /// Get the Zstd dictionary if present.
+    /// When present, all Zstd-compressed content should use this dictionary for decompression.
+    pub fn dictionary(&self) -> Option<&[u8]> {
+        self.dictionary.as_deref()
+    }
+
     /// Find the path for a given record index.
     ///
     /// This is O(n) for tree traversal, O(n) for FST iteration.
@@ -594,6 +613,91 @@ impl<'a> BoxMetadata<'a> {
     /// Resolve an attribute key index to its type.
     pub fn attr_key_type(&self, idx: usize) -> Option<AttrType> {
         self.attr_keys.get(idx).map(|k| k.attr_type)
+    }
+
+    /// Find the block containing a logical offset within a chunked file.
+    ///
+    /// Returns the physical offset of the block that contains the given logical offset,
+    /// along with the block's logical start offset.
+    ///
+    /// This uses a predecessor query on the block FST to find the largest key
+    /// <= (record_index, logical_offset).
+    pub fn find_block(&self, record_index: RecordIndex, logical_offset: u64) -> Option<(u64, u64)> {
+        let block_fst = self.block_fst.as_ref()?;
+
+        // Build the query key: record_index (BE) ++ logical_offset (BE)
+        let mut key = [0u8; 16];
+        key[..8].copy_from_slice(&record_index.get().to_be_bytes());
+        key[8..].copy_from_slice(&logical_offset.to_be_bytes());
+
+        // Find the predecessor (largest key <= query key)
+        // FST iteration gives us keys in sorted order, so we find the last key <= our query
+        let mut result: Option<(u64, u64)> = None;
+        for (k, physical_offset) in block_fst.prefix_iter(&key[..8]) {
+            // Only consider entries for this record
+            if k.len() != 16 {
+                continue;
+            }
+            let block_logical_offset = u64::from_be_bytes(k[8..16].try_into().ok()?);
+            if block_logical_offset <= logical_offset {
+                result = Some((physical_offset, block_logical_offset));
+            } else {
+                // Keys are sorted, so we can stop once we pass our target
+                break;
+            }
+        }
+        result
+    }
+
+    /// Iterate all blocks for a chunked file record.
+    ///
+    /// Returns (logical_offset, physical_offset) pairs in order.
+    /// Returns an empty Vec if no block FST exists.
+    pub fn blocks_for_record(&self, record_index: RecordIndex) -> Vec<(u64, u64)> {
+        let Some(block_fst) = &self.block_fst else {
+            return Vec::new();
+        };
+
+        // Build the prefix key: just the record_index (first 8 bytes)
+        let mut prefix = [0u8; 8];
+        prefix.copy_from_slice(&record_index.get().to_be_bytes());
+
+        let mut blocks = Vec::new();
+        for (key, physical_offset) in block_fst.prefix_iter(&prefix) {
+            if key.len() == 16 {
+                let logical_offset = u64::from_be_bytes(key[8..16].try_into().unwrap());
+                blocks.push((logical_offset, physical_offset));
+            }
+        }
+        blocks
+    }
+
+    /// Find the next block after a given logical offset.
+    ///
+    /// Returns the (logical_offset, physical_offset) of the next block, or None if
+    /// there are no more blocks after the given offset.
+    pub fn next_block(
+        &self,
+        record_index: RecordIndex,
+        current_logical_offset: u64,
+    ) -> Option<(u64, u64)> {
+        let block_fst = self.block_fst.as_ref()?;
+
+        // Build the prefix key: just the record_index (first 8 bytes)
+        let mut prefix = [0u8; 8];
+        prefix.copy_from_slice(&record_index.get().to_be_bytes());
+
+        // Find the first block with logical_offset > current_logical_offset
+        for (key, physical_offset) in block_fst.prefix_iter(&prefix) {
+            if key.len() != 16 {
+                continue;
+            }
+            let block_logical_offset = u64::from_be_bytes(key[8..16].try_into().ok()?);
+            if block_logical_offset > current_logical_offset {
+                return Some((block_logical_offset, physical_offset));
+            }
+        }
+        None
     }
 }
 

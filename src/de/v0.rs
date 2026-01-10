@@ -94,13 +94,15 @@ pub(crate) fn deserialize_metadata_borrowed<'a>(
     let attr_keys = deserialize_attr_keys_borrowed(data, pos)?;
     let attrs = AttrMap::deserialize_borrowed(data, pos)?;
 
-    // v0: no FST (root and entries are serialized explicitly)
+    // v0: no FST, no dictionary, no block FST (root and entries are serialized explicitly)
     Ok(BoxMetadata {
         root,
         records,
         attr_keys,
         attrs,
+        dictionary: None,
         fst: None,
+        block_fst: None,
     })
 }
 
@@ -214,12 +216,14 @@ pub(crate) async fn deserialize_metadata_owned<R: AsyncRead + AsyncSeek + Unpin 
         "deserialized BoxMetadata (v0)"
     );
 
-    // v0: no FST (root and entries are serialized explicitly)
+    // v0: no FST, no dictionary, no block FST (root and entries are serialized explicitly)
     Ok(BoxMetadata {
         root,
         records,
         attr_keys,
         attrs,
+        dictionary: None,
         fst: None,
+        block_fst: None,
     })
 }

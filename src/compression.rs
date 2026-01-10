@@ -6,34 +6,35 @@ use tokio::io::{AsyncBufRead, AsyncWrite, AsyncWriteExt};
 
 use crate::counting::CountingWriter;
 
-#[cfg(feature = "brotli")]
-use async_compression::tokio::{bufread::BrotliDecoder, write::BrotliEncoder};
-#[cfg(feature = "deflate")]
-use async_compression::tokio::{bufread::DeflateDecoder, write::DeflateEncoder};
 #[cfg(feature = "xz")]
 use async_compression::tokio::{bufread::XzDecoder, write::XzEncoder};
 #[cfg(feature = "zstd")]
 use async_compression::tokio::{bufread::ZstdDecoder, write::ZstdEncoder};
 
-#[cfg(any(
-    feature = "zstd",
-    feature = "brotli",
-    feature = "deflate",
-    feature = "xz"
-))]
+#[cfg(any(feature = "zstd", feature = "xz"))]
 use async_compression::Level;
 
 pub mod constants {
+    // Compression IDs (stored in high nibble of type/compression byte)
     pub const COMPRESSION_STORED: u8 = 0x00;
-    pub const COMPRESSION_DEFLATE: u8 = 0x10;
-    pub const COMPRESSION_ZSTD: u8 = 0x20;
-    pub const COMPRESSION_XZ: u8 = 0x30;
-    pub const COMPRESSION_SNAPPY: u8 = 0x40;
-    pub const COMPRESSION_BROTLI: u8 = 0x50;
+    pub const COMPRESSION_ZSTD: u8 = 0x10;
+    pub const COMPRESSION_XZ: u8 = 0x20;
+
+    // Record type IDs (stored in low nibble of type/compression byte)
+    pub const RECORD_TYPE_DIRECTORY: u8 = 0x01;
+    pub const RECORD_TYPE_FILE: u8 = 0x02;
+    pub const RECORD_TYPE_SYMLINK: u8 = 0x03;
+    pub const RECORD_TYPE_CHUNKED_FILE: u8 = 0x0A;
+    pub const RECORD_TYPE_EXTERNAL_SYMLINK: u8 = 0x0B;
 
     /// Minimum file size for compression to be worthwhile.
     /// Files smaller than this will be stored uncompressed.
     pub const MIN_COMPRESSIBLE_SIZE: u64 = 96;
+
+    /// Default block size for chunked files: 2MB (2,097,152 bytes).
+    /// Aligns with common hugepage sizes and provides good balance
+    /// between compression ratio and random access granularity.
+    pub const DEFAULT_BLOCK_SIZE: u32 = 2_097_152;
 }
 
 use self::constants::*;
@@ -51,17 +52,14 @@ pub struct ByteCount {
 pub enum Compression {
     #[default]
     Stored,
-    Deflate,
     Zstd,
     Xz,
-    Snappy,
-    Brotli,
     Unknown(u8),
 }
 
 impl Compression {
     pub const fn available_variants() -> &'static [&'static str] {
-        &["stored", "brotli", "deflate", "snappy", "xz", "zstd"]
+        &["stored", "xz", "zstd"]
     }
 
     /// Returns the effective compression for a given file size.
@@ -80,6 +78,8 @@ impl Compression {
 pub struct CompressionConfig {
     pub compression: Compression,
     pub options: HashMap<String, String>,
+    /// Zstd dictionary for compression. When set, Zstd compression will use this dictionary.
+    pub dictionary: Option<Vec<u8>>,
 }
 
 impl CompressionConfig {
@@ -87,7 +87,22 @@ impl CompressionConfig {
         Self {
             compression,
             options: HashMap::new(),
+            dictionary: None,
         }
+    }
+
+    /// Create a config with a Zstd dictionary.
+    pub fn with_dictionary(compression: Compression, dictionary: Vec<u8>) -> Self {
+        Self {
+            compression,
+            options: HashMap::new(),
+            dictionary: Some(dictionary),
+        }
+    }
+
+    /// Set the dictionary (consumes and stores a copy).
+    pub fn set_dictionary(&mut self, dictionary: Vec<u8>) {
+        self.dictionary = Some(dictionary);
     }
 
     pub fn set_option(&mut self, key: impl Into<String>, value: impl Into<String>) {
@@ -138,16 +153,10 @@ impl CompressionConfig {
 
         match self.compression {
             Stored => compress_stored(writer, reader).await,
-            #[cfg(feature = "deflate")]
-            Deflate => compress_deflate(writer, reader, self.get_i32("level")).await,
             #[cfg(feature = "zstd")]
             Zstd => compress_zstd(writer, reader, self).await,
             #[cfg(feature = "xz")]
             Xz => compress_xz(writer, reader, self.get_i32("level")).await,
-            #[cfg(feature = "snappy")]
-            Snappy => compress_snappy(writer, reader).await,
-            #[cfg(feature = "brotli")]
-            Brotli => compress_brotli(writer, reader, self).await,
             Unknown(id) => Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
                 format!("Cannot handle compression with id {}", id),
@@ -167,11 +176,8 @@ impl fmt::Display for Compression {
 
         let s = match self {
             Stored => "stored",
-            Deflate => "DEFLATE",
             Zstd => "Zstd",
             Xz => "xz",
-            Snappy => "Snappy",
-            Brotli => "Brotli",
             Unknown(id) => return write!(f, "?{:x}?", id),
         };
 
@@ -191,11 +197,8 @@ impl Compression {
 
         match self {
             Stored => COMPRESSION_STORED,
-            Deflate => COMPRESSION_DEFLATE,
             Zstd => COMPRESSION_ZSTD,
             Xz => COMPRESSION_XZ,
-            Snappy => COMPRESSION_SNAPPY,
-            Brotli => COMPRESSION_BROTLI,
             Unknown(id) => id,
         }
     }
@@ -224,20 +227,28 @@ impl Compression {
         R: AsyncBufRead + Unpin,
         W: AsyncWrite + Unpin,
     {
+        self.decompress_write_with_dict(reader, writer, None).await
+    }
+
+    /// Decompress with optional dictionary support.
+    pub async fn decompress_write_with_dict<R, W>(
+        self,
+        reader: R,
+        writer: W,
+        dictionary: Option<&[u8]>,
+    ) -> Result<()>
+    where
+        R: AsyncBufRead + Unpin,
+        W: AsyncWrite + Unpin,
+    {
         use Compression::*;
 
         match self {
             Stored => decompress_stored(reader, writer).await,
-            #[cfg(feature = "deflate")]
-            Deflate => decompress_deflate(reader, writer).await,
             #[cfg(feature = "zstd")]
-            Zstd => decompress_zstd(reader, writer).await,
+            Zstd => decompress_zstd(reader, writer, dictionary).await,
             #[cfg(feature = "xz")]
             Xz => decompress_xz(reader, writer).await,
-            #[cfg(feature = "snappy")]
-            Snappy => decompress_snappy(reader, writer).await,
-            #[cfg(feature = "brotli")]
-            Brotli => decompress_brotli(reader, writer).await,
             Unknown(id) => Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
                 format!("Cannot handle decompression with id {}", id),
@@ -272,39 +283,6 @@ where
     W: AsyncWrite + Unpin,
 {
     tokio::io::copy_buf(&mut reader, &mut writer).await?;
-    writer.flush().await?;
-    Ok(())
-}
-
-// Deflate
-#[cfg(feature = "deflate")]
-async fn compress_deflate<W, R>(writer: W, reader: &mut R, level: Option<i32>) -> Result<ByteCount>
-where
-    W: AsyncWrite + Unpin,
-    R: AsyncBufRead + Unpin,
-{
-    let counting = CountingWriter::new(writer);
-    let mut encoder = match level {
-        Some(l) => DeflateEncoder::with_quality(counting, Level::Precise(l)),
-        None => DeflateEncoder::new(counting),
-    };
-    let read = tokio::io::copy_buf(reader, &mut encoder).await?;
-    encoder.shutdown().await?;
-    let counting = encoder.into_inner();
-    Ok(ByteCount {
-        read,
-        write: counting.bytes_written(),
-    })
-}
-
-#[cfg(feature = "deflate")]
-async fn decompress_deflate<R, W>(reader: R, mut writer: W) -> Result<()>
-where
-    R: AsyncBufRead + Unpin,
-    W: AsyncWrite + Unpin,
-{
-    let mut decoder = DeflateDecoder::new(reader);
-    tokio::io::copy(&mut decoder, &mut writer).await?;
     writer.flush().await?;
     Ok(())
 }
@@ -352,10 +330,11 @@ where
         params.push(CParameter::checksum_flag(v));
     }
 
-    let mut encoder = if params.is_empty() {
-        ZstdEncoder::with_quality(counting, level)
-    } else {
-        ZstdEncoder::with_quality_and_params(counting, level, &params)
+    // Note: async_compression doesn't support dict + params together, so dict takes precedence
+    let mut encoder = match &config.dictionary {
+        Some(dict) => ZstdEncoder::with_dict(counting, level, dict)?,
+        None if params.is_empty() => ZstdEncoder::with_quality(counting, level),
+        None => ZstdEncoder::with_quality_and_params(counting, level, &params),
     };
 
     let read = tokio::io::copy_buf(reader, &mut encoder).await?;
@@ -368,12 +347,15 @@ where
 }
 
 #[cfg(feature = "zstd")]
-async fn decompress_zstd<R, W>(reader: R, mut writer: W) -> Result<()>
+async fn decompress_zstd<R, W>(reader: R, mut writer: W, dictionary: Option<&[u8]>) -> Result<()>
 where
     R: AsyncBufRead + Unpin,
     W: AsyncWrite + Unpin,
 {
-    let mut decoder = ZstdDecoder::new(reader);
+    let mut decoder = match dictionary {
+        Some(dict) => ZstdDecoder::with_dict(reader, dict)?,
+        None => ZstdDecoder::new(reader),
+    };
     tokio::io::copy(&mut decoder, &mut writer).await?;
     writer.flush().await?;
     Ok(())
@@ -408,102 +390,6 @@ where
 {
     let mut decoder = XzDecoder::new(reader);
     tokio::io::copy(&mut decoder, &mut writer).await?;
-    writer.flush().await?;
-    Ok(())
-}
-
-// Brotli
-#[cfg(feature = "brotli")]
-async fn compress_brotli<W, R>(
-    writer: W,
-    reader: &mut R,
-    config: &CompressionConfig,
-) -> Result<ByteCount>
-where
-    W: AsyncWrite + Unpin,
-    R: AsyncBufRead + Unpin,
-{
-    use async_compression::brotli::EncoderParams;
-
-    let counting = CountingWriter::new(writer);
-
-    // Build params from config options
-    let mut params = EncoderParams::default();
-    if let Some(v) = config.get_i32("level") {
-        params = params.quality(Level::Precise(v));
-    }
-    if let Some(v) = config.get_i32("window_size") {
-        params = params.window_size(v);
-    }
-    if let Some(v) = config.get_i32("block_size") {
-        params = params.block_size(v);
-    }
-    if config.get_bool("text_mode") == Some(true) {
-        params = params.text_mode();
-    }
-
-    let has_params = config.get_i32("level").is_some()
-        || config.get_i32("window_size").is_some()
-        || config.get_i32("block_size").is_some()
-        || config.get_bool("text_mode").is_some();
-
-    let mut encoder = if has_params {
-        BrotliEncoder::with_params(counting, params)
-    } else {
-        BrotliEncoder::new(counting)
-    };
-
-    let read = tokio::io::copy_buf(reader, &mut encoder).await?;
-    encoder.shutdown().await?;
-    let counting = encoder.into_inner();
-    Ok(ByteCount {
-        read,
-        write: counting.bytes_written(),
-    })
-}
-
-#[cfg(feature = "brotli")]
-async fn decompress_brotli<R, W>(reader: R, mut writer: W) -> Result<()>
-where
-    R: AsyncBufRead + Unpin,
-    W: AsyncWrite + Unpin,
-{
-    let mut decoder = BrotliDecoder::new(reader);
-    tokio::io::copy(&mut decoder, &mut writer).await?;
-    writer.flush().await?;
-    Ok(())
-}
-
-// Snappy
-#[cfg(feature = "snappy")]
-async fn compress_snappy<W, R>(writer: W, reader: &mut R) -> Result<ByteCount>
-where
-    W: AsyncWrite + Unpin,
-    R: AsyncBufRead + Unpin,
-{
-    use tokio_snappy::SnappyIO;
-
-    let counting = CountingWriter::new(writer);
-    let mut snappy_writer = SnappyIO::new(counting);
-    let read = tokio::io::copy_buf(reader, &mut snappy_writer).await?;
-    snappy_writer.shutdown().await?;
-    let counting = snappy_writer.into_inner();
-    Ok(ByteCount {
-        read,
-        write: counting.bytes_written(),
-    })
-}
-
-#[cfg(feature = "snappy")]
-async fn decompress_snappy<R, W>(reader: R, mut writer: W) -> Result<()>
-where
-    R: AsyncBufRead + Unpin,
-    W: AsyncWrite + Unpin,
-{
-    use tokio_snappy::SnappyIO;
-
-    let mut snappy_reader = SnappyIO::new(reader);
-    tokio::io::copy(&mut snappy_reader, &mut writer).await?;
     writer.flush().await?;
     Ok(())
 }

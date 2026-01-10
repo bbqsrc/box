@@ -1,9 +1,15 @@
 use std::io::SeekFrom;
 use std::num::NonZeroU64;
-use std::ops::AddAssign;
+use std::ops::{AddAssign, Deref};
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::sync::Arc;
+use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
+
+use futures::future::BoxFuture;
+use lru::LruCache;
+use pin_project_lite::pin_project;
 
 use mmap_io::MemoryMappedFile;
 use mmap_io::segment::Segment;
@@ -17,7 +23,7 @@ use crate::{
     de::{DeserializeOwned, deserialize_metadata_borrowed},
     header::BoxHeader,
     path::BoxPath,
-    record::{FileRecord, LinkRecord, Record},
+    record::{ChunkedFileRecord, FileRecord, LinkRecord, Record},
 };
 
 pub struct BoxFileReader {
@@ -392,6 +398,67 @@ impl BoxFileReader {
         record.compression.decompress_write(buf_reader, dest).await
     }
 
+    /// Decompress a chunked file by decompressing each block separately.
+    ///
+    /// Each block is independently compressed, so we must decompress them
+    /// one at a time and concatenate the output.
+    pub async fn decompress_chunked<W: tokio::io::AsyncWrite + Unpin>(
+        &self,
+        record: &ChunkedFileRecord<'_>,
+        record_index: super::RecordIndex,
+        mut dest: W,
+    ) -> std::io::Result<()> {
+        use tokio::io::AsyncWriteExt;
+
+        // Get all block entries for this record
+        let blocks = self.meta.blocks_for_record(record_index);
+
+        if blocks.is_empty() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "chunked file has no block FST entries",
+            ));
+        }
+
+        // Memory-map the entire chunked file data region
+        let segment = self.memory_map_chunked(record)?;
+        let all_data = segment.as_slice().map_err(std::io::Error::other)?;
+
+        // Decompress each block
+        for i in 0..blocks.len() {
+            let (_logical_offset, physical_offset) = blocks[i];
+
+            // Determine block's compressed size from next block's offset (or end of data)
+            let compressed_end = if i + 1 < blocks.len() {
+                blocks[i + 1].1 // Next block's physical offset
+            } else {
+                record.data.get() + record.length // End of all compressed data
+            };
+            let compressed_size = (compressed_end - physical_offset) as usize;
+
+            // Get slice of compressed block data (relative to start of chunked file data)
+            let block_offset = (physical_offset - record.data.get()) as usize;
+            let block_data = &all_data[block_offset..block_offset + compressed_size];
+
+            // Decompress this block using the async API
+            let cursor = std::io::Cursor::new(block_data);
+            let buf_reader = tokio::io::BufReader::new(cursor);
+
+            // Create a buffer to hold decompressed data
+            let mut block_output = Vec::new();
+            record
+                .compression
+                .decompress_write(buf_reader, &mut block_output)
+                .await?;
+
+            // Write decompressed block to destination
+            dest.write_all(&block_output).await?;
+        }
+
+        dest.flush().await?;
+        Ok(())
+    }
+
     pub fn find(&self, path: &BoxPath<'_>) -> Result<&Record<'static>, ExtractError> {
         let record = self
             .meta
@@ -413,12 +480,16 @@ impl BoxFileReader {
             return Err(ExtractError::ExternalSymlinksRequired);
         }
         let output_path = output_path.as_ref();
-        let record = self
+        let record_index = self
             .meta
             .index(path)
-            .and_then(|x| self.meta.record(x))
             .ok_or_else(|| ExtractError::NotFoundInArchive(path.to_path_buf()))?;
-        self.extract_inner(path, record, output_path).await
+        let record = self
+            .meta
+            .record(record_index)
+            .ok_or_else(|| ExtractError::NotFoundInArchive(path.to_path_buf()))?;
+        self.extract_inner(path, record, record_index, output_path)
+            .await
     }
 
     pub async fn extract_recursive<P: AsRef<Path>>(
@@ -456,6 +527,7 @@ impl BoxFileReader {
             self.extract_inner_with_options(
                 &item.path,
                 item.record,
+                item.index,
                 output_path,
                 &options,
                 &mut stats,
@@ -492,6 +564,7 @@ impl BoxFileReader {
             self.extract_inner_with_options(
                 &item.path,
                 item.record,
+                item.index,
                 output_path,
                 &options,
                 &mut stats,
@@ -538,6 +611,7 @@ impl BoxFileReader {
         let collect_start = Instant::now();
         let mut directories = Vec::new();
         let mut files = Vec::new();
+        let mut chunked_files = Vec::new();
         let mut symlinks = Vec::new();
 
         for item in self.meta.iter() {
@@ -567,13 +641,46 @@ impl BoxFileReader {
 
                     files.push((item.path.clone(), f.clone(), expected_hash, mode, xattrs));
                 }
+                Record::ChunkedFile(f) => {
+                    let expected_hash: Option<[u8; 32]> =
+                        match item.record.attr_value(self.metadata(), "blake3") {
+                            Some(AttrValue::U256(h)) => Some(*h),
+                            _ => None,
+                        };
+                    #[cfg(unix)]
+                    let mode = self.get_mode(item.record);
+                    #[cfg(not(unix))]
+                    let mode = 0u32;
+
+                    let xattrs: Vec<(String, Vec<u8>)> = if options.xattrs {
+                        item.record
+                            .attrs_iter(self.metadata())
+                            .filter(|(k, _)| k.starts_with("linux.xattr."))
+                            .map(|(k, v)| (k.to_string(), v.to_vec()))
+                            .collect()
+                    } else {
+                        Vec::new()
+                    };
+
+                    // Get block entries for this chunked file
+                    let blocks = self.meta.blocks_for_record(item.index);
+
+                    chunked_files.push((
+                        item.path.clone(),
+                        f.clone(),
+                        expected_hash,
+                        mode,
+                        xattrs,
+                        blocks,
+                    ));
+                }
                 Record::Link(_) | Record::ExternalLink(_) => {
                     symlinks.push((item.path.clone(), item.record.clone()))
                 }
             }
         }
 
-        let total_files = files.len() as u64;
+        let total_files = (files.len() + chunked_files.len()) as u64;
         let total_dirs = directories.len() as u64;
         let total_links = symlinks.len() as u64;
         timing.collect = collect_start.elapsed();
@@ -647,9 +754,10 @@ impl BoxFileReader {
         let mut extract_set = tokio::task::JoinSet::new();
         let mut validate_set = tokio::task::JoinSet::new();
         let mut files_iter = files.into_iter();
+        let mut chunked_files_iter = chunked_files.into_iter();
         let mut files_extracted = 0u64;
 
-        // Helper to spawn an extraction task
+        // Helper to spawn an extraction task for regular files
         let spawn_extract =
             |extract_set: &mut tokio::task::JoinSet<_>,
              box_path: BoxPath<'static>,
@@ -682,20 +790,94 @@ impl BoxFileReader {
                 });
             };
 
-        // Seed initial extraction tasks up to concurrency limit
-        for _ in 0..concurrency {
+        // Helper to spawn an extraction task for chunked files
+        let spawn_extract_chunked =
+            |extract_set: &mut tokio::task::JoinSet<_>,
+             box_path: BoxPath<'static>,
+             record: ChunkedFileRecord<'static>,
+             expected_hash: Option<[u8; 32]>,
+             mode: u32,
+             xattrs: Vec<(String, Vec<u8>)>,
+             blocks: Vec<(u64, u64)>,
+             mmap: Arc<MemoryMappedFile>,
+             out_base: PathBuf,
+             progress: Option<tokio::sync::mpsc::UnboundedSender<ExtractProgress>>| {
+                extract_set.spawn(async move {
+                    if let Some(ref p) = progress {
+                        let _ = p.send(ExtractProgress::Extracting {
+                            path: box_path.clone(),
+                        });
+                    }
+
+                    let result = extract_single_chunked_file_from_mmap(
+                        mmap,
+                        archive_offset,
+                        &out_base,
+                        &box_path,
+                        &record,
+                        blocks,
+                        mode,
+                        xattrs,
+                    )
+                    .await;
+
+                    result.map(|r| (box_path, r, expected_hash))
+                });
+            };
+
+        // Helper to spawn next extraction task (regular or chunked)
+        let spawn_next = |extract_set: &mut tokio::task::JoinSet<_>,
+                          files_iter: &mut std::vec::IntoIter<_>,
+                          chunked_files_iter: &mut std::vec::IntoIter<_>,
+                          mmap: Arc<MemoryMappedFile>,
+                          out_base: PathBuf,
+                          progress: Option<tokio::sync::mpsc::UnboundedSender<ExtractProgress>>|
+         -> bool {
             if let Some((box_path, record, expected_hash, mode, xattrs)) = files_iter.next() {
                 spawn_extract(
-                    &mut extract_set,
+                    extract_set,
                     box_path,
                     record,
                     expected_hash,
                     mode,
                     xattrs,
-                    mmap.clone(),
-                    output_path.to_path_buf(),
-                    progress.clone(),
+                    mmap,
+                    out_base,
+                    progress,
                 );
+                true
+            } else if let Some((box_path, record, expected_hash, mode, xattrs, blocks)) =
+                chunked_files_iter.next()
+            {
+                spawn_extract_chunked(
+                    extract_set,
+                    box_path,
+                    record,
+                    expected_hash,
+                    mode,
+                    xattrs,
+                    blocks,
+                    mmap,
+                    out_base,
+                    progress,
+                );
+                true
+            } else {
+                false
+            }
+        };
+
+        // Seed initial extraction tasks up to concurrency limit
+        for _ in 0..concurrency {
+            if !spawn_next(
+                &mut extract_set,
+                &mut files_iter,
+                &mut chunked_files_iter,
+                mmap.clone(),
+                output_path.to_path_buf(),
+                progress.clone(),
+            ) {
+                break;
             }
         }
 
@@ -739,19 +921,14 @@ impl BoxFileReader {
                     }
 
                     // Spawn next extraction task if more files remain
-                    if let Some((box_path, record, expected_hash, mode, xattrs)) = files_iter.next() {
-                        spawn_extract(
-                            &mut extract_set,
-                            box_path,
-                            record,
-                            expected_hash,
-                            mode,
-                            xattrs,
-                            mmap.clone(),
-                            output_path.to_path_buf(),
-                            progress.clone(),
-                        );
-                    }
+                    spawn_next(
+                        &mut extract_set,
+                        &mut files_iter,
+                        &mut chunked_files_iter,
+                        mmap.clone(),
+                        output_path.to_path_buf(),
+                        progress.clone(),
+                    );
                 }
 
                 // Handle validation completion
@@ -1082,10 +1259,153 @@ impl BoxFileReader {
         Segment::new(mmap.into(), offset, record.length).map_err(std::io::Error::other)
     }
 
+    /// Memory-map the file and return a segment for a chunked file record's data.
+    pub fn memory_map_chunked(&self, record: &ChunkedFileRecord<'_>) -> std::io::Result<Segment> {
+        let mmap = MemoryMappedFile::builder(&self.path)
+            .huge_pages(true)
+            .open()
+            .map_err(std::io::Error::other)?;
+        let offset = self.offset + record.data.get();
+        Segment::new(mmap.into(), offset, record.length).map_err(std::io::Error::other)
+    }
+
+    /// Read a byte range from a chunked file.
+    ///
+    /// Returns decompressed bytes from `[offset..offset+len)`.
+    /// This is the core random access method for chunked files.
+    ///
+    /// # Arguments
+    /// * `record` - The chunked file record
+    /// * `record_index` - The record's index in the archive
+    /// * `offset` - Starting byte offset within the decompressed file
+    /// * `len` - Number of bytes to read
+    ///
+    /// # Errors
+    /// Returns an error if the range exceeds the file size or if decompression fails.
+    pub async fn read_chunked_range(
+        &self,
+        record: &ChunkedFileRecord<'_>,
+        record_index: super::RecordIndex,
+        offset: u64,
+        len: usize,
+    ) -> std::io::Result<Vec<u8>> {
+        // Validate range
+        if offset + len as u64 > record.decompressed_length {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!(
+                    "read range [{}, {}) exceeds file size {}",
+                    offset,
+                    offset + len as u64,
+                    record.decompressed_length
+                ),
+            ));
+        }
+
+        if len == 0 {
+            return Ok(Vec::new());
+        }
+
+        // Find the starting block
+        let Some((block_physical_offset, block_logical_offset)) =
+            self.meta.find_block(record_index, offset)
+        else {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "chunked file has no block FST entries",
+            ));
+        };
+
+        // Memory-map the archive
+        let segment = self.memory_map_chunked(record)?;
+        let all_data = segment.as_slice().map_err(std::io::Error::other)?;
+
+        let mut result = Vec::with_capacity(len);
+        let mut remaining = len;
+        let mut current_offset = offset;
+        let mut current_block_logical = block_logical_offset;
+        let mut current_block_physical = block_physical_offset;
+
+        while remaining > 0 {
+            // Calculate compressed block size from next block's offset or end of data
+            let compressed_end = if let Some((_, next_physical)) =
+                self.meta.next_block(record_index, current_block_logical)
+            {
+                next_physical
+            } else {
+                record.data.get() + record.length
+            };
+            let compressed_size = (compressed_end - current_block_physical) as usize;
+
+            // Get slice of compressed block data
+            let block_data_offset = (current_block_physical - record.data.get()) as usize;
+            let block_data = &all_data[block_data_offset..block_data_offset + compressed_size];
+
+            // Decompress the block
+            let cursor = std::io::Cursor::new(block_data);
+            let buf_reader = tokio::io::BufReader::new(cursor);
+            let mut decompressed = Vec::new();
+            record
+                .compression
+                .decompress_write(buf_reader, &mut decompressed)
+                .await?;
+
+            // Calculate slice within this block
+            let start_in_block = (current_offset - current_block_logical) as usize;
+            let available = decompressed.len() - start_in_block;
+            let to_copy = remaining.min(available);
+
+            result.extend_from_slice(&decompressed[start_in_block..start_in_block + to_copy]);
+            remaining -= to_copy;
+            current_offset += to_copy as u64;
+
+            // Move to next block if needed
+            if remaining > 0 {
+                if let Some((next_logical, next_physical)) =
+                    self.meta.next_block(record_index, current_block_logical)
+                {
+                    current_block_logical = next_logical;
+                    current_block_physical = next_physical;
+                } else {
+                    // No more blocks but still have bytes to read - shouldn't happen
+                    // if the range validation was correct
+                    break;
+                }
+            }
+        }
+
+        Ok(result)
+    }
+
+    /// Create a chunked file reader with seek support.
+    ///
+    /// Returns a reader that implements `AsyncRead` and `AsyncSeek` for
+    /// random access to a chunked file's contents.
+    pub fn chunked_reader<'a>(
+        &'a self,
+        record: &'a ChunkedFileRecord<'a>,
+        record_index: super::RecordIndex,
+    ) -> std::io::Result<ChunkedReader<'a>> {
+        ChunkedReader::new(self, record, record_index)
+    }
+
+    /// Load a chunked file's entire contents into memory for slice access.
+    ///
+    /// This decompresses the entire file and returns a wrapper that implements
+    /// `Deref<Target = [u8]>` for transparent slice access.
+    pub async fn chunked_slice(
+        &self,
+        record: &ChunkedFileRecord<'_>,
+        record_index: super::RecordIndex,
+    ) -> std::io::Result<ChunkedSlice> {
+        ChunkedSlice::new(self, record, record_index).await
+    }
+
     async fn extract_inner(
         &self,
         path: &BoxPath<'_>,
         record: &Record<'_>,
+        record_index: super::RecordIndex,
         output_path: &Path,
     ) -> Result<(), ExtractError> {
         match record {
@@ -1226,6 +1546,31 @@ impl BoxFileReader {
                     .await
                     .map_err(|e| ExtractError::CreateLinkFailed(e, link_path, target))
             }
+            Record::ChunkedFile(file) => {
+                fs::create_dir_all(output_path)
+                    .await
+                    .map_err(|e| ExtractError::CreateDirFailed(e, output_path.to_path_buf()))?;
+                let out_path = output_path.join(path.to_path_buf());
+
+                let out_file = fs::File::create(&out_path)
+                    .await
+                    .map_err(|e| ExtractError::CreateFileFailed(e, out_path.to_path_buf()))?;
+
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    let mode = self.get_mode(record);
+                    let permissions = std::fs::Permissions::from_mode(mode);
+                    fs::set_permissions(&out_path, permissions).await.ok();
+                }
+
+                let out_file = tokio::io::BufWriter::new(out_file);
+                self.decompress_chunked(file, record_index, out_file)
+                    .await
+                    .map_err(|e| ExtractError::DecompressionFailed(e, path.to_path_buf()))?;
+
+                Ok(())
+            }
         }
     }
 
@@ -1233,6 +1578,7 @@ impl BoxFileReader {
         &self,
         path: &BoxPath<'_>,
         record: &Record<'_>,
+        record_index: super::RecordIndex,
         output_path: &Path,
         options: &ExtractOptions,
         stats: &mut ExtractStats,
@@ -1417,9 +1763,590 @@ impl BoxFileReader {
                 stats.links_created += 1;
                 Ok(())
             }
+            Record::ChunkedFile(file) => {
+                fs::create_dir_all(output_path)
+                    .await
+                    .map_err(|e| ExtractError::CreateDirFailed(e, output_path.to_path_buf()))?;
+                let out_path = output_path.join(path.to_path_buf());
+
+                let out_file = fs::File::create(&out_path)
+                    .await
+                    .map_err(|e| ExtractError::CreateFileFailed(e, out_path.to_path_buf()))?;
+
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    let mode = self.get_mode(record);
+                    let permissions = std::fs::Permissions::from_mode(mode);
+                    fs::set_permissions(&out_path, permissions).await.ok();
+                }
+
+                let out_file = tokio::io::BufWriter::new(out_file);
+                self.decompress_chunked(file, record_index, out_file)
+                    .await
+                    .map_err(|e| ExtractError::DecompressionFailed(e, path.to_path_buf()))?;
+
+                stats.files_extracted += 1;
+                stats.bytes_written += file.decompressed_length;
+
+                // Verify checksum if requested
+                if options.verify_checksums {
+                    if let Some(AttrValue::U256(expected_hash)) =
+                        record.attr_value(self.metadata(), "blake3")
+                    {
+                        let actual_hash = compute_file_blake3(&out_path).await.map_err(|e| {
+                            ExtractError::VerificationFailed(e, out_path.to_path_buf())
+                        })?;
+
+                        if actual_hash.as_bytes() != &*expected_hash {
+                            tracing::warn!(
+                                "Checksum mismatch for {}: expected {}, got {}",
+                                path,
+                                hex::encode(&*expected_hash),
+                                hex::encode(actual_hash.as_bytes())
+                            );
+                            stats.checksum_failures += 1;
+                        }
+                    }
+                }
+
+                // Restore extended attributes if requested
+                if options.xattrs {
+                    let xattr_iter = record
+                        .attrs_iter(self.metadata())
+                        .filter(|(k, _)| k.starts_with("linux.xattr."));
+                    crate::fs::write_xattrs(&out_path, xattr_iter);
+                }
+
+                Ok(())
+            }
         }
     }
 }
+
+// ============================================================================
+// BLOCK CACHE
+// ============================================================================
+
+/// LRU cache for decompressed blocks.
+///
+/// Caches decompressed block data keyed by (record_index, block_logical_offset).
+/// This significantly speeds up sequential reads and repeated access patterns.
+pub struct BlockCache {
+    cache: LruCache<(u64, u64), Box<[u8]>>,
+}
+
+impl BlockCache {
+    /// Create a new block cache with the specified capacity.
+    ///
+    /// Capacity is the number of blocks to cache, not bytes.
+    /// With 2MB blocks, 8 blocks = 16MB cache.
+    pub fn new(capacity: usize) -> Self {
+        Self {
+            cache: LruCache::new(
+                std::num::NonZeroUsize::new(capacity).expect("capacity must be > 0"),
+            ),
+        }
+    }
+
+    /// Get a cached block if present.
+    pub fn get(&mut self, record_index: u64, block_offset: u64) -> Option<&[u8]> {
+        self.cache.get(&(record_index, block_offset)).map(|b| &**b)
+    }
+
+    /// Insert a decompressed block into the cache.
+    pub fn insert(&mut self, record_index: u64, block_offset: u64, data: Box<[u8]>) {
+        self.cache.put((record_index, block_offset), data);
+    }
+
+    /// Check if a block is in the cache without updating LRU order.
+    pub fn contains(&self, record_index: u64, block_offset: u64) -> bool {
+        self.cache.contains(&(record_index, block_offset))
+    }
+
+    /// Clear all cached blocks.
+    pub fn clear(&mut self) {
+        self.cache.clear();
+    }
+
+    /// Number of blocks currently cached.
+    pub fn len(&self) -> usize {
+        self.cache.len()
+    }
+
+    /// Check if cache is empty.
+    pub fn is_empty(&self) -> bool {
+        self.cache.is_empty()
+    }
+}
+
+impl Default for BlockCache {
+    fn default() -> Self {
+        // Default: 8 blocks (16MB with 2MB blocks)
+        Self::new(8)
+    }
+}
+
+// ============================================================================
+// CHUNKED READER (AsyncRead + AsyncSeek)
+// ============================================================================
+
+/// Currently loaded block for the chunked reader.
+struct CurrentBlock {
+    /// Logical offset where this block starts
+    logical_offset: u64,
+    /// Decompressed block data
+    data: Vec<u8>,
+}
+
+/// Type alias for the pending block decompression future.
+type PendingBlockFuture = BoxFuture<'static, std::io::Result<(u64, Vec<u8>)>>;
+
+pin_project! {
+    /// Async reader for chunked files with seek support.
+    ///
+    /// Implements `AsyncRead` and `AsyncSeek` for random access to chunked file contents.
+    /// Includes an LRU block cache for efficient sequential and repeated access patterns.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let mut reader = bf.chunked_reader(&record, record_index)?;
+    /// let mut buf = vec![0u8; 1024];
+    /// reader.read(&mut buf).await?;
+    /// reader.seek(SeekFrom::Start(1000)).await?;
+    /// ```
+    pub struct ChunkedReader<'a> {
+        reader: &'a BoxFileReader,
+        record: &'a ChunkedFileRecord<'a>,
+        record_index: super::RecordIndex,
+        position: u64,
+        cache: BlockCache,
+        segment: Segment,
+        blocks: Vec<(u64, u64)>,
+        current_block: Option<CurrentBlock>,
+        #[pin]
+        pending_block: Option<PendingBlockFuture>,
+    }
+}
+
+impl<'a> ChunkedReader<'a> {
+    /// Create a new chunked file reader.
+    pub fn new(
+        reader: &'a BoxFileReader,
+        record: &'a ChunkedFileRecord<'a>,
+        record_index: super::RecordIndex,
+    ) -> std::io::Result<Self> {
+        let segment = reader.memory_map_chunked(record)?;
+        let blocks = reader.meta.blocks_for_record(record_index);
+
+        if blocks.is_empty() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "chunked file has no block FST entries",
+            ));
+        }
+
+        Ok(Self {
+            reader,
+            record,
+            record_index,
+            position: 0,
+            cache: BlockCache::default(),
+            segment,
+            blocks,
+            current_block: None,
+            pending_block: None,
+        })
+    }
+
+    /// Create a new chunked file reader with a custom cache capacity.
+    pub fn with_cache_capacity(
+        reader: &'a BoxFileReader,
+        record: &'a ChunkedFileRecord<'a>,
+        record_index: super::RecordIndex,
+        cache_capacity: usize,
+    ) -> std::io::Result<Self> {
+        let mut r = Self::new(reader, record, record_index)?;
+        r.cache = BlockCache::new(cache_capacity);
+        Ok(r)
+    }
+
+    /// Get the current position within the file.
+    pub fn position(&self) -> u64 {
+        self.position
+    }
+
+    /// Get the total decompressed file size.
+    pub fn len(&self) -> u64 {
+        self.record.decompressed_length
+    }
+
+    /// Check if the file is empty.
+    pub fn is_empty(&self) -> bool {
+        self.record.decompressed_length == 0
+    }
+
+    /// Get the block size used for this chunked file.
+    pub fn block_size(&self) -> u32 {
+        self.record.block_size
+    }
+
+    /// Read bytes at a specific offset without changing the reader's position.
+    ///
+    /// This is the primary random access method - like `pread(2)` or indexing a memory map.
+    /// Uses the block cache for efficiency on repeated/nearby accesses.
+    ///
+    /// # Arguments
+    /// * `offset` - Byte offset within the decompressed file
+    /// * `buf` - Buffer to read into
+    ///
+    /// # Returns
+    /// Number of bytes read (may be less than buf.len() at EOF)
+    pub async fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> std::io::Result<usize> {
+        if buf.is_empty() || offset >= self.record.decompressed_length {
+            return Ok(0);
+        }
+
+        // Clamp read to file size
+        let available = (self.record.decompressed_length - offset) as usize;
+        let to_read = buf.len().min(available);
+        let mut total_read = 0;
+        let mut current_offset = offset;
+
+        while total_read < to_read {
+            // Find block containing current_offset
+            let Some(block_idx) = find_block_index(&self.blocks, current_offset) else {
+                break;
+            };
+
+            let (block_logical, block_physical) = self.blocks[block_idx];
+
+            // Get decompressed block (from cache or decompress)
+            let block_data = self
+                .get_block(block_idx, block_logical, block_physical)
+                .await?;
+
+            // Calculate how much to copy from this block
+            let offset_in_block = (current_offset - block_logical) as usize;
+            let block_remaining = block_data.len() - offset_in_block;
+            let copy_len = (to_read - total_read).min(block_remaining);
+
+            buf[total_read..total_read + copy_len]
+                .copy_from_slice(&block_data[offset_in_block..offset_in_block + copy_len]);
+
+            total_read += copy_len;
+            current_offset += copy_len as u64;
+        }
+
+        Ok(total_read)
+    }
+
+    /// Get a decompressed block, using cache if available.
+    async fn get_block(
+        &mut self,
+        block_idx: usize,
+        block_logical: u64,
+        block_physical: u64,
+    ) -> std::io::Result<Vec<u8>> {
+        // Check cache first
+        if let Some(cached) = self.cache.get(self.record_index.get(), block_logical) {
+            return Ok(cached.to_vec());
+        }
+
+        // Decompress the block
+        let all_data = self.segment.as_slice().map_err(std::io::Error::other)?;
+
+        let compressed_end = if block_idx + 1 < self.blocks.len() {
+            self.blocks[block_idx + 1].1
+        } else {
+            self.record.data.get() + self.record.length
+        };
+
+        let block_start = (block_physical - self.record.data.get()) as usize;
+        let block_end = (compressed_end - self.record.data.get()) as usize;
+        let block_data = &all_data[block_start..block_end];
+
+        let cursor = std::io::Cursor::new(block_data);
+        let buf_reader = tokio::io::BufReader::new(cursor);
+        let mut decompressed = Vec::new();
+        self.record
+            .compression
+            .decompress_write(buf_reader, &mut decompressed)
+            .await?;
+
+        // Cache it
+        self.cache.insert(
+            self.record_index.get(),
+            block_logical,
+            decompressed.clone().into_boxed_slice(),
+        );
+
+        Ok(decompressed)
+    }
+}
+
+/// Find the block index that contains the given logical offset.
+fn find_block_index(blocks: &[(u64, u64)], offset: u64) -> Option<usize> {
+    // Binary search for the block containing this offset
+    match blocks.binary_search_by(|(logical, _)| logical.cmp(&offset)) {
+        Ok(idx) => Some(idx),
+        Err(0) => None, // offset is before first block
+        Err(idx) => Some(idx - 1),
+    }
+}
+
+/// Read bytes from current block at the given position.
+fn read_from_block(current_block: &Option<CurrentBlock>, position: u64, buf: &mut [u8]) -> usize {
+    let Some(block) = current_block else {
+        return 0;
+    };
+
+    // Check if current position is within this block
+    if position < block.logical_offset {
+        return 0;
+    }
+
+    let offset_in_block = (position - block.logical_offset) as usize;
+    if offset_in_block >= block.data.len() {
+        return 0;
+    }
+
+    let available = block.data.len() - offset_in_block;
+    let to_copy = buf.len().min(available);
+
+    buf[..to_copy].copy_from_slice(&block.data[offset_in_block..offset_in_block + to_copy]);
+    to_copy
+}
+
+impl tokio::io::AsyncRead for ChunkedReader<'_> {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        let mut this = self.project();
+
+        // Check if we're at EOF
+        if *this.position >= this.record.decompressed_length {
+            return Poll::Ready(Ok(()));
+        }
+
+        // Poll pending future if exists
+        if let Some(fut) = this.pending_block.as_mut().as_pin_mut() {
+            match fut.poll(cx) {
+                Poll::Ready(Ok((logical_offset, data))) => {
+                    // Cache the block
+                    this.cache.insert(
+                        this.record_index.get(),
+                        logical_offset,
+                        data.clone().into_boxed_slice(),
+                    );
+                    *this.current_block = Some(CurrentBlock {
+                        logical_offset,
+                        data,
+                    });
+                    this.pending_block.set(None);
+                }
+                Poll::Ready(Err(e)) => {
+                    this.pending_block.set(None);
+                    return Poll::Ready(Err(e));
+                }
+                Poll::Pending => return Poll::Pending,
+            }
+        }
+
+        // Try to read from current block
+        if this.current_block.is_some() {
+            let slice = buf.initialize_unfilled();
+            let n = read_from_block(this.current_block, *this.position, slice);
+            if n > 0 {
+                buf.advance(n);
+                *this.position += n as u64;
+                return Poll::Ready(Ok(()));
+            }
+        }
+
+        // Need new block
+        let Some(block_idx) = find_block_index(this.blocks, *this.position) else {
+            return Poll::Ready(Ok(())); // EOF
+        };
+
+        let (logical_offset, physical_offset) = this.blocks[block_idx];
+
+        // Check cache
+        if let Some(cached) = this.cache.get(this.record_index.get(), logical_offset) {
+            *this.current_block = Some(CurrentBlock {
+                logical_offset,
+                data: cached.to_vec(),
+            });
+            let slice = buf.initialize_unfilled();
+            let n = read_from_block(this.current_block, *this.position, slice);
+            buf.advance(n);
+            *this.position += n as u64;
+            return Poll::Ready(Ok(()));
+        }
+
+        // Create decompression future
+        let all_data = match this.segment.as_slice() {
+            Ok(d) => d,
+            Err(e) => return Poll::Ready(Err(std::io::Error::other(e))),
+        };
+
+        let compressed_end = if block_idx + 1 < this.blocks.len() {
+            this.blocks[block_idx + 1].1
+        } else {
+            this.record.data.get() + this.record.length
+        };
+        let block_start = (physical_offset - this.record.data.get()) as usize;
+        let block_end = (compressed_end - this.record.data.get()) as usize;
+        let block_data = all_data[block_start..block_end].to_vec();
+        let compression = this.record.compression;
+
+        let fut: PendingBlockFuture = Box::pin(async move {
+            let cursor = std::io::Cursor::new(block_data);
+            let buf_reader = tokio::io::BufReader::new(cursor);
+            let mut decompressed = Vec::new();
+            compression
+                .decompress_write(buf_reader, &mut decompressed)
+                .await?;
+            Ok((logical_offset, decompressed))
+        });
+
+        this.pending_block.set(Some(fut));
+        cx.waker().wake_by_ref();
+        Poll::Pending
+    }
+}
+
+impl tokio::io::AsyncSeek for ChunkedReader<'_> {
+    fn start_seek(self: Pin<&mut Self>, position: SeekFrom) -> std::io::Result<()> {
+        let mut this = self.project();
+
+        let new_pos = match position {
+            SeekFrom::Start(pos) => pos as i64,
+            SeekFrom::End(offset) => this.record.decompressed_length as i64 + offset,
+            SeekFrom::Current(offset) => *this.position as i64 + offset,
+        };
+
+        if new_pos < 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "cannot seek to negative position",
+            ));
+        }
+
+        let new_pos = new_pos as u64;
+        if new_pos > this.record.decompressed_length {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!(
+                    "cannot seek past end of file ({} > {})",
+                    new_pos, this.record.decompressed_length
+                ),
+            ));
+        }
+
+        *this.position = new_pos;
+
+        // Invalidate current block if position is outside it
+        if let Some(block) = this.current_block {
+            let block_end = block.logical_offset + block.data.len() as u64;
+            if new_pos < block.logical_offset || new_pos >= block_end {
+                *this.current_block = None;
+            }
+        }
+
+        // Cancel any pending block load
+        this.pending_block.set(None);
+
+        Ok(())
+    }
+
+    fn poll_complete(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<u64>> {
+        Poll::Ready(Ok(*self.project().position))
+    }
+}
+
+// ============================================================================
+// CHUNKED SLICE (Deref to &[u8])
+// ============================================================================
+
+/// Transparent slice access to chunked file data.
+///
+/// This struct decompresses the entire chunked file into memory and provides
+/// direct `&[u8]` access via `Deref`. Useful when you need to access the file
+/// contents as a contiguous slice.
+///
+/// # Example
+/// ```ignore
+/// let slice = bf.chunked_slice(&record, record_index).await?;
+/// let data: &[u8] = &*slice;
+/// println!("First byte: {}", data[0]);
+/// ```
+pub struct ChunkedSlice {
+    data: Box<[u8]>,
+}
+
+impl ChunkedSlice {
+    /// Create a new ChunkedSlice by decompressing the entire chunked file.
+    pub async fn new(
+        reader: &BoxFileReader,
+        record: &ChunkedFileRecord<'_>,
+        record_index: super::RecordIndex,
+    ) -> std::io::Result<Self> {
+        let mut data = Vec::with_capacity(record.decompressed_length as usize);
+        reader
+            .decompress_chunked(record, record_index, &mut data)
+            .await?;
+        Ok(Self {
+            data: data.into_boxed_slice(),
+        })
+    }
+
+    /// Get the length of the decompressed data.
+    pub fn len(&self) -> usize {
+        self.data.len()
+    }
+
+    /// Check if the data is empty.
+    pub fn is_empty(&self) -> bool {
+        self.data.is_empty()
+    }
+
+    /// Consume self and return the underlying boxed slice.
+    pub fn into_boxed_slice(self) -> Box<[u8]> {
+        self.data
+    }
+
+    /// Consume self and return the data as a Vec.
+    pub fn into_vec(self) -> Vec<u8> {
+        self.data.into_vec()
+    }
+}
+
+impl Deref for ChunkedSlice {
+    type Target = [u8];
+
+    fn deref(&self) -> &Self::Target {
+        &self.data
+    }
+}
+
+impl AsRef<[u8]> for ChunkedSlice {
+    fn as_ref(&self) -> &[u8] {
+        &self.data
+    }
+}
+
+impl std::borrow::Borrow<[u8]> for ChunkedSlice {
+    fn borrow(&self) -> &[u8] {
+        &self.data
+    }
+}
+
+// ============================================================================
+// HELPER FUNCTIONS
+// ============================================================================
 
 /// Compute blake3 hash of a file on disk using mmap for better performance.
 async fn compute_file_blake3(path: &Path) -> std::io::Result<blake3::Hash> {
@@ -1529,6 +2456,126 @@ async fn extract_single_file_from_mmap(
         .decompress_write(buf_reader, &mut out_file)
         .await
         .map_err(|e| ExtractError::DecompressionFailed(e, box_path.to_path_buf()))?;
+
+    out_file
+        .flush()
+        .await
+        .map_err(|e| ExtractError::DecompressionFailed(e, box_path.to_path_buf()))?;
+
+    // Set file permissions
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let permissions = std::fs::Permissions::from_mode(mode);
+        fs::set_permissions(&out_path, permissions).await.ok();
+    }
+    #[cfg(not(unix))]
+    let _ = mode;
+
+    // Restore extended attributes
+    if !xattrs.is_empty() {
+        let xattr_iter = xattrs.iter().map(|(k, v)| (k.as_str(), v.as_slice()));
+        crate::fs::write_xattrs(&out_path, xattr_iter);
+    }
+
+    let stats = ExtractStats {
+        files_extracted: 1,
+        bytes_written: record.decompressed_length,
+        ..Default::default()
+    };
+
+    Ok(ExtractFileResult { stats, out_path })
+}
+
+/// Extract a single chunked file from memory-mapped archive data.
+///
+/// This is a standalone function so it can be spawned as a task.
+/// Chunked files contain independently-compressed blocks that decompress sequentially.
+/// Does NOT perform checksum verification - that happens separately in the validation pipeline.
+#[allow(clippy::too_many_arguments)]
+async fn extract_single_chunked_file_from_mmap(
+    mmap: Arc<MemoryMappedFile>,
+    archive_offset: u64,
+    output_base: &Path,
+    box_path: &BoxPath<'_>,
+    record: &ChunkedFileRecord<'_>,
+    blocks: Vec<(u64, u64)>,
+    mode: u32,
+    xattrs: Vec<(String, Vec<u8>)>,
+) -> Result<ExtractFileResult, ExtractError> {
+    use tokio::io::AsyncWriteExt;
+
+    if blocks.is_empty() {
+        return Err(ExtractError::DecompressionFailed(
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "chunked file has no block FST entries",
+            ),
+            box_path.to_path_buf(),
+        ));
+    }
+
+    let out_path = output_base.join(box_path.to_path_buf());
+
+    // Ensure parent directory exists (may race with other tasks, but create_dir_all is safe)
+    if let Some(parent) = out_path.parent() {
+        fs::create_dir_all(parent)
+            .await
+            .map_err(|e| ExtractError::CreateDirFailed(e, parent.to_path_buf()))?;
+    }
+
+    // Create output file
+    let out_file = fs::File::create(&out_path)
+        .await
+        .map_err(|e| ExtractError::CreateFileFailed(e, out_path.to_path_buf()))?;
+
+    // Create segment for the entire chunked file data
+    let offset = archive_offset + record.data.get();
+    let segment = Segment::new(mmap, offset, record.length).map_err(|e| {
+        ExtractError::DecompressionFailed(std::io::Error::other(e), box_path.to_path_buf())
+    })?;
+    let all_data = segment.as_slice().map_err(|e| {
+        ExtractError::DecompressionFailed(std::io::Error::other(e), box_path.to_path_buf())
+    })?;
+
+    // Size buffer based on file size, capped at 8MB
+    const MAX_BUFFER_SIZE: usize = 8 * 1024 * 1024;
+    let write_buf_size = (record.decompressed_length as usize).min(MAX_BUFFER_SIZE);
+    let mut out_file = tokio::io::BufWriter::with_capacity(write_buf_size, out_file);
+
+    // Decompress each block separately
+    for i in 0..blocks.len() {
+        let (_logical_offset, physical_offset) = blocks[i];
+
+        // Determine block's compressed size from next block's offset (or end of data)
+        let compressed_end = if i + 1 < blocks.len() {
+            blocks[i + 1].1 // Next block's physical offset
+        } else {
+            record.data.get() + record.length // End of all compressed data
+        };
+        let compressed_size = (compressed_end - physical_offset) as usize;
+
+        // Get slice of compressed block data (relative to start of chunked file data)
+        let block_offset = (physical_offset - record.data.get()) as usize;
+        let block_data = &all_data[block_offset..block_offset + compressed_size];
+
+        // Decompress this block using the async API
+        let cursor = std::io::Cursor::new(block_data);
+        let buf_reader = tokio::io::BufReader::new(cursor);
+
+        // Decompress to a buffer then write
+        let mut block_output = Vec::new();
+        record
+            .compression
+            .decompress_write(buf_reader, &mut block_output)
+            .await
+            .map_err(|e| ExtractError::DecompressionFailed(e, box_path.to_path_buf()))?;
+
+        out_file
+            .write_all(&block_output)
+            .await
+            .map_err(|e| ExtractError::DecompressionFailed(e, box_path.to_path_buf()))?;
+    }
 
     out_file
         .flush()

@@ -7,17 +7,15 @@ use std::num::NonZeroU64;
 use fastvint::AsyncReadVintExt;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeek, AsyncSeekExt};
 
-use crate::{
-    AttrMap, BoxPath, Compression, ExternalLinkRecord, FileRecord, LinkRecord,
-    file::RecordIndex,
-};
 use crate::compression::constants::*;
 use crate::header::{BoxHeader, MAGIC_BYTES};
+use crate::{
+    AttrMap, BoxPath, Compression, ExternalLinkRecord, FileRecord, LinkRecord, file::RecordIndex,
+};
 
 use super::{
-    DeserializeBorrowed, DeserializeOwned,
-    read_u8_slice, read_u64_le_slice, read_vlq_u64,
-    read_u32_le, read_u64_le,
+    DeserializeBorrowed, DeserializeOwned, read_u8_slice, read_u32_le, read_u64_le,
+    read_u64_le_slice, read_vlq_u64,
 };
 
 // ============================================================================
@@ -61,11 +59,8 @@ impl<'a> DeserializeBorrowed<'a> for Compression {
 
         let compression = match id {
             COMPRESSION_STORED => Stored,
-            COMPRESSION_BROTLI => Brotli,
-            COMPRESSION_DEFLATE => Deflate,
             COMPRESSION_ZSTD => Zstd,
             COMPRESSION_XZ => Xz,
-            COMPRESSION_SNAPPY => Snappy,
             id => Unknown(id),
         };
 
@@ -164,6 +159,7 @@ impl DeserializeOwned for BoxPath<'static> {
     {
         let start = reader.stream_position().await?;
         let path = BoxPath(Cow::Owned(String::deserialize_owned(reader).await?));
+        path.validate()?;
         let end = reader.stream_position().await?;
         tracing::debug!(
             start = format_args!("{:#x}", start),
@@ -345,11 +341,8 @@ impl DeserializeOwned for Compression {
 
         let compression = match id {
             COMPRESSION_STORED => Stored,
-            COMPRESSION_BROTLI => Brotli,
-            COMPRESSION_DEFLATE => Deflate,
             COMPRESSION_ZSTD => Zstd,
             COMPRESSION_XZ => Xz,
-            COMPRESSION_SNAPPY => Snappy,
             id => Unknown(id),
         };
 
@@ -416,51 +409,55 @@ impl DeserializeOwned for Vec<u8> {
 // FST PARSING HELPERS
 // ============================================================================
 
-/// Parse FST from remaining borrowed data after skipping padding.
+/// Parse FST from remaining borrowed data.
+/// v1 format: [u64 length][FST bytes]
 pub(super) fn parse_fst_borrowed<'a>(
     data: &'a [u8],
     pos: &mut usize,
 ) -> Option<box_fst::Fst<Cow<'a, [u8]>>> {
-    // Skip 0-padding to 8-byte boundary
-    while *pos < data.len() && data[*pos] == 0 {
-        *pos += 1;
+    // Check if we have enough bytes for the length prefix
+    if *pos + 8 > data.len() {
+        return None;
     }
 
-    // Parse FST from remaining bytes (no length prefix)
-    if *pos >= data.len() {
-        None
-    } else {
-        box_fst::Fst::new(Cow::Borrowed(&data[*pos..])).ok()
+    // Read u64 length prefix
+    let length_bytes: [u8; 8] = data[*pos..*pos + 8].try_into().ok()?;
+    let fst_length = u64::from_le_bytes(length_bytes) as usize;
+    *pos += 8;
+
+    // Check if we have enough bytes for the FST data
+    if fst_length == 0 || *pos + fst_length > data.len() {
+        return None;
     }
+
+    // Parse FST from exactly fst_length bytes
+    let fst_data = &data[*pos..*pos + fst_length];
+    *pos += fst_length;
+    box_fst::Fst::new(Cow::Borrowed(fst_data)).ok()
 }
 
-/// Parse FST from remaining reader data after skipping padding.
+/// Parse FST from reader.
+/// v1 format: [u64 length][FST bytes]
 pub(super) async fn parse_fst_owned<R: AsyncRead + AsyncSeek + Unpin + Send>(
     reader: &mut R,
 ) -> std::io::Result<Option<box_fst::Fst<Cow<'static, [u8]>>>> {
-    // Skip 0-padding to 8-byte boundary
-    loop {
-        let mut byte = [0u8; 1];
-        match reader.read_exact(&mut byte).await {
-            Ok(_) if byte[0] == 0 => continue, // Skip padding
-            Ok(_) => {
-                // Non-zero byte found, seek back one byte
-                reader.seek(std::io::SeekFrom::Current(-1)).await?;
-                break;
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
-                return Ok(None); // EOF, no FST
-            }
-            Err(e) => return Err(e),
+    // Read u64 length prefix
+    let mut length_buf = [0u8; 8];
+    match reader.read_exact(&mut length_buf).await {
+        Ok(_) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
+            return Ok(None); // EOF, no FST
         }
+        Err(e) => return Err(e),
+    }
+    let fst_length = u64::from_le_bytes(length_buf) as usize;
+
+    if fst_length == 0 {
+        return Ok(None);
     }
 
-    // Read remaining bytes and parse as FST
-    let mut fst_bytes = Vec::new();
-    reader.read_to_end(&mut fst_bytes).await?;
-    if fst_bytes.is_empty() {
-        Ok(None)
-    } else {
-        Ok(box_fst::Fst::new(Cow::Owned(fst_bytes)).ok())
-    }
+    // Read exactly fst_length bytes
+    let mut fst_bytes = vec![0u8; fst_length];
+    reader.read_exact(&mut fst_bytes).await?;
+    Ok(box_fst::Fst::new(Cow::Owned(fst_bytes)).ok())
 }

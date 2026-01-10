@@ -8,6 +8,7 @@ use crate::{AttrMap, compression::Compression};
 #[derive(Debug, Clone)]
 pub enum Record<'a> {
     File(FileRecord<'a>),
+    ChunkedFile(ChunkedFileRecord<'a>),
     Directory(DirectoryRecord<'a>),
     Link(LinkRecord<'a>),
     ExternalLink(ExternalLinkRecord<'a>),
@@ -79,9 +80,26 @@ impl<'a> Record<'a> {
     }
 
     #[inline(always)]
+    pub fn as_chunked_file(&self) -> Option<&ChunkedFileRecord<'a>> {
+        match self {
+            Record::ChunkedFile(file) => Some(file),
+            _ => None,
+        }
+    }
+
+    #[inline(always)]
+    pub fn as_chunked_file_mut(&mut self) -> Option<&mut ChunkedFileRecord<'a>> {
+        match self {
+            Record::ChunkedFile(file) => Some(file),
+            _ => None,
+        }
+    }
+
+    #[inline(always)]
     pub fn name(&self) -> &str {
         match self {
             Record::File(file) => &file.name,
+            Record::ChunkedFile(file) => &file.name,
             Record::Directory(dir) => &dir.name,
             Record::Link(link) => &link.name,
             Record::ExternalLink(link) => &link.name,
@@ -112,6 +130,7 @@ impl<'a> Record<'a> {
         match self {
             Record::Directory(dir) => &dir.attrs,
             Record::File(file) => &file.attrs,
+            Record::ChunkedFile(file) => &file.attrs,
             Record::Link(link) => &link.attrs,
             Record::ExternalLink(link) => &link.attrs,
         }
@@ -122,6 +141,7 @@ impl<'a> Record<'a> {
         match self {
             Record::Directory(dir) => &mut dir.attrs,
             Record::File(file) => &mut file.attrs,
+            Record::ChunkedFile(file) => &mut file.attrs,
             Record::Link(link) => &mut link.attrs,
             Record::ExternalLink(link) => &mut link.attrs,
         }
@@ -142,6 +162,7 @@ impl<'a> Record<'a> {
     pub fn into_owned(self) -> Record<'static> {
         match self {
             Record::File(file) => Record::File(file.into_owned()),
+            Record::ChunkedFile(file) => Record::ChunkedFile(file.into_owned()),
             Record::Directory(dir) => Record::Directory(dir.into_owned()),
             Record::Link(link) => Record::Link(link.into_owned()),
             Record::ExternalLink(link) => Record::ExternalLink(link.into_owned()),
@@ -310,5 +331,71 @@ impl FileRecord<'_> {
 impl<'a> From<FileRecord<'a>> for Record<'a> {
     fn from(file: FileRecord<'a>) -> Self {
         Record::File(file)
+    }
+}
+
+/// A file record for large files stored as independently-compressed blocks.
+/// This allows random access and parallel decompression.
+#[derive(Debug, Clone)]
+pub struct ChunkedFileRecord<'a> {
+    /// The compression algorithm used for each block.
+    pub compression: Compression,
+
+    /// The size of each block before compression (last block may be smaller).
+    pub block_size: u32,
+
+    /// The exact length of the compressed data as written.
+    pub length: u64,
+
+    /// The total decompressed size of all blocks combined.
+    pub decompressed_length: u64,
+
+    /// The position of the first block's data in the file.
+    pub data: NonZeroU64,
+
+    /// The name of the file.
+    pub name: Cow<'a, str>,
+
+    /// Optional attributes for the given paths, such as Windows or Unix ACLs, last accessed time, etc.
+    pub attrs: AttrMap,
+}
+
+impl ChunkedFileRecord<'_> {
+    #[inline(always)]
+    pub fn compression(&self) -> Compression {
+        self.compression
+    }
+
+    #[inline(always)]
+    pub fn attr<S: AsRef<str>>(&self, metadata: &BoxMetadata<'_>, key: S) -> Option<&[u8]> {
+        let key = metadata.attr_key(key.as_ref())?;
+        self.attrs.get(&key).map(|x| &**x)
+    }
+
+    /// Returns the number of blocks in this chunked file.
+    pub fn block_count(&self) -> u64 {
+        if self.decompressed_length == 0 {
+            0
+        } else {
+            (self.decompressed_length + self.block_size as u64 - 1) / self.block_size as u64
+        }
+    }
+
+    pub fn into_owned(self) -> ChunkedFileRecord<'static> {
+        ChunkedFileRecord {
+            compression: self.compression,
+            block_size: self.block_size,
+            length: self.length,
+            decompressed_length: self.decompressed_length,
+            data: self.data,
+            name: Cow::Owned(self.name.into_owned()),
+            attrs: self.attrs,
+        }
+    }
+}
+
+impl<'a> From<ChunkedFileRecord<'a>> for Record<'a> {
+    fn from(file: ChunkedFileRecord<'a>) -> Self {
+        Record::ChunkedFile(file)
     }
 }

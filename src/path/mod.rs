@@ -172,6 +172,68 @@ impl BoxPath<'static> {
 }
 
 impl<'a> BoxPath<'a> {
+    /// Validate a deserialized BoxPath.
+    /// Checks that:
+    /// - Path is not empty
+    /// - No empty components (consecutive separators, leading/trailing separator)
+    /// - No `.` or `..` components
+    /// - No `/` or `\` characters within components
+    /// - No control characters within components (except separators)
+    pub fn validate(&self) -> std::io::Result<()> {
+        if self.0.is_empty() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "empty path",
+            ));
+        }
+
+        // Check for leading/trailing separator
+        if self.0.starts_with(PATH_BOX_SEP) || self.0.ends_with(PATH_BOX_SEP) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "path has empty component (leading/trailing separator)",
+            ));
+        }
+
+        for component in self.0.split(PATH_BOX_SEP) {
+            // Empty component (consecutive separators)
+            if component.is_empty() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "path has empty component",
+                ));
+            }
+
+            // Dot and dot-dot components
+            if component == "." || component == ".." {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("path contains '{}' component", component),
+                ));
+            }
+
+            // Check each character
+            for c in component.chars() {
+                if c == '/' || c == '\\' {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "path component contains slash or backslash",
+                    ));
+                }
+
+                let cat = GeneralCategory::of(c);
+                if cat == GeneralCategory::Control {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "path component contains control character",
+                    ));
+                }
+            }
+        }
+
+        Ok(())
+    }
+
     pub fn to_path_buf(&self) -> PathBuf {
         PathBuf::from(self.to_string())
     }

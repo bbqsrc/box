@@ -90,7 +90,7 @@ A Box archive consists of five sections laid out sequentially:
   caption: [Box archive structure],
 ) <fig:archive-structure>
 
-The Header is always 32 bytes and located at offset 0. The Header contains a pointer to the Trailer, which stores record metadata. File content data is stored between the Header and Trailer. The Path FST follows the Trailer and provides path-to-record mapping (see @sec:path-fst). The Block FST, if present, follows the Path FST and provides logical-to-physical offset mapping for chunked files (see @sec:block-fst). Both FSTs are prefixed with a Vu64 length, enabling efficient seeking past the Path FST to detect the Block FST's presence.
+The Header is always 32 bytes and located at offset 0. The Header contains a pointer to the Trailer, which stores record metadata. File content data is stored between the Header and Trailer. The Path FST follows the Trailer and provides path-to-record mapping (see @sec:path-fst). The Block FST, if present, follows the Path FST and provides logical-to-physical offset mapping for chunked files (see @sec:block-fst). Both FSTs are prefixed with a u64 length (little-endian), enabling efficient seeking past the Path FST to detect the Block FST's presence.
 
 All multi-byte integers in the Box format are stored in *little-endian* byte order unless otherwise specified.
 
@@ -209,7 +209,7 @@ Index values MUST be non-zero. An index value of `n` refers to `records[n-1]`.
 Attribute maps are encoded as:
 
 ```
-[u64: total byte count of this section, including this field]
+[u64: byte count of remaining section (not including this field)]
 [Vu64: entry count]
 For each entry:
     [Vu64: key index into attr_keys]
@@ -348,10 +348,12 @@ The Trailer contains all archive metadata encoded as `BoxMetadata`.
 ```
 [Vec<AttrKey>: attr_keys]
 [AttrMap: attrs]
+[Vu64: dictionary_length]
+[bytes: dictionary]
 [Vec<Record>: records]
 ```
 
-Fields are encoded in the order shown, using the data type encodings from @sec:data-types.
+Fields are encoded in the order shown, using the data type encodings from @sec:data-types. The dictionary field is encoded as a Vu64 length followed by raw bytes; length=0 means no dictionary is present.
 
 == Attribute Key Table (attr_keys) <sec:attr-keys>
 
@@ -433,7 +435,7 @@ Bits 4-7: Compression method
   columns: (auto, auto, 1fr),
   align: (left, left, left),
   table.header([*Value*], [*Type*], [*Description*]),
-  [`0x00`], [Directory], [Directory entry],
+  [`0x01`], [Directory], [Directory entry],
   [`0x02`], [File], [Regular file],
   [`0x03`], [Symlink], [Internal symbolic link],
   [`0x0A`], [Chunked File], [File with block-level compression],
@@ -457,21 +459,21 @@ Bits 4-7: Compression method
   columns: (auto, 1fr),
   align: (left, left),
   table.header([*Byte*], [*Meaning*]),
-  [`0x00`], [Directory (compression ignored)],
+  [`0x01`], [Directory (compression ignored)],
   [`0x02`], [File, stored (uncompressed)],
   [`0x12`], [File, Zstd compressed],
   [`0x22`], [File, XZ compressed],
   [`0x1A`], [Chunked file, Zstd compressed blocks],
 )
 
-== Directory Record (Type 0x00) <sec:directory-record>
+== Directory Record (Type 0x01) <sec:directory-record>
 
 Directories have no associated data in the Data Section.
 
 *Structure:*
 
 ```
-[type_compression: u8]  // Always 0x00
+[type_compression: u8]  // Always 0x01
 [String: name]
 [AttrMap: attrs]
 ```
@@ -619,7 +621,7 @@ Chunked files store content in fixed-size blocks, each independently compressed.
 
 ```
 [type_compression: u8]     // 0x0A | compression_method
-[block_size: u64]          // Size of each block before compression
+[block_size: u32]          // Size of each block before compression
 [length: u64]              // Total compressed length
 [decompressed_length: u64] // Total original file size
 [data: u64]                // Byte offset to first block
@@ -636,7 +638,7 @@ Chunked files store content in fixed-size blocks, each independently compressed.
     stroke: none,
     inset: 3pt,
     [`TT`], [type_compression],
-    [`BB BB BB BB BB BB BB BB`], [block_size (u64)],
+    [`BB BB BB BB`], [block_size (u32)],
     [`LL LL LL LL LL LL LL LL`], [length (u64)],
     [`DD DD DD DD DD DD DD DD`], [decompressed_length (u64)],
     [`OO OO OO OO OO OO OO OO`], [data offset (u64)],
@@ -925,7 +927,7 @@ The Path FST is located immediately after the Trailer:
     align: (right, center, left),
     stroke: 0.5pt,
     inset: 8pt,
-    [trailer_end →], [*Length (Vu64)*], [1–9 bytes],
+    [trailer_end →], [*Length (u64)*], [8 bytes],
     [], [*Header*], [24 bytes],
     [], [*Node Index*], [node_count × 8 bytes],
     [], [*Hot Section*], [Variable size (compact node headers)],

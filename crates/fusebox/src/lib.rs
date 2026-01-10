@@ -10,7 +10,7 @@ use fuser::{
 use libc::{EACCES, ENODATA, ENOENT, ERANGE};
 use tokio::runtime::Runtime;
 
-use box_format::{BoxFileReader, BoxMetadata, RecordIndex, BOX_EPOCH_UNIX};
+use box_format::{BOX_EPOCH_UNIX, BoxFileReader, BoxMetadata, RecordIndex};
 
 /// LRU cache with size limit for decompressed file contents
 pub struct LruCache {
@@ -542,14 +542,14 @@ impl Filesystem for BoxFs {
         let blocks = total_size.div_ceil(BLOCK_SIZE as u64);
 
         reply.statfs(
-            blocks,           // blocks: total blocks
-            0,                // bfree: free blocks (read-only)
-            0,                // bavail: available blocks (read-only)
-            file_count,       // files: total inodes
-            0,                // ffree: free inodes (read-only)
-            BLOCK_SIZE,       // bsize: block size
-            255,              // namelen: max filename length
-            BLOCK_SIZE,       // frsize: fragment size
+            blocks,     // blocks: total blocks
+            0,          // bfree: free blocks (read-only)
+            0,          // bavail: available blocks (read-only)
+            file_count, // files: total inodes
+            0,          // ffree: free inodes (read-only)
+            BLOCK_SIZE, // bsize: block size
+            255,        // namelen: max filename length
+            BLOCK_SIZE, // frsize: fragment size
         );
     }
 
@@ -574,15 +574,13 @@ impl Filesystem for BoxFs {
 
         // Get the attribute value
         let value = match record_index(ino) {
-            Some(index) => {
-                match self.reader.metadata().record(index) {
-                    Some(record) => record.attr(self.reader.metadata(), &box_attr_name),
-                    None => {
-                        reply.error(ENOENT);
-                        return;
-                    }
+            Some(index) => match self.reader.metadata().record(index) {
+                Some(record) => record.attr(self.reader.metadata(), &box_attr_name),
+                None => {
+                    reply.error(ENOENT);
+                    return;
                 }
-            }
+            },
             None => {
                 // Root inode - check archive-level attributes
                 self.reader.metadata().file_attr(&box_attr_name)
@@ -620,18 +618,16 @@ impl Filesystem for BoxFs {
         };
 
         match record_index(ino) {
-            Some(index) => {
-                match self.reader.metadata().record(index) {
-                    Some(record) => {
-                        let mut iter = record.attrs_iter(self.reader.metadata());
-                        add_xattrs(&mut iter, &mut xattr_list);
-                    }
-                    None => {
-                        reply.error(ENOENT);
-                        return;
-                    }
+            Some(index) => match self.reader.metadata().record(index) {
+                Some(record) => {
+                    let mut iter = record.attrs_iter(self.reader.metadata());
+                    add_xattrs(&mut iter, &mut xattr_list);
                 }
-            }
+                None => {
+                    reply.error(ENOENT);
+                    return;
+                }
+            },
             None => {
                 // Root inode - list archive-level xattrs
                 for key in self.reader.metadata().attr_keys() {
@@ -660,20 +656,18 @@ impl Filesystem for BoxFs {
         }
 
         let (mode, file_uid, file_gid) = match record_index(ino) {
-            Some(index) => {
-                match self.reader.metadata().record(index) {
-                    Some(record) => {
-                        let mode = record.perm(self.reader.metadata()) as u32;
-                        let uid = record.uid(self.reader.metadata());
-                        let gid = record.gid(self.reader.metadata());
-                        (mode, uid, gid)
-                    }
-                    None => {
-                        reply.error(ENOENT);
-                        return;
-                    }
+            Some(index) => match self.reader.metadata().record(index) {
+                Some(record) => {
+                    let mode = record.perm(self.reader.metadata()) as u32;
+                    let uid = record.uid(self.reader.metadata());
+                    let gid = record.gid(self.reader.metadata());
+                    (mode, uid, gid)
                 }
-            }
+                None => {
+                    reply.error(ENOENT);
+                    return;
+                }
+            },
             None => {
                 // Root directory
                 let attr = root_dir_attr(self.reader.metadata());

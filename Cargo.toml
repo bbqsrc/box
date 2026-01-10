@@ -17,7 +17,6 @@ mmap-io.workspace = true
 tokio = { workspace = true, features = ["fs", "io-util", "sync"] }
 tokio-util = { workspace = true, features = ["compat"] }
 async-compression.workspace = true
-tokio-snappy = { workspace = true, optional = true }
 async-walkdir.workspace = true
 futures.workspace = true
 blake3 = { workspace = true, features = ["traits-preview", "rayon", "mmap"] }
@@ -29,6 +28,7 @@ relative-path.workspace = true
 fastvint = { workspace = true, features = ["async-tokio"] }
 tracing.workspace = true
 serde_json.workspace = true
+lru.workspace = true
 thiserror.workspace = true
 pin-project-lite.workspace = true
 digest.workspace = true
@@ -36,17 +36,15 @@ sysinfo.workspace = true
 tempfile.workspace = true
 string-interner.workspace = true
 xattr = { workspace = true, optional = true }
+zstd = { workspace = true, optional = true }
 
 [features]
-default = ["brotli", "xz", "deflate", "zstd", "snappy", "writer", "reader", "xattr"]
+default = ["xz", "zstd", "writer", "reader", "xattr"]
 reader = []
 writer = ["reader"]
 
-brotli = ["async-compression/brotli"]
 xz = ["async-compression/xz"]
-deflate = ["async-compression/deflate"]
-zstd = ["async-compression/zstd"]
-snappy = ["tokio-snappy"]
+zstd = ["async-compression/zstd", "dep:zstd"]
 xattr = ["dep:xattr"]
 
 [workspace]
@@ -80,6 +78,7 @@ blake3 = "1"
 # Compression
 async-compression = { version = "0.4", default-features = false, features = ["tokio"] }
 tokio-snappy = { version = "0.2.0" }
+zstd = "0.13"
 
 # System
 libc = "0.2"
@@ -98,6 +97,7 @@ wild = "2.0"
 textwrap = "0.16"
 
 # Other
+lru = "0.14"
 mmap-io = { version = "0.9.4", features = ["async", "hugepages"] }
 hex = "0.4"
 pathdiff = "0.2"

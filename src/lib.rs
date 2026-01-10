@@ -10,6 +10,8 @@ mod compression;
 mod counting;
 #[cfg(feature = "reader")]
 mod de;
+#[cfg(feature = "zstd")]
+pub mod dict;
 mod file;
 pub mod fs;
 pub mod hashing;
@@ -38,4 +40,6 @@ pub use file::{
 };
 use header::BoxHeader;
 pub use path::BoxPath;
-pub use record::{DirectoryRecord, ExternalLinkRecord, FileRecord, LinkRecord, Record};
+pub use record::{
+    ChunkedFileRecord, DirectoryRecord, ExternalLinkRecord, FileRecord, LinkRecord, Record,
+};

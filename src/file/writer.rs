@@ -10,7 +10,7 @@ use crate::checksum::Checksum;
 use async_walkdir::WalkDir;
 use futures::StreamExt;
 use tokio::fs::{File, OpenOptions};
-use tokio::io::{AsyncSeekExt, AsyncWriteExt, BufReader, BufWriter};
+use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt, BufReader, BufWriter};
 
 use crate::{
     compression::{ByteCount, Compression, CompressionConfig},
@@ -18,7 +18,9 @@ use crate::{
     hashing::HashingReader,
     header::BoxHeader,
     path::BoxPath,
-    record::{DirectoryRecord, ExternalLinkRecord, FileRecord, LinkRecord, Record},
+    record::{
+        ChunkedFileRecord, DirectoryRecord, ExternalLinkRecord, FileRecord, LinkRecord, Record,
+    },
     ser::Serialize,
 };
 
@@ -83,6 +85,9 @@ pub struct BoxFileWriter {
     /// Current file position (to avoid seek-induced buffer flushes)
     file_pos: u64,
     finished: bool,
+    /// Block offsets for chunked files: ([16-byte key], physical_offset)
+    /// Key format: record_index (u64 BE) || logical_offset (u64 BE)
+    block_entries: Vec<([u8; 16], u64)>,
 }
 
 impl Drop for BoxFileWriter {
@@ -113,6 +118,12 @@ impl BoxFileWriter {
             .as_ref()
             .and_then(|bytes| box_fst::Fst::new(Cow::Owned(bytes.clone())).ok());
 
+        // Build block FST for chunked files (None if no chunked files)
+        let block_fst_bytes = self.build_block_fst()?;
+        self.meta.block_fst = block_fst_bytes
+            .as_ref()
+            .and_then(|bytes| box_fst::Fst::new(Cow::Owned(bytes.clone())).ok());
+
         // Flush any buffered file data before seeking
         self.file.flush().await?;
 
@@ -123,17 +134,7 @@ impl BoxFileWriter {
         self.file.seek(SeekFrom::Start(pos)).await?;
         self.file_pos = pos;
         self.meta.write(&mut self.file).await?;
-
-        // Pad to 8-byte boundary and write FST
-        if let Some(fst_bytes) = &fst_bytes {
-            self.file.flush().await?; // Flush before stream_position
-            let cur_pos = self.file.stream_position().await?;
-            let padding = (8 - (cur_pos % 8)) % 8;
-            if padding > 0 {
-                self.file.write_all(&[0u8; 8][..padding as usize]).await?;
-            }
-            self.file.write_all(fst_bytes).await?;
-        }
+        // FSTs are now written inside meta.write()
 
         self.file.flush().await?;
 
@@ -161,6 +162,31 @@ impl BoxFileWriter {
         for (path, index) in paths {
             builder
                 .insert(&path, index)
+                .map_err(|e| std::io::Error::other(e.to_string()))?;
+        }
+        builder
+            .finish()
+            .map(Some)
+            .map_err(|e| std::io::Error::other(e.to_string()))
+    }
+
+    fn build_block_fst(&self) -> std::io::Result<Option<Vec<u8>>> {
+        // Block FST for seeking within chunked files.
+        // Keys are 16 bytes: record_index (u64 BE) + logical_offset (u64 BE)
+        // Values are physical offsets within the compressed data.
+
+        if self.block_entries.is_empty() {
+            return Ok(None);
+        }
+
+        // Clone and sort (entries may not be in order if multiple chunked files)
+        let mut blocks = self.block_entries.clone();
+        blocks.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+
+        let mut builder = box_fst::FstBuilder::new();
+        for (key, offset) in blocks {
+            builder
+                .insert(&key, offset)
                 .map_err(|e| std::io::Error::other(e.to_string()))?;
         }
         builder
@@ -256,6 +282,7 @@ impl BoxFileWriter {
             next_write_pos,
             file_pos: 0, // Unknown after reading, will seek on first write
             finished: false,
+            block_entries: Vec::new(),
         };
 
         Ok(f)
@@ -315,6 +342,7 @@ impl BoxFileWriter {
             next_write_pos: header_size,
             file_pos: 0, // Will be set by write_header
             finished: false,
+            block_entries: Vec::new(),
         };
 
         boxfile.write_header().await?;
@@ -690,6 +718,114 @@ impl BoxFileWriter {
         let hashing_reader = reader.into_inner();
         let hash_bytes = hashing_reader.finalize_bytes();
         Ok((byte_count, hash_bytes))
+    }
+
+    /// Write a file as independently-compressed blocks for random access.
+    ///
+    /// Each block is compressed separately, allowing random access to any block
+    /// without decompressing the entire file. Block offsets are stored in the
+    /// block FST for seeking.
+    ///
+    /// # Arguments
+    /// * `path` - The path within the archive
+    /// * `reader` - Source data to read
+    /// * `block_size` - Size of each uncompressed block (last block may be smaller)
+    /// * `compression` - Compression algorithm for each block
+    /// * `attrs` - File attributes
+    pub async fn insert_chunked<R: tokio::io::AsyncRead + Unpin>(
+        &mut self,
+        path: BoxPath<'_>,
+        mut reader: R,
+        block_size: u32,
+        compression: Compression,
+        attrs: HashMap<String, Vec<u8>>,
+    ) -> std::io::Result<&ChunkedFileRecord<'static>> {
+        let attrs = self.convert_attrs(attrs)?;
+        let data_start = self.next_write_addr();
+
+        // We'll determine the record index after inserting
+        // For now, use a placeholder that we'll fix up
+        let record_index_placeholder = (self.meta.records.len() + 1) as u64;
+
+        let mut total_compressed: u64 = 0;
+        let mut total_decompressed: u64 = 0;
+        let mut block_buf = vec![0u8; block_size as usize];
+
+        loop {
+            // Read up to block_size bytes
+            let mut bytes_read = 0;
+            while bytes_read < block_size as usize {
+                let n = reader.read(&mut block_buf[bytes_read..]).await?;
+                if n == 0 {
+                    break; // EOF
+                }
+                bytes_read += n;
+            }
+
+            if bytes_read == 0 {
+                break; // No more data
+            }
+
+            let block_data = &block_buf[..bytes_read];
+            let logical_offset = total_decompressed;
+
+            // Record physical offset for this block
+            let physical_offset = data_start.get() + total_compressed;
+
+            // Build the 16-byte FST key: record_index (BE) || logical_offset (BE)
+            let mut key = [0u8; 16];
+            key[..8].copy_from_slice(&record_index_placeholder.to_be_bytes());
+            key[8..].copy_from_slice(&logical_offset.to_be_bytes());
+            self.block_entries.push((key, physical_offset));
+
+            // Compress and write the block
+            let cursor = std::io::Cursor::new(block_data);
+            let buf_reader = tokio::io::BufReader::new(cursor);
+            let config = CompressionConfig::new(compression);
+
+            // Seek to write position if needed
+            let write_pos = data_start.get() + total_compressed;
+            if self.file_pos != write_pos {
+                self.file.seek(SeekFrom::Start(write_pos)).await?;
+                self.file_pos = write_pos;
+            }
+
+            let byte_count = config.compress(&mut self.file, buf_reader).await?;
+            self.file_pos += byte_count.write;
+
+            total_compressed += byte_count.write;
+            total_decompressed += bytes_read as u64;
+        }
+
+        // Update cached write position
+        self.next_write_pos = data_start.get() + total_compressed;
+
+        let record = ChunkedFileRecord {
+            compression,
+            block_size,
+            length: total_compressed,
+            decompressed_length: total_decompressed,
+            name: Cow::Owned(path.filename().to_string()),
+            data: data_start,
+            attrs,
+        };
+
+        let index = self.insert_inner(path, record.into())?;
+
+        // Fix up the block_entries with the correct record index
+        let actual_index = index.get();
+        for (key, _) in self.block_entries.iter_mut().rev() {
+            // Check if this entry has our placeholder
+            let stored_index = u64::from_be_bytes(key[..8].try_into().unwrap());
+            if stored_index == record_index_placeholder {
+                key[..8].copy_from_slice(&actual_index.to_be_bytes());
+            } else {
+                // We've passed all entries for this record
+                break;
+            }
+        }
+
+        Ok(self.meta.record(index).unwrap().as_chunked_file().unwrap())
     }
 
     /// Write a pre-compressed file to the archive.

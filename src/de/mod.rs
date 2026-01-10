@@ -9,7 +9,6 @@ mod common;
 pub(crate) mod v0;
 pub(crate) mod v1;
 
-
 // ============================================================================
 // READ HELPERS (borrowed/sync)
 // ============================================================================
@@ -33,6 +32,19 @@ pub(super) fn read_u64_le_slice(data: &[u8], pos: &mut usize) -> std::io::Result
     let bytes: [u8; 8] = data[*pos..*pos + 8].try_into().unwrap();
     *pos += 8;
     Ok(u64::from_le_bytes(bytes))
+}
+
+/// Read a little-endian u32 from a byte slice, advancing the position.
+pub(super) fn read_u32_le_slice(data: &[u8], pos: &mut usize) -> std::io::Result<u32> {
+    if *pos + 4 > data.len() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::UnexpectedEof,
+            "unexpected end of data reading u32",
+        ));
+    }
+    let bytes: [u8; 4] = data[*pos..*pos + 4].try_into().unwrap();
+    *pos += 4;
+    Ok(u32::from_le_bytes(bytes))
 }
 
 /// Read a u8 from a byte slice, advancing the position.
@@ -115,7 +127,9 @@ impl<'a> DeserializeBorrowed<'a> for Cow<'a, str> {
 impl<'a> DeserializeBorrowed<'a> for BoxPath<'a> {
     fn deserialize_borrowed(data: &'a [u8], pos: &mut usize) -> std::io::Result<Self> {
         let s = <Cow<'a, str>>::deserialize_borrowed(data, pos)?;
-        Ok(BoxPath(s))
+        let path = BoxPath(s);
+        path.validate()?;
+        Ok(path)
     }
 }
 
