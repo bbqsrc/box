@@ -90,6 +90,24 @@ fn list_compact(bf: &BoxFileReader) -> Result<()> {
                 total_compressed += file.length;
                 total_size += file.decompressed_length;
             }
+            Record::ChunkedFile(file) => {
+                let ratio = if file.decompressed_length == 0 {
+                    0.0
+                } else {
+                    100.0 - (file.length as f64 / file.decompressed_length as f64 * 100.0)
+                };
+
+                println!(
+                    "{:>12}  {:>12}  {:>5.1}%  {}",
+                    format_size(file.length),
+                    format_size(file.decompressed_length),
+                    ratio,
+                    path
+                );
+
+                total_compressed += file.length;
+                total_size += file.decompressed_length;
+            }
         }
     }
 
@@ -162,7 +180,20 @@ fn list_long(bf: &BoxFileReader) -> Result<()> {
                 );
             }
             Record::File(file) => {
-                let checksum = format_checksum(file, bf.metadata());
+                let checksum = format_checksum_file(file, bf.metadata());
+                println!(
+                    "{:8}  {:>12}  {:>12}  {:20}  {:9}  {:>16}  {}",
+                    format!("{}", file.compression),
+                    format_size(file.length),
+                    format_size(file.decompressed_length),
+                    time,
+                    acl,
+                    checksum,
+                    path
+                );
+            }
+            Record::ChunkedFile(file) => {
+                let checksum = format_checksum_chunked(file, bf.metadata());
                 println!(
                     "{:8}  {:>12}  {:>12}  {:20}  {:9}  {:>16}  {}",
                     format!("{}", file.compression),
@@ -257,7 +288,20 @@ fn list_json(bf: &BoxFileReader) -> Result<()> {
                     .attr(bf.metadata(), "created")
                     .map(|v| format_time(Some(v)))
                     .filter(|s| s != "-"),
-                checksum: Some(format_checksum(file, bf.metadata())).filter(|s| s != "-"),
+                checksum: Some(format_checksum_file(file, bf.metadata())).filter(|s| s != "-"),
+                target: None,
+            },
+            Record::ChunkedFile(file) => JsonEntry {
+                path,
+                entry_type: "chunked_file".to_string(),
+                size: Some(file.decompressed_length),
+                compressed_size: Some(file.length),
+                compression: Some(format!("{}", file.compression)),
+                created: record
+                    .attr(bf.metadata(), "created")
+                    .map(|v| format_time(Some(v)))
+                    .filter(|s| s != "-"),
+                checksum: Some(format_checksum_chunked(file, bf.metadata())).filter(|s| s != "-"),
                 target: None,
             },
         };
@@ -269,7 +313,36 @@ fn list_json(bf: &BoxFileReader) -> Result<()> {
     Ok(())
 }
 
-fn format_checksum(file: &box_format::FileRecord, meta: &box_format::BoxMetadata) -> String {
+fn format_checksum_file(file: &box_format::FileRecord, meta: &box_format::BoxMetadata) -> String {
+    if let Some(blake3_bytes) = file.attr(meta, "blake3") {
+        blake3_bytes
+            .iter()
+            .take(8)
+            .map(|b| format!("{:02x}", b))
+            .collect::<String>()
+    } else if let Some(crc32_bytes) = file.attr(meta, "crc32") {
+        if crc32_bytes.len() >= 4 {
+            format!(
+                "{:08x}",
+                u32::from_le_bytes([
+                    crc32_bytes[0],
+                    crc32_bytes[1],
+                    crc32_bytes[2],
+                    crc32_bytes[3]
+                ])
+            )
+        } else {
+            "-".to_string()
+        }
+    } else {
+        "-".to_string()
+    }
+}
+
+fn format_checksum_chunked(
+    file: &box_format::ChunkedFileRecord,
+    meta: &box_format::BoxMetadata,
+) -> String {
     if let Some(blake3_bytes) = file.attr(meta, "blake3") {
         blake3_bytes
             .iter()

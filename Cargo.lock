@@ -767,7 +767,6 @@ dependencies = [
  "fastvint",
  "fuser",
  "libc",
- "tokio",
  "tracing",
  "tracing-subscriber",
 ]

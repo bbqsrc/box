@@ -138,6 +138,39 @@ fn show_file_info(bf: &BoxFileReader, file_path: &str) -> Result<()> {
                 }
             }
         }
+        Record::ChunkedFile(f) => {
+            println!("Type:  chunked file");
+            println!("Compression: {}", f.compression);
+            println!("Block size: {}", format_size(f.block_size as u64));
+            println!(
+                "Size:  {} (compressed: {})",
+                format_size(f.decompressed_length),
+                format_size(f.length)
+            );
+
+            let ratio = if f.decompressed_length == 0 {
+                0.0
+            } else {
+                100.0 - (f.length as f64 / f.decompressed_length as f64 * 100.0)
+            };
+            println!("Ratio: {:.1}%", ratio);
+
+            println!();
+            println!("Record:");
+            println!("  Index:  {}", index.get());
+            println!("  Offset: {:#x}", f.data.get());
+            println!("  Blocks: {}", f.block_count());
+
+            // Show attributes
+            let attrs = resolve_attrs(&f.attrs, metadata);
+            if !attrs.is_empty() {
+                println!();
+                println!("Attributes:");
+                for (key, value) in attrs {
+                    println!("  {}", format_attr(key, &value));
+                }
+            }
+        }
         Record::Directory(d) => {
             println!("Type:  directory");
             println!("Entries: {}", d.entries.len());
@@ -214,6 +247,11 @@ fn show_archive_info(bf: &BoxFileReader, args: &InfoArgs) -> Result<()> {
     for result in metadata.iter() {
         match result.record {
             Record::File(f) => {
+                file_count += 1;
+                total_size += f.decompressed_length;
+                total_compressed += f.length;
+            }
+            Record::ChunkedFile(f) => {
                 file_count += 1;
                 total_size += f.decompressed_length;
                 total_compressed += f.length;

@@ -23,10 +23,7 @@ pub fn parse_paths_with_compression(args: &[String]) -> Vec<PathWithCompression>
         match arg.as_str() {
             "--zstd" | "--zstandard" => current_config = CompressionConfig::new(Compression::Zstd),
             "--stored" => current_config = CompressionConfig::new(Compression::Stored),
-            "--brotli" => current_config = CompressionConfig::new(Compression::Brotli),
-            "--deflate" => current_config = CompressionConfig::new(Compression::Deflate),
             "--xz" => current_config = CompressionConfig::new(Compression::Xz),
-            "--snappy" => current_config = CompressionConfig::new(Compression::Snappy),
             "-O" => {
                 if let Some(opt) = iter.next()
                     && let Some((key, value)) = opt.split_once('=')

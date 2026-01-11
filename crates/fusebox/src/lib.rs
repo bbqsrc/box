@@ -8,9 +8,9 @@ use fuser::{
     ReplyEmpty, ReplyEntry, ReplyStatfs, ReplyXattr, Request,
 };
 use libc::{EACCES, ENODATA, ENOENT, ERANGE};
-use tokio::runtime::Runtime;
 
-use box_format::{BOX_EPOCH_UNIX, BoxFileReader, BoxMetadata, RecordIndex};
+use box_format::sync::BoxReader;
+use box_format::{BOX_EPOCH_UNIX, BoxMetadata, Record, RecordIndex};
 
 /// LRU cache with size limit for decompressed file contents
 pub struct LruCache {
@@ -78,18 +78,13 @@ impl LruCache {
 }
 
 pub struct BoxFs {
-    reader: BoxFileReader,
+    reader: BoxReader,
     cache: LruCache,
-    runtime: Runtime,
 }
 
 impl BoxFs {
-    pub fn new(reader: BoxFileReader, cache: LruCache, runtime: Runtime) -> Self {
-        Self {
-            reader,
-            cache,
-            runtime,
-        }
+    pub fn new(reader: BoxReader, cache: LruCache) -> Self {
+        Self { reader, cache }
     }
 }
 
@@ -167,7 +162,7 @@ impl RecordExt for box_format::Record<'_> {
         use box_format::Record::*;
 
         match self {
-            File(_) => FileType::RegularFile,
+            File(_) | ChunkedFile(_) => FileType::RegularFile,
             Directory(_) => FileType::Directory,
             Link(_) | ExternalLink(_) => FileType::Symlink,
         }
@@ -181,6 +176,7 @@ impl RecordExt for box_format::Record<'_> {
         use box_format::Record::*;
         let size = match self {
             File(record) => record.decompressed_length,
+            ChunkedFile(record) => record.decompressed_length,
             Directory(_) => 4096, // Standard directory size
             Link(record) => {
                 // Internal link - size is the resolved path length (approximate with target name)
@@ -224,7 +220,7 @@ impl RecordExt for box_format::Record<'_> {
                 } else {
                     use box_format::Record::*;
                     match self {
-                        File(_) => 0o644,
+                        File(_) | ChunkedFile(_) => 0o644,
                         Directory(_) => 0o755,
                         Link(_) | ExternalLink(_) => 0o777,
                     }
@@ -233,7 +229,7 @@ impl RecordExt for box_format::Record<'_> {
             _ => {
                 use box_format::Record::*;
                 match self {
-                    File(_) => 0o644,
+                    File(_) | ChunkedFile(_) => 0o644,
                     Directory(_) => 0o755,
                     Link(_) | ExternalLink(_) => 0o777,
                 }
@@ -367,13 +363,8 @@ impl Filesystem for BoxFs {
             return;
         }
 
-        let record = match self
-            .reader
-            .metadata()
-            .record(index)
-            .and_then(|x| x.as_file())
-        {
-            Some(v) => v,
+        let record = match self.reader.metadata().record(index) {
+            Some(r) => r,
             None => {
                 reply.error(ENOENT);
                 return;
@@ -381,10 +372,16 @@ impl Filesystem for BoxFs {
         };
 
         let mut buf = Vec::new();
-        match self
-            .runtime
-            .block_on(self.reader.decompress(record, &mut buf))
-        {
+        let result = match record {
+            Record::File(f) => self.reader.decompress(f, &mut buf),
+            Record::ChunkedFile(f) => self.reader.decompress_chunked(f, index, &mut buf),
+            _ => {
+                reply.error(ENOENT);
+                return;
+            }
+        };
+
+        match result {
             Ok(_) => {
                 let end = (offset + size).min(buf.len());
                 let start = offset.min(end);
@@ -535,6 +532,8 @@ impl Filesystem for BoxFs {
         for item in self.reader.metadata().iter() {
             file_count += 1;
             if let Some(file) = item.record.as_file() {
+                total_size += file.decompressed_length;
+            } else if let Some(file) = item.record.as_chunked_file() {
                 total_size += file.decompressed_length;
             }
         }

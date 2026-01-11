@@ -2,9 +2,8 @@ use std::path::PathBuf;
 
 use clap::Parser;
 use fuser::MountOption;
-use tokio::runtime::Runtime;
 
-use box_format::BoxFileReader;
+use box_format::sync::BoxReader;
 use fusebox::{BoxFs, LruCache};
 
 #[derive(Debug, Parser)]
@@ -25,10 +24,7 @@ fn main() {
     tracing_subscriber::fmt::init();
     let opts = Options::parse();
 
-    let runtime = Runtime::new().expect("Failed to create tokio runtime");
-    let bf = runtime
-        .block_on(BoxFileReader::open(opts.box_file))
-        .unwrap();
+    let bf = BoxReader::open(opts.box_file).unwrap();
     tracing::trace!("{:?}", &bf);
 
     let mount_opts = &[
@@ -36,7 +32,7 @@ fn main() {
         MountOption::FSName(bf.path().to_string_lossy().to_string()),
     ];
 
-    let boxfs = BoxFs::new(bf, LruCache::new(opts.cache_size), runtime);
+    let boxfs = BoxFs::new(bf, LruCache::new(opts.cache_size));
 
     fuser::mount2(boxfs, &opts.mountpoint, mount_opts).unwrap();
 }

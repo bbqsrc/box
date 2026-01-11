@@ -16,7 +16,6 @@ path = "src/main.rs"
 box-format.workspace = true
 fastvint.workspace = true
 fuser.workspace = true
-tokio = { workspace = true, features = ["rt"] }
 clap = { workspace = true, features = ["derive"] }
 tracing.workspace = true
 tracing-subscriber.workspace = true
