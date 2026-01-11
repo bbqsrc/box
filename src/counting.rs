@@ -4,16 +4,12 @@ use std::io::Result;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
-use pin_project_lite::pin_project;
 use tokio::io::AsyncWrite;
 
-pin_project! {
-    /// A writer wrapper that counts bytes written through it.
-    pub struct CountingWriter<W> {
-        #[pin]
-        inner: W,
-        bytes_written: u64,
-    }
+/// A writer wrapper that counts bytes written through it.
+pub struct CountingWriter<W> {
+    inner: W,
+    bytes_written: u64,
 }
 
 impl<W> CountingWriter<W> {
@@ -37,24 +33,27 @@ impl<W> CountingWriter<W> {
     }
 }
 
-impl<W: AsyncWrite> AsyncWrite for CountingWriter<W> {
-    fn poll_write(self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &[u8]) -> Poll<Result<usize>> {
-        let this = self.project();
-        match this.inner.poll_write(cx, buf) {
+impl<W: AsyncWrite + Unpin> AsyncWrite for CountingWriter<W> {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<Result<usize>> {
+        match Pin::new(&mut self.inner).poll_write(cx, buf) {
             Poll::Ready(Ok(n)) => {
-                *this.bytes_written += n as u64;
+                self.bytes_written += n as u64;
                 Poll::Ready(Ok(n))
             }
             other => other,
         }
     }
 
-    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<()>> {
-        self.project().inner.poll_flush(cx)
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<()>> {
+        Pin::new(&mut self.inner).poll_flush(cx)
     }
 
-    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<()>> {
-        self.project().inner.poll_shutdown(cx)
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<()>> {
+        Pin::new(&mut self.inner).poll_shutdown(cx)
     }
 }
 

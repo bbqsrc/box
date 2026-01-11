@@ -1,28 +1,30 @@
 use std::num::NonZeroU64;
 
-#[derive(Debug)]
-pub(crate) struct BoxHeader {
-    pub(crate) magic_bytes: [u8; 4],
-    pub(crate) version: u8,
-    pub(crate) allow_escapes: bool,
-    pub(crate) allow_external_symlinks: bool,
-    pub(crate) alignment: u32,
-    pub(crate) trailer: Option<NonZeroU64>,
+/// Box archive header (32 bytes on disk).
+#[derive(Debug, Clone)]
+pub struct BoxHeader {
+    /// Format version (currently 1).
+    pub version: u8,
+    /// Allow `\xNN` escape sequences in paths.
+    pub allow_escapes: bool,
+    /// Allow external symlinks pointing outside the archive.
+    pub allow_external_symlinks: bool,
+    /// Alignment for file data (0 = no alignment).
+    pub alignment: u32,
+    /// Offset to the trailer (metadata), or None if not yet written.
+    pub trailer: Option<NonZeroU64>,
 }
 
 impl BoxHeader {
     pub const SIZE: usize = 32;
 }
 
-// Make some attempt to not accidentally load plain text files,
-// and also make it break almost immediately in any UTF-8 compliant text parser.
-pub(crate) const MAGIC_BYTES: &[u8; 4] = b"\xffBOX";
 pub const VERSION: u8 = 1;
 
 impl BoxHeader {
-    pub(crate) fn new(trailer: Option<NonZeroU64>) -> BoxHeader {
+    /// Create a new header with just the trailer offset.
+    pub fn new(trailer: Option<NonZeroU64>) -> BoxHeader {
         BoxHeader {
-            magic_bytes: *MAGIC_BYTES,
             version: VERSION,
             allow_escapes: false,
             allow_external_symlinks: false,
@@ -31,21 +33,24 @@ impl BoxHeader {
         }
     }
 
-    pub(crate) fn with_alignment(alignment: u32) -> BoxHeader {
+    /// Create a header with specific alignment.
+    pub fn with_alignment(alignment: u32) -> BoxHeader {
         BoxHeader {
             alignment,
             ..Default::default()
         }
     }
 
-    pub(crate) fn with_escapes(allow_escapes: bool) -> BoxHeader {
+    /// Create a header that allows escape sequences in paths.
+    pub fn with_escapes(allow_escapes: bool) -> BoxHeader {
         BoxHeader {
             allow_escapes,
             ..Default::default()
         }
     }
 
-    pub(crate) fn with_options(
+    /// Create a header with custom options.
+    pub fn with_options(
         alignment: u32,
         allow_escapes: bool,
         allow_external_symlinks: bool,

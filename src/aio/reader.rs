@@ -7,32 +7,38 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
-use futures::future::BoxFuture;
 use lru::LruCache;
-use pin_project_lite::pin_project;
 
 use mmap_io::MemoryMappedFile;
 use mmap_io::segment::Segment;
 use tokio::fs::{self, File, OpenOptions};
 use tokio::io::{AsyncReadExt, AsyncSeekExt, BufReader};
 
-use super::meta::{AttrValue, Records};
-use super::{BoxMetadata, meta::RecordsItem};
+#[cfg(feature = "xz")]
+use crate::compression::xz::XzDecompressor;
+#[cfg(feature = "zstd")]
+use crate::compression::zstd::ZstdDecompressor;
+use crate::core::{ArchiveReader, AttrValue, BoxMetadata, RecordIndex, Records, RecordsItem};
 use crate::path::IntoBoxPathError;
 use crate::{
-    de::{DeserializeOwned, deserialize_metadata_borrowed},
+    compression::{Compression, constants::DEFAULT_BLOCK_SIZE},
+    de::deserialize_metadata_borrowed,
     header::BoxHeader,
     path::BoxPath,
     record::{ChunkedFileRecord, FileRecord, LinkRecord, Record},
 };
 
+/// Async reader for Box archives.
+///
+/// This is a frontend that wraps the sans-IO [`ArchiveReader`] core,
+/// providing async I/O operations for reading archives.
 pub struct BoxFileReader {
+    /// The sans-IO core that manages archive state
+    pub(crate) core: ArchiveReader<'static>,
+    /// Path to the archive file
     pub(crate) path: PathBuf,
-    pub(crate) header: BoxHeader,
-    pub(crate) meta: BoxMetadata<'static>,
-    pub(crate) offset: u64,
     /// Holds the mmapped trailer data. The Arc inside keeps the data alive.
-    /// This must not be dropped before `meta` is dropped.
+    /// This must not be dropped before `core.meta` is dropped.
     #[allow(dead_code)]
     pub(crate) trailer_segment: Segment,
 }
@@ -41,9 +47,9 @@ impl std::fmt::Debug for BoxFileReader {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("BoxFileReader")
             .field("path", &self.path)
-            .field("header", &self.header)
-            .field("meta", &self.meta)
-            .field("offset", &self.offset)
+            .field("header", &self.core.header)
+            .field("meta", &self.core.meta)
+            .field("offset", &self.core.offset)
             .finish_non_exhaustive()
     }
 }
@@ -52,8 +58,21 @@ pub(super) async fn read_header<R: tokio::io::AsyncRead + tokio::io::AsyncSeek +
     file: &mut R,
     offset: u64,
 ) -> std::io::Result<BoxHeader> {
+    use tokio::io::AsyncReadExt;
     file.seek(SeekFrom::Start(offset)).await?;
-    BoxHeader::deserialize_owned(file).await
+
+    // Read header bytes and parse using sans-IO parser
+    let mut buf = [0u8; 32];
+    file.read_exact(&mut buf).await?;
+    let (header_data, _) = crate::parse::parse_header(&buf)?;
+
+    Ok(BoxHeader {
+        version: header_data.version,
+        allow_external_symlinks: header_data.allow_external_symlinks,
+        allow_escapes: header_data.allow_escapes,
+        alignment: header_data.alignment,
+        trailer: std::num::NonZeroU64::new(header_data.trailer_offset),
+    })
 }
 
 pub(super) async fn read_trailer<R: tokio::io::AsyncRead + tokio::io::AsyncSeek + Unpin + Send>(
@@ -62,8 +81,26 @@ pub(super) async fn read_trailer<R: tokio::io::AsyncRead + tokio::io::AsyncSeek 
     offset: u64,
     version: u8,
 ) -> std::io::Result<BoxMetadata<'static>> {
+    use tokio::io::AsyncReadExt;
     reader.seek(SeekFrom::Start(offset + ptr.get())).await?;
-    crate::de::deserialize_metadata_owned(reader, version).await
+
+    // Read all remaining data and parse using sans-IO parser
+    let mut buf = Vec::new();
+    reader.read_to_end(&mut buf).await?;
+
+    let meta = match version {
+        0 => {
+            // v0 uses different format
+            let mut pos = 0;
+            crate::de::v0::deserialize_metadata_borrowed(&buf, &mut pos)?.into_owned()
+        }
+        _ => {
+            let (meta, _) = crate::parse::parse_metadata_v1(&buf)?;
+            meta.into_owned()
+        }
+    };
+
+    Ok(meta)
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -297,11 +334,12 @@ impl BoxFileReader {
         // to express this in the type system.
         let meta: BoxMetadata<'static> = unsafe { std::mem::transmute(meta) };
 
+        // Create the sans-IO core reader
+        let core = ArchiveReader::new(header, meta, offset);
+
         let f = BoxFileReader {
+            core,
             path,
-            header,
-            meta,
-            offset,
             trailer_segment,
         };
 
@@ -321,34 +359,34 @@ impl BoxFileReader {
 
     #[inline(always)]
     pub fn alignment(&self) -> u32 {
-        self.header.alignment
+        self.core.alignment()
     }
 
     #[inline(always)]
     pub fn version(&self) -> u8 {
-        self.header.version
+        self.core.version()
     }
 
     /// Returns true if this archive allows `\xNN` escape sequences in paths.
     #[inline(always)]
     pub fn allow_escapes(&self) -> bool {
-        self.header.allow_escapes
+        self.core.allow_escapes()
     }
 
     /// Returns true if this archive contains external symlinks (pointing outside the archive).
     #[inline(always)]
     pub fn allow_external_symlinks(&self) -> bool {
-        self.header.allow_external_symlinks
+        self.core.allow_external_symlinks()
     }
 
     #[inline(always)]
     pub fn metadata(&self) -> &BoxMetadata<'static> {
-        &self.meta
+        self.core.metadata()
     }
 
     /// Get file-level attributes with type-aware parsing.
     pub fn file_attrs(&self) -> std::collections::BTreeMap<&str, AttrValue<'_>> {
-        self.meta.file_attrs()
+        self.core.file_attrs()
     }
 
     #[inline(always)]
@@ -361,11 +399,11 @@ impl BoxFileReader {
     /// Checks: record attr -> archive attr -> None
     pub fn get_attr<'a>(&'a self, record: &'a Record<'_>, key: &str) -> Option<&'a [u8]> {
         // Try record-level attr first
-        if let Some(value) = record.attr(&self.meta, key) {
+        if let Some(value) = record.attr(self.core.metadata(), key) {
             return Some(value);
         }
         // Fall back to archive-level attr
-        self.meta.file_attr(key)
+        self.core.metadata().file_attr(key)
     }
 
     /// Get the unix mode for a record, with fallback to defaults.
@@ -373,29 +411,90 @@ impl BoxFileReader {
     /// Checks: record attr -> archive attr -> default (0o644 for files, 0o755 for dirs)
     #[cfg(unix)]
     pub fn get_mode(&self, record: &Record<'_>) -> u32 {
-        if let Some(mode_bytes) = self.get_attr(record, "unix.mode") {
-            let (mode, len) = fastvint::decode_vu32_slice(mode_bytes);
-            if len > 0 {
-                return mode;
-            }
-        }
-        // Default based on record type
-        match record {
-            Record::Directory(_) => crate::fs::DEFAULT_DIR_MODE,
-            _ => crate::fs::DEFAULT_FILE_MODE,
-        }
+        self.core.get_mode(record)
     }
 
     pub async fn decompress<W: tokio::io::AsyncWrite + Unpin>(
         &self,
         record: &FileRecord<'_>,
-        dest: W,
+        mut dest: W,
     ) -> std::io::Result<()> {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let segment = self.memory_map(record)?;
         let data = segment.as_slice().map_err(std::io::Error::other)?;
         let cursor = std::io::Cursor::new(data);
-        let buf_reader = tokio::io::BufReader::new(cursor);
-        record.compression.decompress_write(buf_reader, dest).await
+        let mut buf_reader = tokio::io::BufReader::new(cursor);
+
+        match record.compression {
+            Compression::Stored => {
+                tokio::io::copy(&mut buf_reader, &mut dest).await?;
+            }
+            #[cfg(feature = "zstd")]
+            Compression::Zstd => {
+                let dict = self.core.dictionary();
+                let mut decompressor = match dict {
+                    Some(d) => ZstdDecompressor::with_dictionary(d)?,
+                    None => ZstdDecompressor::new()?,
+                };
+                let mut read_buf = vec![0u8; DEFAULT_BLOCK_SIZE as usize];
+                let mut out_buf = vec![0u8; DEFAULT_BLOCK_SIZE as usize];
+
+                loop {
+                    let n = buf_reader.read(&mut read_buf).await?;
+                    if n == 0 {
+                        break;
+                    }
+
+                    let mut in_pos = 0;
+                    while in_pos < n {
+                        let status = decompressor.decompress(&read_buf[in_pos..n], &mut out_buf)?;
+                        let consumed = status.bytes_consumed();
+                        let produced = status.bytes_produced();
+                        if produced > 0 {
+                            dest.write_all(&out_buf[..produced]).await?;
+                        }
+                        in_pos += consumed;
+                        if status.is_done() {
+                            break;
+                        }
+                    }
+                }
+            }
+            #[cfg(feature = "xz")]
+            Compression::Xz => {
+                let mut decompressor = XzDecompressor::new()?;
+                let mut read_buf = vec![0u8; DEFAULT_BLOCK_SIZE as usize];
+                let mut out_buf = vec![0u8; DEFAULT_BLOCK_SIZE as usize];
+
+                loop {
+                    let n = buf_reader.read(&mut read_buf).await?;
+                    if n == 0 {
+                        break;
+                    }
+
+                    let mut in_pos = 0;
+                    while in_pos < n {
+                        let status = decompressor.decompress(&read_buf[in_pos..n], &mut out_buf)?;
+                        let consumed = status.bytes_consumed();
+                        let produced = status.bytes_produced();
+                        if produced > 0 {
+                            dest.write_all(&out_buf[..produced]).await?;
+                        }
+                        in_pos += consumed;
+                        if status.is_done() {
+                            break;
+                        }
+                    }
+                }
+            }
+            Compression::Unknown(id) => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!("Unknown compression ID: {}", id),
+                ));
+            }
+        }
+        Ok(())
     }
 
     /// Decompress a chunked file by decompressing each block separately.
@@ -405,13 +504,13 @@ impl BoxFileReader {
     pub async fn decompress_chunked<W: tokio::io::AsyncWrite + Unpin>(
         &self,
         record: &ChunkedFileRecord<'_>,
-        record_index: super::RecordIndex,
+        record_index: RecordIndex,
         mut dest: W,
     ) -> std::io::Result<()> {
         use tokio::io::AsyncWriteExt;
 
         // Get all block entries for this record
-        let blocks = self.meta.blocks_for_record(record_index);
+        let blocks = self.core.blocks_for_record(record_index);
 
         if blocks.is_empty() {
             return Err(std::io::Error::new(
@@ -440,16 +539,8 @@ impl BoxFileReader {
             let block_offset = (physical_offset - record.data.get()) as usize;
             let block_data = &all_data[block_offset..block_offset + compressed_size];
 
-            // Decompress this block using the async API
-            let cursor = std::io::Cursor::new(block_data);
-            let buf_reader = tokio::io::BufReader::new(cursor);
-
-            // Create a buffer to hold decompressed data
-            let mut block_output = Vec::new();
-            record
-                .compression
-                .decompress_write(buf_reader, &mut block_output)
-                .await?;
+            // Decompress this block using the core's decompress method
+            let block_output = self.core.decompress_chunked_block(record, block_data)?;
 
             // Write decompressed block to destination
             dest.write_all(&block_output).await?;
@@ -460,12 +551,9 @@ impl BoxFileReader {
     }
 
     pub fn find(&self, path: &BoxPath<'_>) -> Result<&Record<'static>, ExtractError> {
-        let record = self
-            .meta
-            .index(path)
-            .and_then(|x| self.meta.record(x))
-            .ok_or_else(|| ExtractError::NotFoundInArchive(path.to_path_buf()))?;
-        Ok(record)
+        self.core
+            .find(path)
+            .ok_or_else(|| ExtractError::NotFoundInArchive(path.to_path_buf()))
     }
 
     pub async fn extract<P: AsRef<Path>>(
@@ -473,19 +561,20 @@ impl BoxFileReader {
         path: &BoxPath<'_>,
         output_path: P,
     ) -> Result<(), ExtractError> {
-        if self.header.allow_escapes {
+        if self.core.allow_escapes() {
             return Err(ExtractError::AllowEscapesRequired);
         }
-        if self.header.allow_external_symlinks {
+        if self.core.allow_external_symlinks() {
             return Err(ExtractError::ExternalSymlinksRequired);
         }
         let output_path = output_path.as_ref();
         let record_index = self
-            .meta
+            .core
+            .metadata()
             .index(path)
             .ok_or_else(|| ExtractError::NotFoundInArchive(path.to_path_buf()))?;
         let record = self
-            .meta
+            .core
             .record(record_index)
             .ok_or_else(|| ExtractError::NotFoundInArchive(path.to_path_buf()))?;
         self.extract_inner(path, record, record_index, output_path)
@@ -514,16 +603,16 @@ impl BoxFileReader {
         output_path: P,
         options: ExtractOptions,
     ) -> Result<ExtractStats, ExtractError> {
-        if self.header.allow_escapes && !options.allow_escapes {
+        if self.core.allow_escapes() && !options.allow_escapes {
             return Err(ExtractError::AllowEscapesRequired);
         }
-        if self.header.allow_external_symlinks && !options.allow_external_symlinks {
+        if self.core.allow_external_symlinks() && !options.allow_external_symlinks {
             return Err(ExtractError::ExternalSymlinksRequired);
         }
         let output_path = output_path.as_ref();
         let mut stats = ExtractStats::default();
         let start = Instant::now();
-        for item in self.meta.iter() {
+        for item in self.core.iter() {
             self.extract_inner_with_options(
                 &item.path,
                 item.record,
@@ -546,21 +635,22 @@ impl BoxFileReader {
         output_path: P,
         options: ExtractOptions,
     ) -> Result<ExtractStats, ExtractError> {
-        if self.header.allow_escapes && !options.allow_escapes {
+        if self.core.allow_escapes() && !options.allow_escapes {
             return Err(ExtractError::AllowEscapesRequired);
         }
-        if self.header.allow_external_symlinks && !options.allow_external_symlinks {
+        if self.core.allow_external_symlinks() && !options.allow_external_symlinks {
             return Err(ExtractError::ExternalSymlinksRequired);
         }
         let output_path = output_path.as_ref();
         let mut stats = ExtractStats::default();
 
         let index = self
-            .meta
+            .core
+            .metadata()
             .index(path)
             .ok_or_else(|| ExtractError::NotFoundInArchive(path.to_path_buf()))?;
 
-        for item in Records::new(&self.meta, &[index], None) {
+        for item in Records::new(self.core.metadata(), &[index], None) {
             self.extract_inner_with_options(
                 &item.path,
                 item.record,
@@ -598,10 +688,10 @@ impl BoxFileReader {
         concurrency: usize,
         progress: Option<tokio::sync::mpsc::UnboundedSender<ExtractProgress>>,
     ) -> Result<ExtractStats, ExtractError> {
-        if self.header.allow_escapes && !options.allow_escapes {
+        if self.core.allow_escapes() && !options.allow_escapes {
             return Err(ExtractError::AllowEscapesRequired);
         }
-        if self.header.allow_external_symlinks && !options.allow_external_symlinks {
+        if self.core.allow_external_symlinks() && !options.allow_external_symlinks {
             return Err(ExtractError::ExternalSymlinksRequired);
         }
         let output_path = output_path.as_ref();
@@ -614,7 +704,7 @@ impl BoxFileReader {
         let mut chunked_files = Vec::new();
         let mut symlinks = Vec::new();
 
-        for item in self.meta.iter() {
+        for item in self.core.iter() {
             match item.record {
                 Record::Directory(_) => directories.push((item.path.clone(), item.record.clone())),
                 Record::File(f) => {
@@ -663,7 +753,7 @@ impl BoxFileReader {
                     };
 
                     // Get block entries for this chunked file
-                    let blocks = self.meta.blocks_for_record(item.index);
+                    let blocks = self.core.blocks_for_record(item.index);
 
                     chunked_files.push((
                         item.path.clone(),
@@ -747,8 +837,10 @@ impl BoxFileReader {
             })?
             .into();
 
-        let archive_offset = self.offset;
+        let archive_offset = self.core.offset;
         let verify_checksums = options.verify_checksums;
+        let dictionary: Option<Arc<[u8]>> =
+            self.core.meta.dictionary.as_ref().map(|d| d.clone().into());
 
         // Two JoinSets: extraction (async I/O) and validation (blocking mmap hash)
         let mut extract_set = tokio::task::JoinSet::new();
@@ -767,7 +859,8 @@ impl BoxFileReader {
              xattrs: Vec<(String, Vec<u8>)>,
              mmap: Arc<MemoryMappedFile>,
              out_base: PathBuf,
-             progress: Option<tokio::sync::mpsc::UnboundedSender<ExtractProgress>>| {
+             progress: Option<tokio::sync::mpsc::UnboundedSender<ExtractProgress>>,
+             dictionary: Option<Arc<[u8]>>| {
                 extract_set.spawn(async move {
                     if let Some(ref p) = progress {
                         let _ = p.send(ExtractProgress::Extracting {
@@ -783,6 +876,7 @@ impl BoxFileReader {
                         &record,
                         mode,
                         xattrs,
+                        dictionary,
                     )
                     .await;
 
@@ -801,7 +895,8 @@ impl BoxFileReader {
              blocks: Vec<(u64, u64)>,
              mmap: Arc<MemoryMappedFile>,
              out_base: PathBuf,
-             progress: Option<tokio::sync::mpsc::UnboundedSender<ExtractProgress>>| {
+             progress: Option<tokio::sync::mpsc::UnboundedSender<ExtractProgress>>,
+             dictionary: Option<Arc<[u8]>>| {
                 extract_set.spawn(async move {
                     if let Some(ref p) = progress {
                         let _ = p.send(ExtractProgress::Extracting {
@@ -818,6 +913,7 @@ impl BoxFileReader {
                         blocks,
                         mode,
                         xattrs,
+                        dictionary,
                     )
                     .await;
 
@@ -831,7 +927,8 @@ impl BoxFileReader {
                           chunked_files_iter: &mut std::vec::IntoIter<_>,
                           mmap: Arc<MemoryMappedFile>,
                           out_base: PathBuf,
-                          progress: Option<tokio::sync::mpsc::UnboundedSender<ExtractProgress>>|
+                          progress: Option<tokio::sync::mpsc::UnboundedSender<ExtractProgress>>,
+                          dictionary: Option<Arc<[u8]>>|
          -> bool {
             if let Some((box_path, record, expected_hash, mode, xattrs)) = files_iter.next() {
                 spawn_extract(
@@ -844,6 +941,7 @@ impl BoxFileReader {
                     mmap,
                     out_base,
                     progress,
+                    dictionary,
                 );
                 true
             } else if let Some((box_path, record, expected_hash, mode, xattrs, blocks)) =
@@ -860,6 +958,7 @@ impl BoxFileReader {
                     mmap,
                     out_base,
                     progress,
+                    dictionary,
                 );
                 true
             } else {
@@ -876,6 +975,7 @@ impl BoxFileReader {
                 mmap.clone(),
                 output_path.to_path_buf(),
                 progress.clone(),
+                dictionary.clone(),
             ) {
                 break;
             }
@@ -928,6 +1028,7 @@ impl BoxFileReader {
                         mmap.clone(),
                         output_path.to_path_buf(),
                         progress.clone(),
+                        dictionary.clone(),
                     );
                 }
 
@@ -968,7 +1069,7 @@ impl BoxFileReader {
                 }
 
                 // Resolve target index to path and compute relative symlink target
-                let target_path = self.meta.path_for_index(link.target).ok_or_else(|| {
+                let target_path = self.core.path_for_index(link.target).ok_or_else(|| {
                     ExtractError::ResolveLinkFailed(
                         std::io::Error::new(
                             std::io::ErrorKind::NotFound,
@@ -1030,7 +1131,7 @@ impl BoxFileReader {
     pub async fn validate_all(&self) -> Result<ValidateStats, ExtractError> {
         let mut stats = ValidateStats::default();
 
-        for item in self.meta.iter() {
+        for item in self.core.iter() {
             if let Record::File(file) = item.record {
                 stats.files_checked += 1;
 
@@ -1054,15 +1155,16 @@ impl BoxFileReader {
                         item.path.to_path_buf(),
                     )
                 })?;
-                let cursor = std::io::Cursor::new(data);
-                let buf_reader = tokio::io::BufReader::new(cursor);
+                // Decompress and hash using sans-IO
+                let dict = self.core.dictionary();
+                let decompressed =
+                    crate::compression::decompress_bytes_sync(data, file.compression, dict)
+                        .map_err(|e| {
+                            ExtractError::VerificationFailed(e, item.path.to_path_buf())
+                        })?;
 
-                // Create a hashing writer that wraps a sink
-                let mut hashing_sink = HashingSink::new(&mut hasher);
-                file.compression
-                    .decompress_write(buf_reader, &mut hashing_sink)
-                    .await
-                    .map_err(|e| ExtractError::VerificationFailed(e, item.path.to_path_buf()))?;
+                // Feed decompressed data to hasher
+                hasher.update(&decompressed);
 
                 let actual_hash = hasher.finalize();
                 if actual_hash.as_bytes() != &expected_hash {
@@ -1102,7 +1204,7 @@ impl BoxFileReader {
         let mut files = Vec::new();
         let mut files_without_checksum = 0u64;
 
-        for item in self.meta.iter() {
+        for item in self.core.iter() {
             if let Record::File(f) = item.record {
                 match item.record.attr_value(self.metadata(), "blake3") {
                     Some(AttrValue::U256(h)) => {
@@ -1133,13 +1235,16 @@ impl BoxFileReader {
             })?
             .into();
 
-        let archive_offset = self.offset;
+        let archive_offset = self.core.offset;
+        let dictionary: Option<Arc<[u8]>> =
+            self.core.meta.dictionary.as_ref().map(|d| d.clone().into());
 
         for (box_path, record, expected_hash) in files {
             let tx = tx.clone();
             let progress = progress.clone();
             let semaphore = semaphore.clone();
             let mmap = mmap.clone();
+            let dictionary = dictionary.clone();
 
             tokio::spawn(async move {
                 let _permit = semaphore.acquire_owned().await.unwrap();
@@ -1156,6 +1261,7 @@ impl BoxFileReader {
                     &box_path,
                     &record,
                     &expected_hash,
+                    dictionary,
                 )
                 .await
                 .map(|success| (box_path, success));
@@ -1200,13 +1306,13 @@ impl BoxFileReader {
 
     pub fn resolve_link(&self, link: &LinkRecord<'_>) -> std::io::Result<RecordsItem<'_, 'static>> {
         let index = link.target;
-        let record = self.meta.record(index).ok_or_else(|| {
+        let record = self.core.record(index).ok_or_else(|| {
             std::io::Error::new(
                 std::io::ErrorKind::NotFound,
                 format!("No record for link target index: {}", index.get()),
             )
         })?;
-        let path = self.meta.path_for_index(index).ok_or_else(|| {
+        let path = self.core.path_for_index(index).ok_or_else(|| {
             std::io::Error::new(
                 std::io::ErrorKind::NotFound,
                 format!("Could not find path for link target index: {}", index.get()),
@@ -1244,7 +1350,7 @@ impl BoxFileReader {
     ) -> std::io::Result<tokio::io::Take<File>> {
         let mut file = OpenOptions::new().read(true).open(&self.path).await?;
 
-        file.seek(SeekFrom::Start(self.offset + record.data.get()))
+        file.seek(SeekFrom::Start(self.core.offset + record.data.get()))
             .await?;
         Ok(file.take(record.length))
     }
@@ -1255,7 +1361,7 @@ impl BoxFileReader {
             .huge_pages(true)
             .open()
             .map_err(std::io::Error::other)?;
-        let offset = self.offset + record.data.get();
+        let offset = self.core.offset + record.data.get();
         Segment::new(mmap.into(), offset, record.length).map_err(std::io::Error::other)
     }
 
@@ -1265,7 +1371,7 @@ impl BoxFileReader {
             .huge_pages(true)
             .open()
             .map_err(std::io::Error::other)?;
-        let offset = self.offset + record.data.get();
+        let offset = self.core.offset + record.data.get();
         Segment::new(mmap.into(), offset, record.length).map_err(std::io::Error::other)
     }
 
@@ -1285,7 +1391,7 @@ impl BoxFileReader {
     pub async fn read_chunked_range(
         &self,
         record: &ChunkedFileRecord<'_>,
-        record_index: super::RecordIndex,
+        record_index: RecordIndex,
         offset: u64,
         len: usize,
     ) -> std::io::Result<Vec<u8>> {
@@ -1308,7 +1414,7 @@ impl BoxFileReader {
 
         // Find the starting block
         let Some((block_physical_offset, block_logical_offset)) =
-            self.meta.find_block(record_index, offset)
+            self.core.find_block(record_index, offset)
         else {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
@@ -1329,7 +1435,7 @@ impl BoxFileReader {
         while remaining > 0 {
             // Calculate compressed block size from next block's offset or end of data
             let compressed_end = if let Some((_, next_physical)) =
-                self.meta.next_block(record_index, current_block_logical)
+                self.core.next_block(record_index, current_block_logical)
             {
                 next_physical
             } else {
@@ -1341,14 +1447,10 @@ impl BoxFileReader {
             let block_data_offset = (current_block_physical - record.data.get()) as usize;
             let block_data = &all_data[block_data_offset..block_data_offset + compressed_size];
 
-            // Decompress the block
-            let cursor = std::io::Cursor::new(block_data);
-            let buf_reader = tokio::io::BufReader::new(cursor);
-            let mut decompressed = Vec::new();
-            record
-                .compression
-                .decompress_write(buf_reader, &mut decompressed)
-                .await?;
+            // Decompress the block using sans-IO
+            let dict = self.core.dictionary();
+            let decompressed =
+                crate::compression::decompress_bytes_sync(block_data, record.compression, dict)?;
 
             // Calculate slice within this block
             let start_in_block = (current_offset - current_block_logical) as usize;
@@ -1362,7 +1464,7 @@ impl BoxFileReader {
             // Move to next block if needed
             if remaining > 0 {
                 if let Some((next_logical, next_physical)) =
-                    self.meta.next_block(record_index, current_block_logical)
+                    self.core.next_block(record_index, current_block_logical)
                 {
                     current_block_logical = next_logical;
                     current_block_physical = next_physical;
@@ -1384,7 +1486,7 @@ impl BoxFileReader {
     pub fn chunked_reader<'a>(
         &'a self,
         record: &'a ChunkedFileRecord<'a>,
-        record_index: super::RecordIndex,
+        record_index: RecordIndex,
     ) -> std::io::Result<ChunkedReader<'a>> {
         ChunkedReader::new(self, record, record_index)
     }
@@ -1396,7 +1498,7 @@ impl BoxFileReader {
     pub async fn chunked_slice(
         &self,
         record: &ChunkedFileRecord<'_>,
-        record_index: super::RecordIndex,
+        record_index: RecordIndex,
     ) -> std::io::Result<ChunkedSlice> {
         ChunkedSlice::new(self, record, record_index).await
     }
@@ -1405,7 +1507,7 @@ impl BoxFileReader {
         &self,
         path: &BoxPath<'_>,
         record: &Record<'_>,
-        record_index: super::RecordIndex,
+        record_index: RecordIndex,
         output_path: &Path,
     ) -> Result<(), ExtractError> {
         match record {
@@ -1455,7 +1557,7 @@ impl BoxFileReader {
                 }
 
                 // Resolve target index to path and compute relative symlink target
-                let target_path = self.meta.path_for_index(link.target).ok_or_else(|| {
+                let target_path = self.core.path_for_index(link.target).ok_or_else(|| {
                     ExtractError::ResolveLinkFailed(
                         std::io::Error::new(
                             std::io::ErrorKind::NotFound,
@@ -1482,7 +1584,7 @@ impl BoxFileReader {
                 }
 
                 // Resolve target index to path and compute relative symlink target
-                let target_path = self.meta.path_for_index(link.target).ok_or_else(|| {
+                let target_path = self.core.path_for_index(link.target).ok_or_else(|| {
                     ExtractError::ResolveLinkFailed(
                         std::io::Error::new(
                             std::io::ErrorKind::NotFound,
@@ -1578,7 +1680,7 @@ impl BoxFileReader {
         &self,
         path: &BoxPath<'_>,
         record: &Record<'_>,
-        record_index: super::RecordIndex,
+        record_index: RecordIndex,
         output_path: &Path,
         options: &ExtractOptions,
         stats: &mut ExtractStats,
@@ -1664,7 +1766,7 @@ impl BoxFileReader {
                 }
 
                 // Resolve target index to path and compute relative symlink target
-                let target_path = self.meta.path_for_index(link.target).ok_or_else(|| {
+                let target_path = self.core.path_for_index(link.target).ok_or_else(|| {
                     ExtractError::ResolveLinkFailed(
                         std::io::Error::new(
                             std::io::ErrorKind::NotFound,
@@ -1693,7 +1795,7 @@ impl BoxFileReader {
                 }
 
                 // Resolve target index to path and compute relative symlink target
-                let target_path = self.meta.path_for_index(link.target).ok_or_else(|| {
+                let target_path = self.core.path_for_index(link.target).ok_or_else(|| {
                     ExtractError::ResolveLinkFailed(
                         std::io::Error::new(
                             std::io::ErrorKind::NotFound,
@@ -1860,21 +1962,25 @@ impl BlockCache {
     }
 
     /// Check if a block is in the cache without updating LRU order.
+    #[allow(dead_code)]
     pub fn contains(&self, record_index: u64, block_offset: u64) -> bool {
         self.cache.contains(&(record_index, block_offset))
     }
 
     /// Clear all cached blocks.
+    #[allow(dead_code)]
     pub fn clear(&mut self) {
         self.cache.clear();
     }
 
     /// Number of blocks currently cached.
+    #[allow(dead_code)]
     pub fn len(&self) -> usize {
         self.cache.len()
     }
 
     /// Check if cache is empty.
+    #[allow(dead_code)]
     pub fn is_empty(&self) -> bool {
         self.cache.is_empty()
     }
@@ -1899,34 +2005,30 @@ struct CurrentBlock {
     data: Vec<u8>,
 }
 
-/// Type alias for the pending block decompression future.
-type PendingBlockFuture = BoxFuture<'static, std::io::Result<(u64, Vec<u8>)>>;
-
-pin_project! {
-    /// Async reader for chunked files with seek support.
-    ///
-    /// Implements `AsyncRead` and `AsyncSeek` for random access to chunked file contents.
-    /// Includes an LRU block cache for efficient sequential and repeated access patterns.
-    ///
-    /// # Example
-    /// ```ignore
-    /// let mut reader = bf.chunked_reader(&record, record_index)?;
-    /// let mut buf = vec![0u8; 1024];
-    /// reader.read(&mut buf).await?;
-    /// reader.seek(SeekFrom::Start(1000)).await?;
-    /// ```
-    pub struct ChunkedReader<'a> {
-        reader: &'a BoxFileReader,
-        record: &'a ChunkedFileRecord<'a>,
-        record_index: super::RecordIndex,
-        position: u64,
-        cache: BlockCache,
-        segment: Segment,
-        blocks: Vec<(u64, u64)>,
-        current_block: Option<CurrentBlock>,
-        #[pin]
-        pending_block: Option<PendingBlockFuture>,
-    }
+/// Async reader for chunked files with seek support.
+///
+/// Implements `AsyncRead` and `AsyncSeek` for random access to chunked file contents.
+/// Includes an LRU block cache for efficient sequential and repeated access patterns.
+///
+/// Uses synchronous decompression (sans-IO) internally, making it suitable for
+/// contexts where async runtimes are not available or blocking is acceptable.
+///
+/// # Example
+/// ```ignore
+/// let mut reader = bf.chunked_reader(&record, record_index)?;
+/// let mut buf = vec![0u8; 1024];
+/// reader.read(&mut buf).await?;
+/// reader.seek(SeekFrom::Start(1000)).await?;
+/// ```
+pub struct ChunkedReader<'a> {
+    reader: &'a BoxFileReader,
+    record: &'a ChunkedFileRecord<'a>,
+    record_index: RecordIndex,
+    position: u64,
+    cache: BlockCache,
+    segment: Segment,
+    blocks: Vec<(u64, u64)>,
+    current_block: Option<CurrentBlock>,
 }
 
 impl<'a> ChunkedReader<'a> {
@@ -1934,10 +2036,10 @@ impl<'a> ChunkedReader<'a> {
     pub fn new(
         reader: &'a BoxFileReader,
         record: &'a ChunkedFileRecord<'a>,
-        record_index: super::RecordIndex,
+        record_index: RecordIndex,
     ) -> std::io::Result<Self> {
         let segment = reader.memory_map_chunked(record)?;
-        let blocks = reader.meta.blocks_for_record(record_index);
+        let blocks = reader.core.blocks_for_record(record_index);
 
         if blocks.is_empty() {
             return Err(std::io::Error::new(
@@ -1955,7 +2057,6 @@ impl<'a> ChunkedReader<'a> {
             segment,
             blocks,
             current_block: None,
-            pending_block: None,
         })
     }
 
@@ -1963,7 +2064,7 @@ impl<'a> ChunkedReader<'a> {
     pub fn with_cache_capacity(
         reader: &'a BoxFileReader,
         record: &'a ChunkedFileRecord<'a>,
-        record_index: super::RecordIndex,
+        record_index: RecordIndex,
         cache_capacity: usize,
     ) -> std::io::Result<Self> {
         let mut r = Self::new(reader, record, record_index)?;
@@ -2042,7 +2143,9 @@ impl<'a> ChunkedReader<'a> {
     }
 
     /// Get a decompressed block, using cache if available.
-    async fn get_block(
+    ///
+    /// Uses synchronous decompression (sans-IO) for simplicity and portability.
+    fn get_block_sync(
         &mut self,
         block_idx: usize,
         block_logical: u64,
@@ -2053,7 +2156,7 @@ impl<'a> ChunkedReader<'a> {
             return Ok(cached.to_vec());
         }
 
-        // Decompress the block
+        // Extract compressed block data
         let all_data = self.segment.as_slice().map_err(std::io::Error::other)?;
 
         let compressed_end = if block_idx + 1 < self.blocks.len() {
@@ -2066,13 +2169,12 @@ impl<'a> ChunkedReader<'a> {
         let block_end = (compressed_end - self.record.data.get()) as usize;
         let block_data = &all_data[block_start..block_end];
 
-        let cursor = std::io::Cursor::new(block_data);
-        let buf_reader = tokio::io::BufReader::new(cursor);
-        let mut decompressed = Vec::new();
-        self.record
-            .compression
-            .decompress_write(buf_reader, &mut decompressed)
-            .await?;
+        // Use sync decompression (sans-IO)
+        let decompressed = crate::compression::decompress_bytes_sync(
+            block_data,
+            self.record.compression,
+            self.reader.core.dictionary(),
+        )?;
 
         // Cache it
         self.cache.insert(
@@ -2082,6 +2184,16 @@ impl<'a> ChunkedReader<'a> {
         );
 
         Ok(decompressed)
+    }
+
+    /// Get a decompressed block, using cache if available (async wrapper).
+    async fn get_block(
+        &mut self,
+        block_idx: usize,
+        block_logical: u64,
+        block_physical: u64,
+    ) -> std::io::Result<Vec<u8>> {
+        self.get_block_sync(block_idx, block_logical, block_physical)
     }
 }
 
@@ -2121,111 +2233,62 @@ fn read_from_block(current_block: &Option<CurrentBlock>, position: u64, buf: &mu
 impl tokio::io::AsyncRead for ChunkedReader<'_> {
     fn poll_read(
         self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
+        _cx: &mut Context<'_>,
         buf: &mut tokio::io::ReadBuf<'_>,
     ) -> Poll<std::io::Result<()>> {
-        let mut this = self.project();
+        let this = self.get_mut();
 
         // Check if we're at EOF
-        if *this.position >= this.record.decompressed_length {
+        if this.position >= this.record.decompressed_length {
             return Poll::Ready(Ok(()));
-        }
-
-        // Poll pending future if exists
-        if let Some(fut) = this.pending_block.as_mut().as_pin_mut() {
-            match fut.poll(cx) {
-                Poll::Ready(Ok((logical_offset, data))) => {
-                    // Cache the block
-                    this.cache.insert(
-                        this.record_index.get(),
-                        logical_offset,
-                        data.clone().into_boxed_slice(),
-                    );
-                    *this.current_block = Some(CurrentBlock {
-                        logical_offset,
-                        data,
-                    });
-                    this.pending_block.set(None);
-                }
-                Poll::Ready(Err(e)) => {
-                    this.pending_block.set(None);
-                    return Poll::Ready(Err(e));
-                }
-                Poll::Pending => return Poll::Pending,
-            }
         }
 
         // Try to read from current block
         if this.current_block.is_some() {
             let slice = buf.initialize_unfilled();
-            let n = read_from_block(this.current_block, *this.position, slice);
+            let n = read_from_block(&this.current_block, this.position, slice);
             if n > 0 {
                 buf.advance(n);
-                *this.position += n as u64;
+                this.position += n as u64;
                 return Poll::Ready(Ok(()));
             }
         }
 
         // Need new block
-        let Some(block_idx) = find_block_index(this.blocks, *this.position) else {
+        let Some(block_idx) = find_block_index(&this.blocks, this.position) else {
             return Poll::Ready(Ok(())); // EOF
         };
 
         let (logical_offset, physical_offset) = this.blocks[block_idx];
 
-        // Check cache
-        if let Some(cached) = this.cache.get(this.record_index.get(), logical_offset) {
-            *this.current_block = Some(CurrentBlock {
-                logical_offset,
-                data: cached.to_vec(),
-            });
-            let slice = buf.initialize_unfilled();
-            let n = read_from_block(this.current_block, *this.position, slice);
-            buf.advance(n);
-            *this.position += n as u64;
-            return Poll::Ready(Ok(()));
-        }
-
-        // Create decompression future
-        let all_data = match this.segment.as_slice() {
+        // Get decompressed block (from cache or decompress synchronously)
+        let data = match this.get_block_sync(block_idx, logical_offset, physical_offset) {
             Ok(d) => d,
-            Err(e) => return Poll::Ready(Err(std::io::Error::other(e))),
+            Err(e) => return Poll::Ready(Err(e)),
         };
 
-        let compressed_end = if block_idx + 1 < this.blocks.len() {
-            this.blocks[block_idx + 1].1
-        } else {
-            this.record.data.get() + this.record.length
-        };
-        let block_start = (physical_offset - this.record.data.get()) as usize;
-        let block_end = (compressed_end - this.record.data.get()) as usize;
-        let block_data = all_data[block_start..block_end].to_vec();
-        let compression = this.record.compression;
-
-        let fut: PendingBlockFuture = Box::pin(async move {
-            let cursor = std::io::Cursor::new(block_data);
-            let buf_reader = tokio::io::BufReader::new(cursor);
-            let mut decompressed = Vec::new();
-            compression
-                .decompress_write(buf_reader, &mut decompressed)
-                .await?;
-            Ok((logical_offset, decompressed))
+        this.current_block = Some(CurrentBlock {
+            logical_offset,
+            data,
         });
 
-        this.pending_block.set(Some(fut));
-        cx.waker().wake_by_ref();
-        Poll::Pending
+        // Read from the newly loaded block
+        let slice = buf.initialize_unfilled();
+        let n = read_from_block(&this.current_block, this.position, slice);
+        buf.advance(n);
+        this.position += n as u64;
+        Poll::Ready(Ok(()))
     }
 }
 
 impl tokio::io::AsyncSeek for ChunkedReader<'_> {
     fn start_seek(self: Pin<&mut Self>, position: SeekFrom) -> std::io::Result<()> {
-        let mut this = self.project();
+        let this = self.get_mut();
 
         let new_pos = match position {
             SeekFrom::Start(pos) => pos as i64,
             SeekFrom::End(offset) => this.record.decompressed_length as i64 + offset,
-            SeekFrom::Current(offset) => *this.position as i64 + offset,
+            SeekFrom::Current(offset) => this.position as i64 + offset,
         };
 
         if new_pos < 0 {
@@ -2246,24 +2309,21 @@ impl tokio::io::AsyncSeek for ChunkedReader<'_> {
             ));
         }
 
-        *this.position = new_pos;
+        this.position = new_pos;
 
         // Invalidate current block if position is outside it
-        if let Some(block) = this.current_block {
+        if let Some(block) = &this.current_block {
             let block_end = block.logical_offset + block.data.len() as u64;
             if new_pos < block.logical_offset || new_pos >= block_end {
-                *this.current_block = None;
+                this.current_block = None;
             }
         }
-
-        // Cancel any pending block load
-        this.pending_block.set(None);
 
         Ok(())
     }
 
     fn poll_complete(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<u64>> {
-        Poll::Ready(Ok(*self.project().position))
+        Poll::Ready(Ok(self.get_mut().position))
     }
 }
 
@@ -2292,7 +2352,7 @@ impl ChunkedSlice {
     pub async fn new(
         reader: &BoxFileReader,
         record: &ChunkedFileRecord<'_>,
-        record_index: super::RecordIndex,
+        record_index: RecordIndex,
     ) -> std::io::Result<Self> {
         let mut data = Vec::with_capacity(record.decompressed_length as usize);
         reader
@@ -2360,42 +2420,6 @@ async fn compute_file_blake3(path: &Path) -> std::io::Result<blake3::Hash> {
     .map_err(|e| std::io::Error::other(e))?
 }
 
-/// A writer that computes a hash while writing to a sink.
-struct HashingSink<'a> {
-    hasher: &'a mut blake3::Hasher,
-}
-
-impl<'a> HashingSink<'a> {
-    fn new(hasher: &'a mut blake3::Hasher) -> Self {
-        Self { hasher }
-    }
-}
-
-impl tokio::io::AsyncWrite for HashingSink<'_> {
-    fn poll_write(
-        mut self: std::pin::Pin<&mut Self>,
-        _cx: &mut std::task::Context<'_>,
-        buf: &[u8],
-    ) -> std::task::Poll<std::io::Result<usize>> {
-        self.hasher.update(buf);
-        std::task::Poll::Ready(Ok(buf.len()))
-    }
-
-    fn poll_flush(
-        self: std::pin::Pin<&mut Self>,
-        _cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<std::io::Result<()>> {
-        std::task::Poll::Ready(Ok(()))
-    }
-
-    fn poll_shutdown(
-        self: std::pin::Pin<&mut Self>,
-        _cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<std::io::Result<()>> {
-        std::task::Poll::Ready(Ok(()))
-    }
-}
-
 /// Result of extracting a single file (without checksum verification).
 struct ExtractFileResult {
     stats: ExtractStats,
@@ -2415,6 +2439,7 @@ async fn extract_single_file_from_mmap(
     record: &FileRecord<'_>,
     mode: u32,
     xattrs: Vec<(String, Vec<u8>)>,
+    dictionary: Option<Arc<[u8]>>,
 ) -> Result<ExtractFileResult, ExtractError> {
     use tokio::io::AsyncWriteExt;
 
@@ -2443,19 +2468,119 @@ async fn extract_single_file_from_mmap(
 
     // Size buffers based on file size, capped at 8MB
     const MAX_BUFFER_SIZE: usize = 8 * 1024 * 1024;
-    let read_buf_size = (record.length as usize).min(MAX_BUFFER_SIZE);
     let write_buf_size = (record.decompressed_length as usize).min(MAX_BUFFER_SIZE);
-
-    let cursor = std::io::Cursor::new(data);
-    let buf_reader = tokio::io::BufReader::with_capacity(read_buf_size, cursor);
 
     let mut out_file = tokio::io::BufWriter::with_capacity(write_buf_size, out_file);
 
-    record
-        .compression
-        .decompress_write(buf_reader, &mut out_file)
-        .await
-        .map_err(|e| ExtractError::DecompressionFailed(e, box_path.to_path_buf()))?;
+    // Decompress using sans-IO state machine with inline I/O
+    match record.compression {
+        Compression::Stored => {
+            out_file
+                .write_all(data)
+                .await
+                .map_err(|e| ExtractError::DecompressionFailed(e, box_path.to_path_buf()))?;
+        }
+        #[cfg(feature = "zstd")]
+        Compression::Zstd => {
+            use tokio::io::AsyncReadExt;
+            let cursor = std::io::Cursor::new(data);
+            let mut buf_reader = tokio::io::BufReader::new(cursor);
+            let dict = dictionary.as_deref();
+            let mut decompressor = match dict {
+                Some(d) => ZstdDecompressor::with_dictionary(d)
+                    .map_err(|e| ExtractError::DecompressionFailed(e, box_path.to_path_buf()))?,
+                None => ZstdDecompressor::new()
+                    .map_err(|e| ExtractError::DecompressionFailed(e, box_path.to_path_buf()))?,
+            };
+            let mut read_buf = vec![0u8; DEFAULT_BLOCK_SIZE as usize];
+            let mut out_buf = vec![0u8; DEFAULT_BLOCK_SIZE as usize];
+
+            loop {
+                let n = buf_reader
+                    .read(&mut read_buf)
+                    .await
+                    .map_err(|e| ExtractError::DecompressionFailed(e, box_path.to_path_buf()))?;
+                if n == 0 {
+                    break;
+                }
+
+                let mut in_pos = 0;
+                while in_pos < n {
+                    let status = decompressor
+                        .decompress(&read_buf[in_pos..n], &mut out_buf)
+                        .map_err(|e| {
+                            ExtractError::DecompressionFailed(e, box_path.to_path_buf())
+                        })?;
+                    let consumed = status.bytes_consumed();
+                    let produced = status.bytes_produced();
+                    if produced > 0 {
+                        out_file
+                            .write_all(&out_buf[..produced])
+                            .await
+                            .map_err(|e| {
+                                ExtractError::DecompressionFailed(e, box_path.to_path_buf())
+                            })?;
+                    }
+                    in_pos += consumed;
+                    if status.is_done() {
+                        break;
+                    }
+                }
+            }
+        }
+        #[cfg(feature = "xz")]
+        Compression::Xz => {
+            use tokio::io::AsyncReadExt;
+            let cursor = std::io::Cursor::new(data);
+            let mut buf_reader = tokio::io::BufReader::new(cursor);
+            let mut decompressor = XzDecompressor::new()
+                .map_err(|e| ExtractError::DecompressionFailed(e, box_path.to_path_buf()))?;
+            let mut read_buf = vec![0u8; DEFAULT_BLOCK_SIZE as usize];
+            let mut out_buf = vec![0u8; DEFAULT_BLOCK_SIZE as usize];
+
+            loop {
+                let n = buf_reader
+                    .read(&mut read_buf)
+                    .await
+                    .map_err(|e| ExtractError::DecompressionFailed(e, box_path.to_path_buf()))?;
+                if n == 0 {
+                    break;
+                }
+
+                let mut in_pos = 0;
+                while in_pos < n {
+                    let status = decompressor
+                        .decompress(&read_buf[in_pos..n], &mut out_buf)
+                        .map_err(|e| {
+                            ExtractError::DecompressionFailed(e, box_path.to_path_buf())
+                        })?;
+                    let consumed = status.bytes_consumed();
+                    let produced = status.bytes_produced();
+                    if produced > 0 {
+                        out_file
+                            .write_all(&out_buf[..produced])
+                            .await
+                            .map_err(|e| {
+                                ExtractError::DecompressionFailed(e, box_path.to_path_buf())
+                            })?;
+                    }
+                    in_pos += consumed;
+                    if status.is_done() {
+                        break;
+                    }
+                }
+            }
+        }
+        Compression::Unknown(id) => {
+            return Err(ExtractError::DecompressionFailed(
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!("Unknown compression ID: {}", id),
+                ),
+                box_path.to_path_buf(),
+            ));
+        }
+    }
 
     out_file
         .flush()
@@ -2502,6 +2627,7 @@ async fn extract_single_chunked_file_from_mmap(
     blocks: Vec<(u64, u64)>,
     mode: u32,
     xattrs: Vec<(String, Vec<u8>)>,
+    dictionary: Option<Arc<[u8]>>,
 ) -> Result<ExtractFileResult, ExtractError> {
     use tokio::io::AsyncWriteExt;
 
@@ -2559,17 +2685,11 @@ async fn extract_single_chunked_file_from_mmap(
         let block_offset = (physical_offset - record.data.get()) as usize;
         let block_data = &all_data[block_offset..block_offset + compressed_size];
 
-        // Decompress this block using the async API
-        let cursor = std::io::Cursor::new(block_data);
-        let buf_reader = tokio::io::BufReader::new(cursor);
-
-        // Decompress to a buffer then write
-        let mut block_output = Vec::new();
-        record
-            .compression
-            .decompress_write(buf_reader, &mut block_output)
-            .await
-            .map_err(|e| ExtractError::DecompressionFailed(e, box_path.to_path_buf()))?;
+        // Decompress this block using sans-IO
+        let dict = dictionary.as_deref();
+        let block_output =
+            crate::compression::decompress_bytes_sync(block_data, record.compression, dict)
+                .map_err(|e| ExtractError::DecompressionFailed(e, box_path.to_path_buf()))?;
 
         out_file
             .write_all(&block_output)
@@ -2641,6 +2761,7 @@ async fn validate_single_file_from_mmap(
     box_path: &BoxPath<'_>,
     record: &FileRecord<'_>,
     expected_hash: &[u8; 32],
+    dictionary: Option<Arc<[u8]>>,
 ) -> Result<bool, ExtractError> {
     // Create segment from shared mmap
     let offset = archive_offset + record.data.get();
@@ -2651,18 +2772,13 @@ async fn validate_single_file_from_mmap(
         ExtractError::VerificationFailed(std::io::Error::other(e), box_path.to_path_buf())
     })?;
 
-    let cursor = std::io::Cursor::new(data);
-    let buf_reader = tokio::io::BufReader::new(cursor);
-
-    // Decompress to a hashing sink (no disk writes)
-    let mut hasher = blake3::Hasher::new();
-    let mut hashing_sink = HashingSink::new(&mut hasher);
-
-    record
-        .compression
-        .decompress_write(buf_reader, &mut hashing_sink)
-        .await
+    // Decompress using sans-IO and hash the result
+    let dict = dictionary.as_deref();
+    let decompressed = crate::compression::decompress_bytes_sync(data, record.compression, dict)
         .map_err(|e| ExtractError::VerificationFailed(e, box_path.to_path_buf()))?;
+
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(&decompressed);
 
     let actual_hash = hasher.finalize();
     let matches = actual_hash.as_bytes() == expected_hash;

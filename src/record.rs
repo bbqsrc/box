@@ -2,7 +2,7 @@ use std::borrow::Cow;
 use std::num::NonZeroU64;
 
 use crate::AttrValue;
-use crate::file::{BoxMetadata, RecordIndex};
+use crate::core::{BoxMetadata, RecordIndex};
 use crate::{AttrMap, compression::Compression};
 
 #[derive(Debug, Clone)]

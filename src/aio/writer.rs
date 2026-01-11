@@ -12,22 +12,24 @@ use futures::StreamExt;
 use tokio::fs::{File, OpenOptions};
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt, BufReader, BufWriter};
 
+#[cfg(feature = "xz")]
+use crate::compression::xz::XzCompressor;
+#[cfg(feature = "zstd")]
+use crate::compression::zstd::ZstdCompressor;
 use crate::{
-    compression::{ByteCount, Compression, CompressionConfig},
-    file::meta::AttrType,
+    compression::{
+        ByteCount, Compression, CompressionConfig, StreamStatus, constants::DEFAULT_BLOCK_SIZE,
+    },
+    core::{ArchiveWriter, AttrType, BoxMetadata, RecordIndex},
     hashing::HashingReader,
     header::BoxHeader,
     path::BoxPath,
     record::{
         ChunkedFileRecord, DirectoryRecord, ExternalLinkRecord, FileRecord, LinkRecord, Record,
     },
-    ser::Serialize,
 };
 
-use super::{
-    BoxMetadata, RecordIndex,
-    reader::{read_header, read_trailer},
-};
+use super::reader::{read_header, read_trailer};
 
 /// Where compressed data is stored.
 pub enum CompressedData {
@@ -75,19 +77,20 @@ pub struct CompressedFile {
 /// 8MB buffer for efficient sequential writes
 const WRITE_BUFFER_SIZE: usize = 8 * 1024 * 1024;
 
+/// Async writer for Box archives.
+///
+/// This is a frontend that wraps the sans-IO [`ArchiveWriter`] core,
+/// providing async I/O operations for writing archives.
 pub struct BoxFileWriter {
+    /// The sans-IO core that manages archive metadata
+    pub(crate) core: ArchiveWriter,
+    /// File handle for writing
     pub(crate) file: BufWriter<File>,
+    /// Path to the archive file
     pub(crate) path: PathBuf,
-    pub(crate) header: BoxHeader,
-    pub(crate) meta: BoxMetadata<'static>,
-    /// Cached next write position to avoid O(n) scan per write
-    next_write_pos: u64,
     /// Current file position (to avoid seek-induced buffer flushes)
     file_pos: u64,
     finished: bool,
-    /// Block offsets for chunked files: ([16-byte key], physical_offset)
-    /// Key format: record_index (u64 BE) || logical_offset (u64 BE)
-    block_entries: Vec<([u8; 16], u64)>,
 }
 
 impl Drop for BoxFileWriter {
@@ -106,35 +109,29 @@ impl Drop for BoxFileWriter {
 impl BoxFileWriter {
     async fn write_header(&mut self) -> std::io::Result<()> {
         self.file.seek(SeekFrom::Start(0)).await?;
-        self.header.write(&mut self.file).await?;
+        // Encode header using core's encoder and write
+        let buf = self.core.encode_header();
+        self.file.write_all(&buf).await?;
         self.file_pos = BoxHeader::SIZE as u64;
         Ok(())
     }
 
     async fn finish_inner(&mut self) -> std::io::Result<u64> {
-        // Build FST from existing metadata (None for empty archives)
-        let fst_bytes = self.build_fst()?;
-        self.meta.fst = fst_bytes
-            .as_ref()
-            .and_then(|bytes| box_fst::Fst::new(Cow::Owned(bytes.clone())).ok());
-
-        // Build block FST for chunked files (None if no chunked files)
-        let block_fst_bytes = self.build_block_fst()?;
-        self.meta.block_fst = block_fst_bytes
-            .as_ref()
-            .and_then(|bytes| box_fst::Fst::new(Cow::Owned(bytes.clone())).ok());
-
         // Flush any buffered file data before seeking
         self.file.flush().await?;
 
-        let pos = self.next_write_addr().get();
-        self.header.trailer = NonZeroU64::new(pos);
+        // Finalize the core (builds FSTs and encodes metadata)
+        let (trailer_offset, meta_bytes) = self.core.finish()?;
+
+        // Write the header (now includes trailer offset)
         self.write_header().await?;
+
         // write_header left us at header end, seek to trailer position
-        self.file.seek(SeekFrom::Start(pos)).await?;
-        self.file_pos = pos;
-        self.meta.write(&mut self.file).await?;
-        // FSTs are now written inside meta.write()
+        self.file.seek(SeekFrom::Start(trailer_offset)).await?;
+        self.file_pos = trailer_offset;
+
+        // Write metadata bytes from core
+        self.file.write_all(&meta_bytes).await?;
 
         self.file.flush().await?;
 
@@ -144,105 +141,13 @@ impl BoxFileWriter {
         Ok(new_pos)
     }
 
-    fn build_fst(&self) -> std::io::Result<Option<Vec<u8>>> {
-        // Collect all paths by traversing metadata
-        let mut paths: Vec<(Vec<u8>, u64)> = Vec::new();
-        self.collect_paths(&self.meta.root, &mut Vec::new(), &mut paths);
-
-        // Empty archives have no FST
-        if paths.is_empty() {
-            return Ok(None);
-        }
-
-        // FST requires sorted input
-        paths.sort_unstable_by(|a, b| a.0.cmp(&b.0));
-
-        // Build FST
-        let mut builder = box_fst::FstBuilder::new();
-        for (path, index) in paths {
-            builder
-                .insert(&path, index)
-                .map_err(|e| std::io::Error::other(e.to_string()))?;
-        }
-        builder
-            .finish()
-            .map(Some)
-            .map_err(|e| std::io::Error::other(e.to_string()))
-    }
-
-    fn build_block_fst(&self) -> std::io::Result<Option<Vec<u8>>> {
-        // Block FST for seeking within chunked files.
-        // Keys are 16 bytes: record_index (u64 BE) + logical_offset (u64 BE)
-        // Values are physical offsets within the compressed data.
-
-        if self.block_entries.is_empty() {
-            return Ok(None);
-        }
-
-        // Clone and sort (entries may not be in order if multiple chunked files)
-        let mut blocks = self.block_entries.clone();
-        blocks.sort_unstable_by(|a, b| a.0.cmp(&b.0));
-
-        let mut builder = box_fst::FstBuilder::new();
-        for (key, offset) in blocks {
-            builder
-                .insert(&key, offset)
-                .map_err(|e| std::io::Error::other(e.to_string()))?;
-        }
-        builder
-            .finish()
-            .map(Some)
-            .map_err(|e| std::io::Error::other(e.to_string()))
-    }
-
-    fn collect_paths(
-        &self,
-        entries: &[super::RecordIndex],
-        prefix: &mut Vec<u8>,
-        paths: &mut Vec<(Vec<u8>, u64)>,
-    ) {
-        for &index in entries {
-            let record = self.meta.record(index).unwrap();
-            let name = record.name().as_bytes();
-
-            // Build full path with \x1f separator (BoxPath separator)
-            let path_start = prefix.len();
-            if !prefix.is_empty() {
-                prefix.push(0x1f);
-            }
-            prefix.extend_from_slice(name);
-
-            paths.push((prefix.clone(), index.get()));
-
-            // Recurse into directories
-            if let Record::Directory(dir) = record {
-                self.collect_paths(&dir.entries, prefix, paths);
-            }
-
-            prefix.truncate(path_start);
-        }
-    }
-
     pub async fn finish(mut self) -> std::io::Result<u64> {
         self.finish_inner().await
     }
 
+    #[inline]
     fn next_write_addr(&self) -> NonZeroU64 {
-        let offset = self.next_write_pos;
-
-        let v = match self.header.alignment as u64 {
-            0 => offset,
-            alignment => {
-                let diff = offset % alignment;
-                if diff == 0 {
-                    offset
-                } else {
-                    offset + (alignment - diff)
-                }
-            }
-        };
-
-        NonZeroU64::new(v).unwrap()
+        self.core.next_write_addr()
     }
 
     /// This will open an existing `.box` file for writing, and error if the file is not valid.
@@ -265,24 +170,24 @@ impl BoxFileWriter {
         // Get the file back from the BufReader
         let file = reader.into_inner();
 
-        let next_write_pos = {
-            meta.records
-                .iter()
-                .rev()
-                .find_map(|r| r.as_file())
-                .map(|r| r.data.get() + r.length)
-                .unwrap_or(BoxHeader::SIZE as u64)
-        };
+        // Compute next write position from existing records
+        let next_write_pos = meta
+            .records
+            .iter()
+            .rev()
+            .find_map(|r| r.as_file())
+            .map(|r| r.data.get() + r.length)
+            .unwrap_or(BoxHeader::SIZE as u64);
+
+        // Create the core writer from existing header and metadata
+        let core = ArchiveWriter::from_existing(header, meta, next_write_pos);
 
         let f = BoxFileWriter {
+            core,
             file: BufWriter::with_capacity(WRITE_BUFFER_SIZE, file),
             path: tokio::fs::canonicalize(path.as_ref()).await?,
-            header,
-            meta,
-            next_write_pos,
             file_pos: 0, // Unknown after reading, will seek on first write
             finished: false,
-            block_entries: Vec::new(),
         };
 
         Ok(f)
@@ -333,16 +238,17 @@ impl BoxFileWriter {
             .open(path.as_ref())
             .await?;
 
-        let header_size = BoxHeader::SIZE as u64;
+        // Create core writer from header with empty metadata
+        // For new archives, next write position is right after the header
+        let core =
+            ArchiveWriter::from_existing(header, BoxMetadata::default(), BoxHeader::SIZE as u64);
+
         let mut boxfile = BoxFileWriter {
+            core,
             file: BufWriter::with_capacity(WRITE_BUFFER_SIZE, file),
             path: tokio::fs::canonicalize(path.as_ref()).await?,
-            header,
-            meta: BoxMetadata::default(),
-            next_write_pos: header_size,
             file_pos: 0, // Will be set by write_header
             finished: false,
-            block_entries: Vec::new(),
         };
 
         boxfile.write_header().await?;
@@ -356,16 +262,16 @@ impl BoxFileWriter {
     }
 
     pub fn alignment(&self) -> u32 {
-        self.header.alignment
+        self.core.alignment()
     }
 
     pub fn version(&self) -> u8 {
-        self.header.version
+        self.core.version()
     }
 
     /// Returns true if this archive allows `\xNN` escape sequences in paths.
     pub fn allow_escapes(&self) -> bool {
-        self.header.allow_escapes
+        self.core.allow_escapes()
     }
 
     /// Create a BoxPath using the appropriate sanitization for this archive.
@@ -373,7 +279,7 @@ impl BoxFileWriter {
         &self,
         path: P,
     ) -> std::result::Result<BoxPath<'static>, crate::path::IntoBoxPathError> {
-        if self.header.allow_escapes {
+        if self.core.allow_escapes() {
             BoxPath::new_with_escapes(path)
         } else {
             BoxPath::new(path)
@@ -382,11 +288,11 @@ impl BoxFileWriter {
 
     /// Will return the metadata for the `.box` if it has been provided.
     pub fn metadata(&self) -> &BoxMetadata<'static> {
-        &self.meta
+        self.core.metadata()
     }
 
-    fn iter(&self) -> super::meta::Records<'_, 'static> {
-        super::meta::Records::new(self.metadata(), &self.metadata().root, None)
+    fn iter(&self) -> crate::core::Records<'_, 'static> {
+        crate::core::Records::new(self.metadata(), &self.metadata().root, None)
     }
 
     fn convert_attrs(
@@ -395,15 +301,23 @@ impl BoxFileWriter {
     ) -> std::io::Result<HashMap<usize, Box<[u8]>>> {
         // Set archive-level uid/gid defaults from first file if not already set
         if let Some(uid) = attrs.get("unix.uid") {
-            let uid_key = self.meta.attr_key_or_create("unix.uid", AttrType::Vu32)?;
-            self.meta
+            let uid_key = self
+                .core
+                .meta
+                .attr_key_or_create("unix.uid", AttrType::Vu32)?;
+            self.core
+                .meta
                 .attrs
                 .entry(uid_key)
                 .or_insert_with(|| uid.clone().into_boxed_slice());
         }
         if let Some(gid) = attrs.get("unix.gid") {
-            let gid_key = self.meta.attr_key_or_create("unix.gid", AttrType::Vu32)?;
-            self.meta
+            let gid_key = self
+                .core
+                .meta
+                .attr_key_or_create("unix.gid", AttrType::Vu32)?;
+            self.core
+                .meta
                 .attrs
                 .entry(gid_key)
                 .or_insert_with(|| gid.clone().into_boxed_slice());
@@ -412,13 +326,15 @@ impl BoxFileWriter {
         // Filter out uid/gid that match archive defaults (scoped to release borrows)
         let attrs: Vec<_> = {
             let default_uid = self
+                .core
                 .meta
                 .attr_key("unix.uid")
-                .and_then(|k| self.meta.attrs.get(&k).map(|v| &**v));
+                .and_then(|k| self.core.meta.attrs.get(&k).map(|v| &**v));
             let default_gid = self
+                .core
                 .meta
                 .attr_key("unix.gid")
-                .and_then(|k| self.meta.attrs.get(&k).map(|v| &**v));
+                .and_then(|k| self.core.meta.attrs.get(&k).map(|v| &**v));
 
             attrs
                 .into_iter()
@@ -447,7 +363,7 @@ impl BoxFileWriter {
                 "blake3" => AttrType::U256,
                 _ => AttrType::Bytes,
             };
-            let key = self.meta.attr_key_or_create(&k, attr_type)?;
+            let key = self.core.meta.attr_key_or_create(&k, attr_type)?;
             result.insert(key, v.into_boxed_slice());
         }
         Ok(result)
@@ -476,7 +392,7 @@ impl BoxFileWriter {
                 // Use cached parent index if provided, otherwise do lookup
                 let parent_index = match cached_parent {
                     Some(idx) => idx,
-                    None => self.meta.index(&parent_path).ok_or_else(|| {
+                    None => self.core.meta.index(&parent_path).ok_or_else(|| {
                         std::io::Error::other(format!(
                             "No record found for path: {:?}",
                             parent_path
@@ -489,9 +405,10 @@ impl BoxFileWriter {
                     &parent_index,
                     &record
                 );
-                let new_index = self.meta.insert_record(record);
+                let new_index = self.core.meta.insert_record(record);
                 tracing::trace!("Inserted with index: {:?}", &new_index);
                 let parent = self
+                    .core
                     .meta
                     .record_mut(parent_index)
                     .unwrap()
@@ -502,8 +419,8 @@ impl BoxFileWriter {
             }
             None => {
                 tracing::trace!("Inserting record into root: {:?}", &record);
-                let new_index = self.meta.insert_record(record);
-                self.meta.root.push(new_index);
+                let new_index = self.core.meta.insert_record(record);
+                self.core.meta.root.push(new_index);
                 Ok(new_index)
             }
         }
@@ -534,13 +451,13 @@ impl BoxFileWriter {
     ) -> std::io::Result<()> {
         // First ensure all parent directories exist
         if let Some(parent) = path.parent()
-            && self.meta.index(&parent).is_none()
+            && self.core.meta.index(&parent).is_none()
         {
             self.mkdir_all(parent.into_owned(), HashMap::new())?;
         }
 
         // Now create this directory if it doesn't exist
-        if self.meta.index(&path).is_none() {
+        if self.core.meta.index(&path).is_none() {
             self.mkdir(path, attrs)?;
         }
 
@@ -554,7 +471,7 @@ impl BoxFileWriter {
         attrs: HashMap<String, Vec<u8>>,
     ) -> std::io::Result<RecordIndex> {
         // Validate that the target index exists
-        if self.meta.record(target).is_none() {
+        if self.core.meta.record(target).is_none() {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
                 format!(
@@ -584,7 +501,7 @@ impl BoxFileWriter {
         attrs: HashMap<String, Vec<u8>>,
     ) -> std::io::Result<RecordIndex> {
         // Mark that this archive contains external symlinks
-        self.header.allow_external_symlinks = true;
+        self.core.header.allow_external_symlinks = true;
 
         let record = ExternalLinkRecord {
             name: Cow::Owned(path.filename().to_string()),
@@ -607,7 +524,7 @@ impl BoxFileWriter {
         let byte_count = self.write_data(config, next_addr.get(), value).await?;
 
         // Update cached write position
-        self.next_write_pos = next_addr.get() + byte_count.write;
+        self.core.advance_position(byte_count.write);
 
         let record = FileRecord {
             compression: config.compression,
@@ -620,7 +537,7 @@ impl BoxFileWriter {
 
         let index = self.insert_inner(path, record.into())?;
 
-        Ok(self.meta.record(index).unwrap().as_file().unwrap())
+        Ok(self.core.meta.record(index).unwrap().as_file().unwrap())
     }
 
     /// Insert a file with streaming compression and inline checksum computation.
@@ -655,7 +572,7 @@ impl BoxFileWriter {
             .await?;
 
         // Update cached write position
-        self.next_write_pos = next_addr.get() + byte_count.write;
+        self.core.advance_position(byte_count.write);
 
         let record = FileRecord {
             compression: config.compression,
@@ -670,29 +587,176 @@ impl BoxFileWriter {
 
         // Set checksum attribute if NAME is not empty
         if !C::NAME.is_empty() {
-            let key = self.meta.attr_key_or_create(C::NAME, AttrType::U256)?;
-            self.meta
+            let key = self.core.meta.attr_key_or_create(C::NAME, AttrType::U256)?;
+            self.core
+                .meta
                 .record_mut(index)
                 .unwrap()
                 .attrs_mut()
                 .insert(key, hash_bytes.into_boxed_slice());
         }
 
-        Ok(self.meta.record(index).unwrap().as_file().unwrap())
+        Ok(self.core.meta.record(index).unwrap().as_file().unwrap())
     }
 
     async fn write_data<R: tokio::io::AsyncBufRead + Unpin>(
         &mut self,
         config: &CompressionConfig,
         pos: u64,
-        reader: R,
+        mut reader: R,
     ) -> std::io::Result<ByteCount> {
         // Only seek if we're not already at the right position
         if self.file_pos != pos {
             self.file.seek(SeekFrom::Start(pos)).await?;
             self.file_pos = pos;
         }
-        let byte_count = config.compress(&mut self.file, reader).await?;
+
+        let byte_count = match config.compression {
+            Compression::Stored => {
+                // Direct copy
+                let mut buf = vec![0u8; DEFAULT_BLOCK_SIZE as usize];
+                let mut total_read = 0u64;
+                let mut total_write = 0u64;
+                loop {
+                    let n = reader.read(&mut buf).await?;
+                    if n == 0 {
+                        break;
+                    }
+                    total_read += n as u64;
+                    self.file.write_all(&buf[..n]).await?;
+                    total_write += n as u64;
+                }
+                ByteCount {
+                    read: total_read,
+                    write: total_write,
+                }
+            }
+            #[cfg(feature = "zstd")]
+            Compression::Zstd => {
+                let level = config
+                    .get_i32("level")
+                    .unwrap_or(zstd::DEFAULT_COMPRESSION_LEVEL);
+                let mut compressor = match &config.dictionary {
+                    Some(dict) => ZstdCompressor::with_dictionary(level, dict)?,
+                    None => ZstdCompressor::new(level)?,
+                };
+
+                let mut in_buf = vec![0u8; DEFAULT_BLOCK_SIZE as usize];
+                let mut out_buf = vec![0u8; zstd_safe::compress_bound(DEFAULT_BLOCK_SIZE as usize)];
+                let mut total_read = 0u64;
+                let mut total_write = 0u64;
+
+                // Compress loop
+                loop {
+                    let n = reader.read(&mut in_buf).await?;
+                    if n == 0 {
+                        break;
+                    }
+                    total_read += n as u64;
+
+                    let mut in_pos = 0;
+                    while in_pos < n {
+                        let status = compressor.compress(&in_buf[in_pos..n], &mut out_buf)?;
+                        in_pos += status.bytes_consumed();
+                        if status.bytes_produced() > 0 {
+                            self.file
+                                .write_all(&out_buf[..status.bytes_produced()])
+                                .await?;
+                            total_write += status.bytes_produced() as u64;
+                        }
+                    }
+                }
+
+                // Finish loop
+                loop {
+                    match compressor.finish(&mut out_buf)? {
+                        StreamStatus::Done { bytes_produced, .. } => {
+                            if bytes_produced > 0 {
+                                self.file.write_all(&out_buf[..bytes_produced]).await?;
+                                total_write += bytes_produced as u64;
+                            }
+                            break;
+                        }
+                        StreamStatus::Progress { bytes_produced, .. } => {
+                            if bytes_produced > 0 {
+                                self.file.write_all(&out_buf[..bytes_produced]).await?;
+                                total_write += bytes_produced as u64;
+                            }
+                        }
+                    }
+                }
+
+                ByteCount {
+                    read: total_read,
+                    write: total_write,
+                }
+            }
+            #[cfg(feature = "xz")]
+            Compression::Xz => {
+                let level = config.get_i32("level").unwrap_or(6) as u32;
+                let mut compressor = XzCompressor::new(level)?;
+
+                let mut in_buf = vec![0u8; DEFAULT_BLOCK_SIZE as usize];
+                let mut out_buf = vec![0u8; DEFAULT_BLOCK_SIZE as usize + 1024];
+                let mut total_read = 0u64;
+                let mut total_write = 0u64;
+
+                // Compress loop
+                loop {
+                    let n = reader.read(&mut in_buf).await?;
+                    if n == 0 {
+                        break;
+                    }
+                    total_read += n as u64;
+
+                    let mut in_pos = 0;
+                    while in_pos < n {
+                        let status = compressor.compress(&in_buf[in_pos..n], &mut out_buf)?;
+                        in_pos += status.bytes_consumed();
+                        if status.bytes_produced() > 0 {
+                            self.file
+                                .write_all(&out_buf[..status.bytes_produced()])
+                                .await?;
+                            total_write += status.bytes_produced() as u64;
+                        }
+                        if status.bytes_consumed() == 0 && status.bytes_produced() == 0 {
+                            break;
+                        }
+                    }
+                }
+
+                // Finish loop
+                loop {
+                    match compressor.finish(&mut out_buf)? {
+                        StreamStatus::Done { bytes_produced, .. } => {
+                            if bytes_produced > 0 {
+                                self.file.write_all(&out_buf[..bytes_produced]).await?;
+                                total_write += bytes_produced as u64;
+                            }
+                            break;
+                        }
+                        StreamStatus::Progress { bytes_produced, .. } => {
+                            if bytes_produced > 0 {
+                                self.file.write_all(&out_buf[..bytes_produced]).await?;
+                                total_write += bytes_produced as u64;
+                            }
+                        }
+                    }
+                }
+
+                ByteCount {
+                    read: total_read,
+                    write: total_write,
+                }
+            }
+            Compression::Unknown(id) => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!("Unknown compression id: {}", id),
+                ));
+            }
+        };
+
         self.file_pos += byte_count.write;
         Ok(byte_count)
     }
@@ -712,7 +776,148 @@ impl BoxFileWriter {
             self.file.seek(SeekFrom::Start(pos)).await?;
             self.file_pos = pos;
         }
-        let byte_count = config.compress_ref(&mut self.file, &mut reader).await?;
+
+        let byte_count = match config.compression {
+            Compression::Stored => {
+                let mut buf = vec![0u8; DEFAULT_BLOCK_SIZE as usize];
+                let mut total_read = 0u64;
+                let mut total_write = 0u64;
+                loop {
+                    let n = reader.read(&mut buf).await?;
+                    if n == 0 {
+                        break;
+                    }
+                    total_read += n as u64;
+                    self.file.write_all(&buf[..n]).await?;
+                    total_write += n as u64;
+                }
+                ByteCount {
+                    read: total_read,
+                    write: total_write,
+                }
+            }
+            #[cfg(feature = "zstd")]
+            Compression::Zstd => {
+                let level = config
+                    .get_i32("level")
+                    .unwrap_or(zstd::DEFAULT_COMPRESSION_LEVEL);
+                let mut compressor = match &config.dictionary {
+                    Some(dict) => ZstdCompressor::with_dictionary(level, dict)?,
+                    None => ZstdCompressor::new(level)?,
+                };
+
+                let mut in_buf = vec![0u8; DEFAULT_BLOCK_SIZE as usize];
+                let mut out_buf = vec![0u8; zstd_safe::compress_bound(DEFAULT_BLOCK_SIZE as usize)];
+                let mut total_read = 0u64;
+                let mut total_write = 0u64;
+
+                loop {
+                    let n = reader.read(&mut in_buf).await?;
+                    if n == 0 {
+                        break;
+                    }
+                    total_read += n as u64;
+
+                    let mut in_pos = 0;
+                    while in_pos < n {
+                        let status = compressor.compress(&in_buf[in_pos..n], &mut out_buf)?;
+                        in_pos += status.bytes_consumed();
+                        if status.bytes_produced() > 0 {
+                            self.file
+                                .write_all(&out_buf[..status.bytes_produced()])
+                                .await?;
+                            total_write += status.bytes_produced() as u64;
+                        }
+                    }
+                }
+
+                loop {
+                    match compressor.finish(&mut out_buf)? {
+                        StreamStatus::Done { bytes_produced, .. } => {
+                            if bytes_produced > 0 {
+                                self.file.write_all(&out_buf[..bytes_produced]).await?;
+                                total_write += bytes_produced as u64;
+                            }
+                            break;
+                        }
+                        StreamStatus::Progress { bytes_produced, .. } => {
+                            if bytes_produced > 0 {
+                                self.file.write_all(&out_buf[..bytes_produced]).await?;
+                                total_write += bytes_produced as u64;
+                            }
+                        }
+                    }
+                }
+
+                ByteCount {
+                    read: total_read,
+                    write: total_write,
+                }
+            }
+            #[cfg(feature = "xz")]
+            Compression::Xz => {
+                let level = config.get_i32("level").unwrap_or(6) as u32;
+                let mut compressor = XzCompressor::new(level)?;
+
+                let mut in_buf = vec![0u8; DEFAULT_BLOCK_SIZE as usize];
+                let mut out_buf = vec![0u8; DEFAULT_BLOCK_SIZE as usize + 1024];
+                let mut total_read = 0u64;
+                let mut total_write = 0u64;
+
+                loop {
+                    let n = reader.read(&mut in_buf).await?;
+                    if n == 0 {
+                        break;
+                    }
+                    total_read += n as u64;
+
+                    let mut in_pos = 0;
+                    while in_pos < n {
+                        let status = compressor.compress(&in_buf[in_pos..n], &mut out_buf)?;
+                        in_pos += status.bytes_consumed();
+                        if status.bytes_produced() > 0 {
+                            self.file
+                                .write_all(&out_buf[..status.bytes_produced()])
+                                .await?;
+                            total_write += status.bytes_produced() as u64;
+                        }
+                        if status.bytes_consumed() == 0 && status.bytes_produced() == 0 {
+                            break;
+                        }
+                    }
+                }
+
+                loop {
+                    match compressor.finish(&mut out_buf)? {
+                        StreamStatus::Done { bytes_produced, .. } => {
+                            if bytes_produced > 0 {
+                                self.file.write_all(&out_buf[..bytes_produced]).await?;
+                                total_write += bytes_produced as u64;
+                            }
+                            break;
+                        }
+                        StreamStatus::Progress { bytes_produced, .. } => {
+                            if bytes_produced > 0 {
+                                self.file.write_all(&out_buf[..bytes_produced]).await?;
+                                total_write += bytes_produced as u64;
+                            }
+                        }
+                    }
+                }
+
+                ByteCount {
+                    read: total_read,
+                    write: total_write,
+                }
+            }
+            Compression::Unknown(id) => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!("Unknown compression id: {}", id),
+                ));
+            }
+        };
+
         self.file_pos += byte_count.write;
         // Extract the HashingReader from BufReader and finalize the hash
         let hashing_reader = reader.into_inner();
@@ -745,7 +950,7 @@ impl BoxFileWriter {
 
         // We'll determine the record index after inserting
         // For now, use a placeholder that we'll fix up
-        let record_index_placeholder = (self.meta.records.len() + 1) as u64;
+        let record_index_placeholder = (self.core.meta.records.len() + 1) as u64;
 
         let mut total_compressed: u64 = 0;
         let mut total_decompressed: u64 = 0;
@@ -776,12 +981,7 @@ impl BoxFileWriter {
             let mut key = [0u8; 16];
             key[..8].copy_from_slice(&record_index_placeholder.to_be_bytes());
             key[8..].copy_from_slice(&logical_offset.to_be_bytes());
-            self.block_entries.push((key, physical_offset));
-
-            // Compress and write the block
-            let cursor = std::io::Cursor::new(block_data);
-            let buf_reader = tokio::io::BufReader::new(cursor);
-            let config = CompressionConfig::new(compression);
+            self.core.block_entries.push((key, physical_offset));
 
             // Seek to write position if needed
             let write_pos = data_start.get() + total_compressed;
@@ -790,15 +990,19 @@ impl BoxFileWriter {
                 self.file_pos = write_pos;
             }
 
-            let byte_count = config.compress(&mut self.file, buf_reader).await?;
-            self.file_pos += byte_count.write;
+            // Compress the block (data is already in memory, use sync compression)
+            let config = CompressionConfig::new(compression);
+            let compressed = crate::compression::compress_bytes_sync(block_data, &config)?;
+            self.file.write_all(&compressed).await?;
+            let bytes_written = compressed.len() as u64;
+            self.file_pos += bytes_written;
 
-            total_compressed += byte_count.write;
+            total_compressed += bytes_written;
             total_decompressed += bytes_read as u64;
         }
 
         // Update cached write position
-        self.next_write_pos = data_start.get() + total_compressed;
+        self.core.advance_position(total_compressed);
 
         let record = ChunkedFileRecord {
             compression,
@@ -814,7 +1018,7 @@ impl BoxFileWriter {
 
         // Fix up the block_entries with the correct record index
         let actual_index = index.get();
-        for (key, _) in self.block_entries.iter_mut().rev() {
+        for (key, _) in self.core.block_entries.iter_mut().rev() {
             // Check if this entry has our placeholder
             let stored_index = u64::from_be_bytes(key[..8].try_into().unwrap());
             if stored_index == record_index_placeholder {
@@ -825,7 +1029,13 @@ impl BoxFileWriter {
             }
         }
 
-        Ok(self.meta.record(index).unwrap().as_chunked_file().unwrap())
+        Ok(self
+            .core
+            .meta
+            .record(index)
+            .unwrap()
+            .as_chunked_file()
+            .unwrap())
     }
 
     /// Write a pre-compressed file to the archive.
@@ -882,8 +1092,8 @@ impl BoxFileWriter {
         }
 
         // Update cached write position and file position
-        self.next_write_pos = next_addr.get() + file.compressed_length;
-        self.file_pos = self.next_write_pos;
+        self.core.advance_position(file.compressed_length);
+        self.file_pos = next_addr.get() + file.compressed_length;
 
         // Convert string attrs to internal keys
         let attrs = self.convert_attrs(file.attrs)?;
@@ -902,22 +1112,26 @@ impl BoxFileWriter {
 
         // Set checksum attribute if present
         if let Some((attr_name, hash)) = file.checksum {
-            let key = self.meta.attr_key_or_create(attr_name, AttrType::U256)?;
-            self.meta
+            let key = self
+                .core
+                .meta
+                .attr_key_or_create(attr_name, AttrType::U256)?;
+            self.core
+                .meta
                 .record_mut(index)
                 .unwrap()
                 .attrs_mut()
                 .insert(key, hash.into_boxed_slice());
         }
 
-        Ok(self.meta.record(index).unwrap().as_file().unwrap())
+        Ok(self.core.meta.record(index).unwrap().as_file().unwrap())
     }
 
     pub fn set_attr<S: AsRef<str>>(
         &mut self,
         path: &BoxPath<'_>,
         key: S,
-        value: super::meta::AttrValue<'_>,
+        value: crate::core::AttrValue<'_>,
     ) -> std::io::Result<()> {
         let index = match self.iter().find(|r| &r.path == path) {
             Some(v) => v.index,
@@ -930,9 +1144,9 @@ impl BoxFileWriter {
         };
 
         let attr_type = value.attr_type();
-        let key_idx = self.meta.attr_key_or_create(key.as_ref(), attr_type)?;
+        let key_idx = self.core.meta.attr_key_or_create(key.as_ref(), attr_type)?;
         let bytes = value.as_raw_bytes().into_owned().into_boxed_slice();
-        let record = self.meta.record_mut(index).unwrap();
+        let record = self.core.meta.record_mut(index).unwrap();
         record.attrs_mut().insert(key_idx, bytes);
 
         Ok(())
@@ -941,13 +1155,13 @@ impl BoxFileWriter {
     pub fn set_file_attr<S: AsRef<str>>(
         &mut self,
         key: S,
-        value: super::meta::AttrValue<'_>,
+        value: crate::core::AttrValue<'_>,
     ) -> std::io::Result<()> {
         let attr_type = value.attr_type();
-        let key_idx = self.meta.attr_key_or_create(key.as_ref(), attr_type)?;
+        let key_idx = self.core.meta.attr_key_or_create(key.as_ref(), attr_type)?;
         let bytes = value.as_raw_bytes().into_owned().into_boxed_slice();
 
-        self.meta.attrs.insert(key_idx, bytes);
+        self.core.meta.attrs.insert(key_idx, bytes);
 
         Ok(())
     }
@@ -1053,7 +1267,7 @@ impl BoxFileWriter {
 
             // Ensure parent directories exist
             if let Some(parent) = box_path.parent()
-                && self.meta.index(&parent).is_none()
+                && self.core.meta.index(&parent).is_none()
             {
                 self.mkdir_all(parent, HashMap::new())?;
             }
@@ -1066,13 +1280,13 @@ impl BoxFileWriter {
                     continue;
                 }
             } else if file_type.is_dir() {
-                if self.meta.index(&box_path).is_none() {
+                if self.core.meta.index(&box_path).is_none() {
                     let dir_meta =
                         crate::fs::metadata_to_attrs(&meta, options.timestamps, options.ownership);
                     self.mkdir(box_path, dir_meta)?;
                     stats.dirs_added += 1;
                 }
-            } else if self.meta.index(&box_path).is_none() {
+            } else if self.core.meta.index(&box_path).is_none() {
                 // Regular file
                 let attrs =
                     crate::fs::metadata_to_attrs(&meta, options.timestamps, options.ownership);
@@ -1082,7 +1296,7 @@ impl BoxFileWriter {
 
                 // Ensure parent exists
                 if let Some(parent) = box_path.parent()
-                    && self.meta.index(&parent).is_none()
+                    && self.core.meta.index(&parent).is_none()
                 {
                     self.mkdir_all(parent, HashMap::new())?;
                 }
@@ -1174,14 +1388,14 @@ impl BoxFileWriter {
         let total_files = files.len() as u64;
 
         // Pre-allocate records vector to avoid reallocations during writes
-        self.meta.records.reserve(total_files as usize);
+        self.core.meta.records.reserve(total_files as usize);
 
         // Build parent index cache for O(1) lookups (avoids O(depth) path traversal per file)
         let mut parent_cache: HashMap<BoxPath<'static>, RecordIndex> = HashMap::new();
         for job in &files {
             if let Some(parent) = job.box_path.parent()
                 && !parent_cache.contains_key(&parent)
-                && let Some(idx) = self.meta.index(&parent)
+                && let Some(idx) = self.core.meta.index(&parent)
             {
                 parent_cache.insert(parent.into_owned(), idx);
             }
@@ -1258,10 +1472,10 @@ impl BoxFileWriter {
                     None => {
                         // Parent not in cache - ensure it exists and cache it
                         let parent_owned = parent.into_owned();
-                        if self.meta.index(&parent_owned).is_none() {
+                        if self.core.meta.index(&parent_owned).is_none() {
                             self.mkdir_all(parent_owned.clone(), HashMap::new())?;
                         }
-                        let idx = self.meta.index(&parent_owned);
+                        let idx = self.core.meta.index(&parent_owned);
                         if let Some(idx) = idx {
                             parent_cache.insert(parent_owned, idx);
                         }
@@ -1413,7 +1627,127 @@ pub async fn compress_file<C: Checksum>(
     let (data, compressed_length, decompressed_length) = if file_size <= memory_threshold {
         // Small file: compress to memory
         let mut buffer = Vec::new();
-        let byte_count = config.compress_ref(&mut buffer, &mut buf_reader).await?;
+        let byte_count = match config.compression {
+            Compression::Stored => {
+                let mut read_buf = vec![0u8; DEFAULT_BLOCK_SIZE as usize];
+                let mut total = 0u64;
+                loop {
+                    let n = buf_reader.read(&mut read_buf).await?;
+                    if n == 0 {
+                        break;
+                    }
+                    total += n as u64;
+                    buffer.extend_from_slice(&read_buf[..n]);
+                }
+                ByteCount {
+                    read: total,
+                    write: total,
+                }
+            }
+            #[cfg(feature = "zstd")]
+            Compression::Zstd => {
+                use crate::compression::zstd::ZstdCompressor;
+                let level = config
+                    .get_i32("level")
+                    .unwrap_or(zstd::DEFAULT_COMPRESSION_LEVEL);
+                let mut compressor = match &config.dictionary {
+                    Some(dict) => ZstdCompressor::with_dictionary(level, dict)?,
+                    None => ZstdCompressor::new(level)?,
+                };
+                let mut read_buf = vec![0u8; DEFAULT_BLOCK_SIZE as usize];
+                let mut out_buf = vec![0u8; DEFAULT_BLOCK_SIZE as usize];
+                let mut total_read = 0u64;
+
+                // Compress loop
+                loop {
+                    let n = buf_reader.read(&mut read_buf).await?;
+                    if n == 0 {
+                        break;
+                    }
+                    total_read += n as u64;
+
+                    let mut in_pos = 0;
+                    while in_pos < n {
+                        let status = compressor.compress(&read_buf[in_pos..n], &mut out_buf)?;
+                        let consumed = status.bytes_consumed();
+                        let produced = status.bytes_produced();
+                        if produced > 0 {
+                            buffer.extend_from_slice(&out_buf[..produced]);
+                        }
+                        in_pos += consumed;
+                    }
+                }
+
+                // Finish loop
+                loop {
+                    let status = compressor.finish(&mut out_buf)?;
+                    let produced = status.bytes_produced();
+                    if produced > 0 {
+                        buffer.extend_from_slice(&out_buf[..produced]);
+                    }
+                    if status.is_done() {
+                        break;
+                    }
+                }
+
+                ByteCount {
+                    read: total_read,
+                    write: buffer.len() as u64,
+                }
+            }
+            #[cfg(feature = "xz")]
+            Compression::Xz => {
+                use crate::compression::xz::XzCompressor;
+                let level = config.get_i32("level").unwrap_or(6) as u32;
+                let mut compressor = XzCompressor::new(level)?;
+                let mut read_buf = vec![0u8; DEFAULT_BLOCK_SIZE as usize];
+                let mut out_buf = vec![0u8; DEFAULT_BLOCK_SIZE as usize];
+                let mut total_read = 0u64;
+
+                // Compress loop
+                loop {
+                    let n = buf_reader.read(&mut read_buf).await?;
+                    if n == 0 {
+                        break;
+                    }
+                    total_read += n as u64;
+
+                    let mut in_pos = 0;
+                    while in_pos < n {
+                        let status = compressor.compress(&read_buf[in_pos..n], &mut out_buf)?;
+                        let consumed = status.bytes_consumed();
+                        let produced = status.bytes_produced();
+                        if produced > 0 {
+                            buffer.extend_from_slice(&out_buf[..produced]);
+                        }
+                        in_pos += consumed;
+                    }
+                }
+
+                // Finish loop
+                loop {
+                    let status = compressor.finish(&mut out_buf)?;
+                    let produced = status.bytes_produced();
+                    if produced > 0 {
+                        buffer.extend_from_slice(&out_buf[..produced]);
+                    }
+                    if status.is_done() {
+                        break;
+                    }
+                }
+
+                ByteCount {
+                    read: total_read,
+                    write: buffer.len() as u64,
+                }
+            }
+            Compression::Unknown(id) => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!("Unknown compression ID: {}", id),
+                ));
+            }
+        };
         (
             CompressedData::Memory(buffer),
             byte_count.write,
@@ -1423,7 +1757,133 @@ pub async fn compress_file<C: Checksum>(
         // Large file: compress to temp file
         let temp = tempfile::NamedTempFile::new()?;
         let mut temp_file = tokio::fs::File::create(temp.path()).await?;
-        let byte_count = config.compress_ref(&mut temp_file, &mut buf_reader).await?;
+        let byte_count = match config.compression {
+            Compression::Stored => {
+                let mut read_buf = vec![0u8; DEFAULT_BLOCK_SIZE as usize];
+                let mut total = 0u64;
+                loop {
+                    let n = buf_reader.read(&mut read_buf).await?;
+                    if n == 0 {
+                        break;
+                    }
+                    total += n as u64;
+                    temp_file.write_all(&read_buf[..n]).await?;
+                }
+                ByteCount {
+                    read: total,
+                    write: total,
+                }
+            }
+            #[cfg(feature = "zstd")]
+            Compression::Zstd => {
+                use crate::compression::zstd::ZstdCompressor;
+                let level = config
+                    .get_i32("level")
+                    .unwrap_or(zstd::DEFAULT_COMPRESSION_LEVEL);
+                let mut compressor = match &config.dictionary {
+                    Some(dict) => ZstdCompressor::with_dictionary(level, dict)?,
+                    None => ZstdCompressor::new(level)?,
+                };
+                let mut read_buf = vec![0u8; DEFAULT_BLOCK_SIZE as usize];
+                let mut out_buf = vec![0u8; DEFAULT_BLOCK_SIZE as usize];
+                let mut total_read = 0u64;
+                let mut total_write = 0u64;
+
+                // Compress loop
+                loop {
+                    let n = buf_reader.read(&mut read_buf).await?;
+                    if n == 0 {
+                        break;
+                    }
+                    total_read += n as u64;
+
+                    let mut in_pos = 0;
+                    while in_pos < n {
+                        let status = compressor.compress(&read_buf[in_pos..n], &mut out_buf)?;
+                        let consumed = status.bytes_consumed();
+                        let produced = status.bytes_produced();
+                        if produced > 0 {
+                            temp_file.write_all(&out_buf[..produced]).await?;
+                            total_write += produced as u64;
+                        }
+                        in_pos += consumed;
+                    }
+                }
+
+                // Finish loop
+                loop {
+                    let status = compressor.finish(&mut out_buf)?;
+                    let produced = status.bytes_produced();
+                    if produced > 0 {
+                        temp_file.write_all(&out_buf[..produced]).await?;
+                        total_write += produced as u64;
+                    }
+                    if status.is_done() {
+                        break;
+                    }
+                }
+
+                ByteCount {
+                    read: total_read,
+                    write: total_write,
+                }
+            }
+            #[cfg(feature = "xz")]
+            Compression::Xz => {
+                use crate::compression::xz::XzCompressor;
+                let level = config.get_i32("level").unwrap_or(6) as u32;
+                let mut compressor = XzCompressor::new(level)?;
+                let mut read_buf = vec![0u8; DEFAULT_BLOCK_SIZE as usize];
+                let mut out_buf = vec![0u8; DEFAULT_BLOCK_SIZE as usize];
+                let mut total_read = 0u64;
+                let mut total_write = 0u64;
+
+                // Compress loop
+                loop {
+                    let n = buf_reader.read(&mut read_buf).await?;
+                    if n == 0 {
+                        break;
+                    }
+                    total_read += n as u64;
+
+                    let mut in_pos = 0;
+                    while in_pos < n {
+                        let status = compressor.compress(&read_buf[in_pos..n], &mut out_buf)?;
+                        let consumed = status.bytes_consumed();
+                        let produced = status.bytes_produced();
+                        if produced > 0 {
+                            temp_file.write_all(&out_buf[..produced]).await?;
+                            total_write += produced as u64;
+                        }
+                        in_pos += consumed;
+                    }
+                }
+
+                // Finish loop
+                loop {
+                    let status = compressor.finish(&mut out_buf)?;
+                    let produced = status.bytes_produced();
+                    if produced > 0 {
+                        temp_file.write_all(&out_buf[..produced]).await?;
+                        total_write += produced as u64;
+                    }
+                    if status.is_done() {
+                        break;
+                    }
+                }
+
+                ByteCount {
+                    read: total_read,
+                    write: total_write,
+                }
+            }
+            Compression::Unknown(id) => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!("Unknown compression ID: {}", id),
+                ));
+            }
+        };
         temp_file.flush().await?;
         (
             CompressedData::TempFile(temp),

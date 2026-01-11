@@ -1,36 +1,3 @@
-use std::collections::HashMap;
-use std::num::NonZeroU64;
-
-#[repr(transparent)]
-#[derive(Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Hash)]
-pub struct RecordIndex(NonZeroU64);
-
-impl RecordIndex {
-    pub fn new(value: u64) -> std::io::Result<RecordIndex> {
-        match NonZeroU64::new(value) {
-            Some(v) => Ok(RecordIndex(v)),
-            None => Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "record index must not be zero",
-            )),
-        }
-    }
-
-    pub fn get(self) -> u64 {
-        self.0.get()
-    }
-}
-
-pub(crate) mod meta;
-#[cfg(feature = "reader")]
-pub mod reader;
-#[cfg(feature = "writer")]
-pub mod writer;
-
-pub use self::meta::BoxMetadata;
-
-pub type AttrMap = HashMap<usize, Box<[u8]>>;
-
 #[cfg(test)]
 mod tests {
     use crate::{compression::Compression, *};
@@ -67,7 +34,7 @@ mod tests {
 
         let bf = BoxFileReader::open(filename).await.unwrap();
         let trailer = bf.metadata();
-        println!("{:?}", bf.header);
+        println!("{:?}", bf.core.header);
         println!("{:?}", &trailer);
         let segment = bf
             .memory_map(trailer.records[0].as_file().unwrap())
@@ -150,13 +117,13 @@ mod tests {
         println!("{:#?}", &bf);
 
         let mut buf1 = Vec::new();
-        bf.decompress(bf.meta.records[1].as_file().unwrap(), &mut buf1)
+        bf.decompress(bf.core.meta.records[1].as_file().unwrap(), &mut buf1)
             .await
             .unwrap();
         assert_eq!(v, String::from_utf8(buf1).unwrap());
 
         let mut buf2 = Vec::new();
-        bf.decompress(bf.meta.records[2].as_file().unwrap(), &mut buf2)
+        bf.decompress(bf.core.meta.records[2].as_file().unwrap(), &mut buf2)
             .await
             .unwrap();
         assert_eq!(v, String::from_utf8(buf2).unwrap());

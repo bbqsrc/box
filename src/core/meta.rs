@@ -1,8 +1,44 @@
+use std::collections::HashMap;
+use std::num::NonZeroU64;
 use std::{
     borrow::Cow,
     collections::{BTreeMap, VecDeque},
     fmt::Display,
 };
+
+use crate::Record;
+use crate::path::BoxPath;
+use crate::record::DirectoryRecord;
+
+/// Record index within an archive.
+#[repr(transparent)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Hash)]
+pub struct RecordIndex(NonZeroU64);
+
+impl RecordIndex {
+    pub fn new(value: u64) -> std::io::Result<RecordIndex> {
+        match NonZeroU64::new(value) {
+            Some(v) => Ok(RecordIndex(v)),
+            None => Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "record index must not be zero",
+            )),
+        }
+    }
+
+    pub fn get(self) -> u64 {
+        self.0.get()
+    }
+}
+
+impl From<NonZeroU64> for RecordIndex {
+    fn from(value: NonZeroU64) -> Self {
+        RecordIndex(value)
+    }
+}
+
+/// Map of attribute key indices to raw byte values.
+pub type AttrMap = HashMap<usize, Box<[u8]>>;
 
 /// Attribute type tag stored in the archive
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -59,12 +95,6 @@ pub struct AttrKey {
     pub attr_type: AttrType,
 }
 
-use super::AttrMap;
-use crate::Record;
-use crate::file::RecordIndex;
-use crate::path::BoxPath;
-use crate::record::DirectoryRecord;
-
 #[derive(Default)]
 pub struct BoxMetadata<'a> {
     /// Root "directory" keyed by record indices
@@ -110,6 +140,25 @@ impl std::fmt::Debug for BoxMetadata<'_> {
     }
 }
 
+impl<'a> BoxMetadata<'a> {
+    /// Convert borrowed metadata to owned.
+    pub fn into_owned(self) -> BoxMetadata<'static> {
+        BoxMetadata {
+            root: self.root,
+            records: self.records.into_iter().map(|r| r.into_owned()).collect(),
+            attr_keys: self.attr_keys,
+            attrs: self.attrs,
+            dictionary: self.dictionary,
+            fst: self
+                .fst
+                .and_then(|f| box_fst::Fst::new(Cow::Owned(f.as_bytes().to_vec())).ok()),
+            block_fst: self
+                .block_fst
+                .and_then(|f| box_fst::Fst::new(Cow::Owned(f.as_bytes().to_vec())).ok()),
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct Records<'a, 'b> {
     meta: &'a BoxMetadata<'b>,
@@ -141,6 +190,12 @@ pub struct RecordsItem<'a, 'b> {
     pub(crate) index: RecordIndex,
     pub path: BoxPath<'static>,
     pub record: &'a Record<'b>,
+}
+
+impl RecordsItem<'_, '_> {
+    pub fn index(&self) -> RecordIndex {
+        self.index
+    }
 }
 
 impl<'a, 'b> Iterator for Records<'a, 'b> {

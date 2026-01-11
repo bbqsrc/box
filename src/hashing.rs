@@ -5,19 +5,15 @@ use std::pin::Pin;
 use std::task::{Context, Poll};
 
 use digest::Digest;
-use pin_project_lite::pin_project;
 use tokio::io::{AsyncBufRead, AsyncRead, AsyncWrite, ReadBuf};
 
-pin_project! {
-    /// A reader wrapper that computes a hash digest while data is read through it.
-    ///
-    /// The hash is updated as data passes through `poll_read`.
-    pub struct HashingReader<R, D> {
-        #[pin]
-        inner: R,
-        hasher: D,
-        bytes_read: u64,
-    }
+/// A reader wrapper that computes a hash digest while data is read through it.
+///
+/// The hash is updated as data passes through `poll_read`.
+pub struct HashingReader<R, D> {
+    inner: R,
+    hasher: D,
+    bytes_read: u64,
 }
 
 impl<R, D: Digest + Default> HashingReader<R, D> {
@@ -41,22 +37,21 @@ impl<R, D: Digest + Default> HashingReader<R, D> {
     }
 }
 
-impl<R: AsyncRead, D: Digest> AsyncRead for HashingReader<R, D> {
+impl<R: AsyncRead + Unpin, D: Digest + Unpin> AsyncRead for HashingReader<R, D> {
     fn poll_read(
-        self: Pin<&mut Self>,
+        mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
         buf: &mut ReadBuf<'_>,
     ) -> Poll<Result<()>> {
-        let this = self.project();
         let before = buf.filled().len();
 
-        match this.inner.poll_read(cx, buf) {
+        match Pin::new(&mut self.inner).poll_read(cx, buf) {
             Poll::Ready(Ok(())) => {
                 let after = buf.filled().len();
                 let new_bytes = &buf.filled()[before..after];
                 if !new_bytes.is_empty() {
-                    this.hasher.update(new_bytes);
-                    *this.bytes_read += new_bytes.len() as u64;
+                    self.hasher.update(new_bytes);
+                    self.bytes_read += new_bytes.len() as u64;
                 }
                 Poll::Ready(Ok(()))
             }
@@ -65,28 +60,26 @@ impl<R: AsyncRead, D: Digest> AsyncRead for HashingReader<R, D> {
     }
 }
 
-impl<R: AsyncBufRead, D: Digest> AsyncBufRead for HashingReader<R, D> {
+impl<R: AsyncBufRead + Unpin, D: Digest + Unpin> AsyncBufRead for HashingReader<R, D> {
     fn poll_fill_buf(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<&[u8]>> {
-        self.project().inner.poll_fill_buf(cx)
+        let this = self.get_mut();
+        Pin::new(&mut this.inner).poll_fill_buf(cx)
     }
 
     fn consume(self: Pin<&mut Self>, amt: usize) {
-        let this = self.project();
-        *this.bytes_read += amt as u64;
-        this.inner.consume(amt);
+        let this = self.get_mut();
+        this.bytes_read += amt as u64;
+        Pin::new(&mut this.inner).consume(amt);
     }
 }
 
-pin_project! {
-    /// A writer wrapper that computes a hash digest while data is written through it.
-    ///
-    /// The hash is updated as data passes through `poll_write`.
-    pub struct HashingWriter<W, D> {
-        #[pin]
-        inner: W,
-        hasher: D,
-        bytes_written: u64,
-    }
+/// A writer wrapper that computes a hash digest while data is written through it.
+///
+/// The hash is updated as data passes through `poll_write`.
+pub struct HashingWriter<W, D> {
+    inner: W,
+    hasher: D,
+    bytes_written: u64,
 }
 
 impl<W, D: Digest + Default> HashingWriter<W, D> {
@@ -115,15 +108,17 @@ impl<W, D: Digest + Default> HashingWriter<W, D> {
     }
 }
 
-impl<W: AsyncWrite, D: Digest> AsyncWrite for HashingWriter<W, D> {
-    fn poll_write(self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &[u8]) -> Poll<Result<usize>> {
-        let this = self.project();
-
-        match this.inner.poll_write(cx, buf) {
+impl<W: AsyncWrite + Unpin, D: Digest + Unpin> AsyncWrite for HashingWriter<W, D> {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<Result<usize>> {
+        match Pin::new(&mut self.inner).poll_write(cx, buf) {
             Poll::Ready(Ok(n)) => {
                 if n > 0 {
-                    this.hasher.update(&buf[..n]);
-                    *this.bytes_written += n as u64;
+                    self.hasher.update(&buf[..n]);
+                    self.bytes_written += n as u64;
                 }
                 Poll::Ready(Ok(n))
             }
@@ -131,12 +126,12 @@ impl<W: AsyncWrite, D: Digest> AsyncWrite for HashingWriter<W, D> {
         }
     }
 
-    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<()>> {
-        self.project().inner.poll_flush(cx)
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<()>> {
+        Pin::new(&mut self.inner).poll_flush(cx)
     }
 
-    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<()>> {
-        self.project().inner.poll_shutdown(cx)
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<()>> {
+        Pin::new(&mut self.inner).poll_shutdown(cx)
     }
 }
 

@@ -1,9 +1,14 @@
+//! Deserialization helpers using sans-IO parsing.
+//!
+//! This module provides:
+//! - `DeserializeBorrowed` trait for zero-copy parsing from byte slices
+//! - Sync helper functions for parsing from byte slices
+
 use std::borrow::Cow;
 
 use fastvint::ReadVintExt;
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeek};
 
-use crate::{BoxMetadata, BoxPath, file::RecordIndex};
+use crate::{BoxMetadata, BoxPath, core::RecordIndex};
 
 mod common;
 pub(crate) mod v0;
@@ -61,38 +66,12 @@ pub(super) fn read_u8_slice(data: &[u8], pos: &mut usize) -> std::io::Result<u8>
 }
 
 // ============================================================================
-// READ HELPERS (owned/async)
-// ============================================================================
-
-/// Read a u64 in little-endian format
-pub(super) async fn read_u64_le<R: AsyncRead + Unpin>(reader: &mut R) -> std::io::Result<u64> {
-    let mut buf = [0u8; 8];
-    reader.read_exact(&mut buf).await?;
-    Ok(u64::from_le_bytes(buf))
-}
-
-/// Read a u32 in little-endian format
-pub(super) async fn read_u32_le<R: AsyncRead + Unpin>(reader: &mut R) -> std::io::Result<u32> {
-    let mut buf = [0u8; 4];
-    reader.read_exact(&mut buf).await?;
-    Ok(u32::from_le_bytes(buf))
-}
-
-// ============================================================================
-// DESERIALIZATION TRAITS
+// DESERIALIZATION TRAIT (borrowed)
 // ============================================================================
 
 /// Trait for deserializing from a borrowed byte slice (zero-copy).
 pub(crate) trait DeserializeBorrowed<'a>: Send {
     fn deserialize_borrowed(data: &'a [u8], pos: &mut usize) -> std::io::Result<Self>
-    where
-        Self: Sized;
-}
-
-pub(crate) trait DeserializeOwned: Send {
-    fn deserialize_owned<R: AsyncRead + AsyncSeek + Unpin + Send>(
-        reader: &mut R,
-    ) -> impl std::future::Future<Output = std::io::Result<Self>> + Send
     where
         Self: Sized;
 }
@@ -152,7 +131,7 @@ impl<'a> DeserializeBorrowed<'a> for Vec<RecordIndex> {
 }
 
 // ============================================================================
-// VERSION DISPATCH FUNCTIONS
+// VERSION DISPATCH FUNCTIONS (borrowed)
 // ============================================================================
 
 /// Deserialize BoxMetadata with version awareness (borrowed).
@@ -164,16 +143,5 @@ pub(crate) fn deserialize_metadata_borrowed<'a>(
     match version {
         0 => v0::deserialize_metadata_borrowed(data, pos),
         _ => v1::deserialize_metadata_borrowed(data, pos),
-    }
-}
-
-/// Deserialize BoxMetadata with version awareness (owned).
-pub(crate) async fn deserialize_metadata_owned<R: AsyncRead + AsyncSeek + Unpin + Send>(
-    reader: &mut R,
-    version: u8,
-) -> std::io::Result<BoxMetadata<'static>> {
-    match version {
-        0 => v0::deserialize_metadata_owned(reader).await,
-        _ => v1::deserialize_metadata_owned(reader).await,
     }
 }
