@@ -3,7 +3,7 @@ mod tests {
     use crate::compression::{Compression, CompressionConfig};
     use crate::path::BoxPath;
     use crate::sync::{BoxReader, BoxWriter};
-    use std::collections::HashMap;
+    use crate::compat::HashMap;
 
     fn create_test_box_sync(filename: &str) {
         let _ = std::fs::remove_file(filename);

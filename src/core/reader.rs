@@ -4,6 +4,9 @@
 //! Frontends (async, sync, kernel) use this core for parsing and decompression,
 //! while handling their own I/O operations.
 
+// This module requires std for I/O operations and decompression
+#![cfg(feature = "std")]
+
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 

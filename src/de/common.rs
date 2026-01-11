@@ -1,7 +1,7 @@
 //! Shared deserialization implementations (borrowed only).
 
 use std::borrow::Cow;
-use std::collections::HashMap;
+use crate::compat::HashMap;
 use std::num::NonZeroU64;
 
 use crate::compression::constants::*;

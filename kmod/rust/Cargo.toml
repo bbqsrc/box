@@ -1,0 +1,21 @@
+# Cargo.toml for boxfs kernel module Rust code
+#
+# This is used for development/testing. The actual kernel build
+# uses Kbuild which compiles the Rust code differently.
+
+[package]
+name = "boxfs-kmod"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+path = "lib.rs"
+crate-type = ["staticlib"]
+
+[dependencies]
+box-fst = { path = "../../crates/fst", default-features = false, features = ["alloc"] }
+hashbrown = "0.15"
+
+[features]
+default = ["std"]
+std = []

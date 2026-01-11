@@ -304,6 +304,7 @@ dependencies = [
  "digest",
  "fastvint",
  "futures",
+ "hashbrown",
  "hex",
  "lru",
  "mmap-io",
@@ -331,8 +332,8 @@ version = "0.1.0"
 dependencies = [
  "criterion",
  "fastvint",
+ "hashbrown",
  "rand",
- "thiserror 2.0.17",
 ]
 
 [[package]]
@@ -721,9 +722,6 @@ checksum = "37909eebbb50d72f9059c3b6d82c0463f2ff062c9e95845c43a6c9c0355411be"
 name = "fastvint"
 version = "1.0.0"
 source = "git+https://github.com/bbqsrc/fastvlq?branch=vint#711eda28b6564f814b4bcd9fc41b0db0bda11423"
-dependencies = [
- "tokio",
-]
 
 [[package]]
 name = "find-msvc-tools"

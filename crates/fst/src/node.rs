@@ -1,13 +1,19 @@
-/// Node encoding/decoding - optimized for hot/cold data separation.
-///
-/// Format v1 with hot/cold sections:
-/// ```text
-/// [Header: 24 bytes]
-/// [Node Index: node_count × 8 bytes]  <- (hot_off: u32, cold_off: u32)
-/// [Hot Section]                        <- flags, edge_count, first_bytes, offsets
-/// [Cold Section]                       <- edge labels, outputs, target_node_ids
-/// ```
-use fastvint::{WriteVintExt, decode_vu64_slice};
+//! Node encoding/decoding - optimized for hot/cold data separation.
+//!
+//! Format v1 with hot/cold sections:
+//! ```text
+//! [Header: 24 bytes]
+//! [Node Index: node_count × 8 bytes]  <- (hot_off: u32, cold_off: u32)
+//! [Hot Section]                        <- flags, edge_count, first_bytes, offsets
+//! [Cold Section]                       <- edge labels, outputs, target_node_ids
+//! ```
+
+#[cfg(feature = "alloc")]
+use alloc::vec::Vec;
+
+use fastvint::decode_vu64_slice;
+#[cfg(feature = "std")]
+use fastvint::WriteVintExt;
 
 /// Header constants
 pub const MAGIC: &[u8; 4] = b"BFST";
@@ -39,6 +45,7 @@ impl Header {
 }
 
 /// Write the FST header.
+#[cfg(feature = "alloc")]
 pub fn write_header(header: &Header, buf: &mut Vec<u8>) {
     buf.extend_from_slice(MAGIC);
     buf.push(VERSION);
@@ -84,6 +91,7 @@ fn read_vlq(data: &[u8], pos: &mut usize) -> Option<u64> {
 }
 
 /// Write a VLQ u64 to a buffer.
+#[cfg(feature = "std")]
 fn write_vlq(buf: &mut Vec<u8>, value: u64) -> std::io::Result<()> {
     buf.write_vu64(value)
 }
@@ -284,7 +292,7 @@ impl<'a> NodeRef<'a> {
     #[cfg(all(target_arch = "x86_64", target_feature = "sse2"))]
     #[inline]
     fn find_edge_simd(&self, target: u8) -> Option<EdgeRef<'a>> {
-        use std::arch::x86_64::*;
+        use core::arch::x86_64::*;
 
         unsafe {
             let needle = _mm_set1_epi8(target as i8);
@@ -319,7 +327,7 @@ impl<'a> NodeRef<'a> {
     #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
     #[inline]
     fn find_edge_simd(&self, target: u8) -> Option<EdgeRef<'a>> {
-        use std::arch::aarch64::*;
+        use core::arch::aarch64::*;
 
         unsafe {
             let needle = vdupq_n_u8(target);
@@ -365,6 +373,7 @@ impl<'a> NodeRef<'a> {
 }
 
 /// Intermediate node data for building.
+#[cfg(feature = "std")]
 #[derive(Debug)]
 pub struct NodeData {
     pub is_final: bool,
@@ -373,6 +382,7 @@ pub struct NodeData {
 }
 
 /// Intermediate edge data for building.
+#[cfg(feature = "std")]
 #[derive(Debug)]
 pub struct EdgeData {
     pub label: Vec<u8>,
@@ -381,6 +391,7 @@ pub struct EdgeData {
 }
 
 /// Write a node's hot section data, returns bytes written.
+#[cfg(feature = "std")]
 pub fn write_node_hot(node: &NodeData, buf: &mut Vec<u8>) -> std::io::Result<usize> {
     let start = buf.len();
     let edge_count = node.edges.len();
@@ -425,6 +436,7 @@ pub fn write_node_hot(node: &NodeData, buf: &mut Vec<u8>) -> std::io::Result<usi
 
 /// Write a node's cold section data and update hot section offsets.
 /// Returns bytes written to cold section.
+#[cfg(feature = "std")]
 pub fn write_node_cold(
     node: &NodeData,
     hot_buf: &mut [u8],

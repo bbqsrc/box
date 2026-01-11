@@ -1,3 +1,11 @@
+#[cfg(feature = "alloc")]
+use alloc::{collections::VecDeque, vec::Vec};
+
+use core::cmp::Ordering;
+use core::mem::take;
+
+use hashbrown::{HashMap, HashSet};
+
 use crate::error::BuildError;
 use crate::node::{
     EdgeData, HEADER_SIZE, Header, INDEX_ENTRY_SIZE, INDEXED_THRESHOLD, NodeData, NodeIndex,
@@ -44,9 +52,9 @@ impl FstBuilder {
         // Validate ordering
         if let Some(ref last) = self.last_key {
             match key.cmp(last.as_slice()) {
-                std::cmp::Ordering::Less => return Err(BuildError::OutOfOrder),
-                std::cmp::Ordering::Equal => return Err(BuildError::DuplicateKey),
-                std::cmp::Ordering::Greater => {}
+                Ordering::Less => return Err(BuildError::OutOfOrder),
+                Ordering::Equal => return Err(BuildError::DuplicateKey),
+                Ordering::Greater => {}
             }
         }
 
@@ -182,8 +190,8 @@ impl FstBuilder {
                     Self::insert_into_node(&mut edge.target, &key[common_len..], value);
                 } else {
                     // Need to split the edge
-                    let old_label = std::mem::take(&mut edge.label);
-                    let old_target = std::mem::take(&mut edge.target);
+                    let old_label = take(&mut edge.label);
+                    let old_target = take(&mut edge.target);
 
                     // Create new intermediate node
                     let mut intermediate = BuilderNode::default();
@@ -240,12 +248,12 @@ impl FstBuilder {
     /// Collect nodes breadth-first for better cache locality.
     /// Returns the root node ID (always 0 in BFS order).
     fn collect_nodes(&self, root: &BuilderNode, nodes: &mut Vec<NodeData>) -> u32 {
-        use std::collections::VecDeque;
+        use VecDeque;
 
         // Phase 1: Assign node IDs in BFS order
         // Map from node pointer to assigned ID
-        let mut node_ids: std::collections::HashMap<*const BuilderNode, u32> =
-            std::collections::HashMap::new();
+        let mut node_ids: HashMap<*const BuilderNode, u32> =
+            HashMap::new();
         let mut queue: VecDeque<&BuilderNode> = VecDeque::new();
 
         queue.push_back(root);
@@ -267,8 +275,8 @@ impl FstBuilder {
 
         // Phase 2: Build NodeData in BFS order
         queue.push_back(root);
-        let mut visited: std::collections::HashSet<*const BuilderNode> =
-            std::collections::HashSet::new();
+        let mut visited: HashSet<*const BuilderNode> =
+            HashSet::new();
 
         while let Some(node) = queue.pop_front() {
             let ptr = node as *const BuilderNode;

@@ -5,9 +5,14 @@ edition = "2024"
 license = "Apache-2.0 OR MIT"
 description = "A radix tree that serializes as an FST for fast path lookups"
 
+[features]
+default = ["std"]
+std = ["alloc"]
+alloc = []
+
 [dependencies]
-thiserror.workspace = true
 fastvint.workspace = true
+hashbrown = "0.15"
 
 [dev-dependencies]
 criterion = "0.5"

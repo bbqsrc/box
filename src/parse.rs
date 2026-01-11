@@ -6,11 +6,14 @@
 //! All functions return `(value, bytes_consumed)` on success, allowing the
 //! caller to manage buffer positions.
 
-use std::borrow::Cow;
-
+use crate::compat::{Box, Cow, String, Vec};
 use crate::compression::constants::*;
 use crate::core::RecordIndex;
 use crate::{BoxPath, Compression};
+
+// For to_string() method on &str in no_std
+#[cfg(feature = "alloc")]
+use alloc::string::ToString;
 
 /// Error type for parsing operations.
 #[derive(Debug)]
@@ -25,8 +28,8 @@ pub enum ParseError {
     UnknownRecordType(u8),
 }
 
-impl std::fmt::Display for ParseError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl core::fmt::Display for ParseError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             ParseError::NeedMoreBytes(n) => write!(f, "need {} more bytes", n),
             ParseError::InvalidData(msg) => write!(f, "invalid data: {}", msg),
@@ -36,8 +39,9 @@ impl std::fmt::Display for ParseError {
     }
 }
 
-impl std::error::Error for ParseError {}
+impl core::error::Error for ParseError {}
 
+#[cfg(feature = "std")]
 impl From<ParseError> for std::io::Error {
     fn from(e: ParseError) -> Self {
         match e {
@@ -97,38 +101,14 @@ pub fn parse_vu64(data: &[u8]) -> ParseResult<u64> {
         return Err(ParseError::NeedMoreBytes(1));
     }
 
-    // Determine length from first byte's leading zeros
-    let first = data[0];
-    let len = if first >= 0x80 {
-        1
-    } else if first >= 0x40 {
-        2
-    } else if first >= 0x20 {
-        3
-    } else if first >= 0x10 {
-        4
-    } else if first >= 0x08 {
-        5
-    } else if first >= 0x04 {
-        6
-    } else if first >= 0x02 {
-        7
-    } else if first >= 0x01 {
-        8
-    } else {
-        9
-    };
+    // Use fastvint's slice-based decoding (no_std compatible)
+    let (value, len) = fastvint::decode_vu64_slice(data);
 
     if data.len() < len {
         return Err(ParseError::NeedMoreBytes(len - data.len()));
     }
 
-    // Use fastvint to decode (it handles the offset-based encoding)
-    let mut cursor = std::io::Cursor::new(data);
-    let value = fastvint::ReadVintExt::read_vu64(&mut cursor)
-        .map_err(|_| ParseError::InvalidData("invalid vu64 encoding"))?;
-
-    Ok((value, cursor.position() as usize))
+    Ok((value, len))
 }
 
 /// Parse a zigzag-encoded i64 (Vi64 format).
@@ -137,11 +117,14 @@ pub fn parse_vi64(data: &[u8]) -> ParseResult<i64> {
         return Err(ParseError::NeedMoreBytes(1));
     }
 
-    let mut cursor = std::io::Cursor::new(data);
-    let value = fastvint::ReadVintExt::read_vi64(&mut cursor)
-        .map_err(|_| ParseError::InvalidData("invalid vi64 encoding"))?;
+    // Use fastvint's slice-based decoding (no_std compatible)
+    let (value, len) = fastvint::decode_vi64_slice(data);
 
-    Ok((value, cursor.position() as usize))
+    if data.len() < len {
+        return Err(ParseError::NeedMoreBytes(len - data.len()));
+    }
+
+    Ok((value, len))
 }
 
 // ============================================================================
@@ -168,7 +151,7 @@ pub fn parse_bytes(data: &[u8]) -> ParseResult<&[u8]> {
 /// Returns the string slice and total bytes consumed (including length prefix).
 pub fn parse_str(data: &[u8]) -> ParseResult<&str> {
     let (bytes, consumed) = parse_bytes(data)?;
-    let s = std::str::from_utf8(bytes).map_err(|_| ParseError::InvalidUtf8)?;
+    let s = core::str::from_utf8(bytes).map_err(|_| ParseError::InvalidUtf8)?;
     Ok((s, consumed))
 }
 
@@ -176,7 +159,7 @@ pub fn parse_str(data: &[u8]) -> ParseResult<&str> {
 pub fn parse_boxpath(data: &[u8]) -> ParseResult<BoxPath<'_>> {
     let (s, consumed) = parse_str(data)?;
     let path = BoxPath(Cow::Borrowed(s));
-    path.validate()
+    path.validate_basic()
         .map_err(|_| ParseError::InvalidData("invalid path"))?;
     Ok((path, consumed))
 }
@@ -238,8 +221,8 @@ pub fn parse_record_header(data: &[u8]) -> ParseResult<RecordHeader> {
 /// Parse a RecordIndex (1-based, non-zero Vu64).
 pub fn parse_record_index(data: &[u8]) -> ParseResult<RecordIndex> {
     let (value, consumed) = parse_vu64(data)?;
-    let index = RecordIndex::new(value)
-        .map_err(|_| ParseError::InvalidData("record index must be non-zero"))?;
+    let index = RecordIndex::try_new(value)
+        .ok_or(ParseError::InvalidData("record index must be non-zero"))?;
     Ok((index, consumed))
 }
 
@@ -331,6 +314,8 @@ pub fn parse_header(data: &[u8]) -> ParseResult<HeaderData> {
 
 /// Parse a complete AttrMap (header + all entries).
 pub fn parse_attrmap(data: &[u8]) -> ParseResult<crate::AttrMap> {
+    use crate::compat::HashMap;
+
     let mut pos = 0;
     let ((byte_count, entry_count), header_consumed) = parse_attrmap_header(data)?;
     pos += header_consumed;
@@ -338,7 +323,7 @@ pub fn parse_attrmap(data: &[u8]) -> ParseResult<crate::AttrMap> {
     // byte_count includes the entry_count VLQ but not the byte_count u64 itself
     let _ = byte_count; // Used for validation/skipping in streaming contexts
 
-    let mut map = std::collections::HashMap::with_capacity(entry_count as usize);
+    let mut map = HashMap::with_capacity(entry_count as usize);
     for _ in 0..entry_count {
         let ((key, value), consumed) = parse_attrmap_entry(&data[pos..])?;
         map.insert(key, value.to_vec().into_boxed_slice());
@@ -425,10 +410,10 @@ pub fn parse_attr_keys_v1(data: &[u8]) -> ParseResult<Vec<AttrKey>> {
 // RECORD PARSERS
 // ============================================================================
 
+use crate::compat::NonZeroU64;
 use crate::{
     ChunkedFileRecord, DirectoryRecord, ExternalLinkRecord, FileRecord, LinkRecord, Record,
 };
-use std::num::NonZeroU64;
 
 /// Parse a FileRecord (v1 format - compression already known from header).
 pub fn parse_file_record<'a>(
@@ -461,7 +446,7 @@ pub fn parse_file_record<'a>(
             length,
             decompressed_length,
             data: data_ptr,
-            name: std::borrow::Cow::Borrowed(name),
+            name: Cow::Borrowed(name),
             attrs,
         },
         pos,
@@ -504,7 +489,7 @@ pub fn parse_chunked_file_record<'a>(
             length,
             decompressed_length,
             data: data_ptr,
-            name: std::borrow::Cow::Borrowed(name),
+            name: Cow::Borrowed(name),
             attrs,
         },
         pos,
@@ -523,7 +508,7 @@ pub fn parse_directory_record_v1(data: &[u8]) -> ParseResult<DirectoryRecord<'_>
 
     Ok((
         DirectoryRecord {
-            name: std::borrow::Cow::Borrowed(name),
+            name: Cow::Borrowed(name),
             entries: Vec::new(), // v1: entries not serialized
             attrs,
         },
@@ -546,7 +531,7 @@ pub fn parse_link_record(data: &[u8]) -> ParseResult<LinkRecord<'_>> {
 
     Ok((
         LinkRecord {
-            name: std::borrow::Cow::Borrowed(name),
+            name: Cow::Borrowed(name),
             target,
             attrs,
         },
@@ -569,8 +554,8 @@ pub fn parse_external_link_record(data: &[u8]) -> ParseResult<ExternalLinkRecord
 
     Ok((
         ExternalLinkRecord {
-            name: std::borrow::Cow::Borrowed(name),
-            target: std::borrow::Cow::Borrowed(target),
+            name: Cow::Borrowed(name),
+            target: Cow::Borrowed(target),
             attrs,
         },
         pos,
@@ -621,7 +606,7 @@ pub fn parse_record_v1(data: &[u8]) -> ParseResult<Record<'_>> {
 
 /// Parse an FST (u64 length prefix + FST bytes).
 /// Returns None if length is 0.
-pub fn parse_fst(data: &[u8]) -> ParseResult<Option<box_fst::Fst<std::borrow::Cow<'_, [u8]>>>> {
+pub fn parse_fst(data: &[u8]) -> ParseResult<Option<box_fst::Fst<Cow<'_, [u8]>>>> {
     if data.len() < 8 {
         return Err(ParseError::NeedMoreBytes(8 - data.len()));
     }
@@ -639,7 +624,7 @@ pub fn parse_fst(data: &[u8]) -> ParseResult<Option<box_fst::Fst<std::borrow::Co
     }
 
     let fst_data = &data[8..total];
-    let fst = box_fst::Fst::new(std::borrow::Cow::Borrowed(fst_data))
+    let fst = box_fst::Fst::new(Cow::Borrowed(fst_data))
         .map_err(|_| ParseError::InvalidData("invalid FST data"))?;
 
     Ok((Some(fst), total))

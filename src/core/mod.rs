@@ -22,12 +22,16 @@
 //! ```
 
 pub mod meta;
+#[cfg(feature = "std")]
 mod reader;
+#[cfg(feature = "std")]
 mod writer;
 
 pub use meta::{
     AttrKey, AttrMap, AttrType, AttrValue, BoxMetadata, MetadataIter, RecordIndex, Records,
     RecordsItem,
 };
+#[cfg(feature = "std")]
 pub use reader::ArchiveReader;
+#[cfg(feature = "std")]
 pub use writer::{ArchiveWriter, WriterOptions};

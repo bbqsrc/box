@@ -4,8 +4,11 @@
 //! Frontends (async, sync, kernel) use this core for metadata management,
 //! while handling their own I/O and compression operations.
 
+// This module requires std for encoding and complex operations
+#![cfg(feature = "std")]
+
 use std::borrow::Cow;
-use std::collections::HashMap;
+use crate::compat::HashMap;
 use std::num::NonZeroU64;
 
 use crate::compression::Compression;

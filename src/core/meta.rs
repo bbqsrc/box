@@ -1,10 +1,11 @@
-use std::collections::HashMap;
-use std::num::NonZeroU64;
-use std::{
-    borrow::Cow,
-    collections::{BTreeMap, VecDeque},
-    fmt::Display,
-};
+use crate::compat::{Box, Cow, HashMap, NonZeroU64, String, Vec, VecDeque};
+#[cfg(feature = "std")]
+use crate::compat::BTreeMap;
+use core::fmt::Display;
+
+// For to_string() method on &str in no_std
+#[cfg(feature = "alloc")]
+use alloc::string::ToString;
 
 use crate::Record;
 use crate::path::BoxPath;
@@ -16,16 +17,26 @@ use crate::record::DirectoryRecord;
 pub struct RecordIndex(NonZeroU64);
 
 impl RecordIndex {
-    pub fn new(value: u64) -> std::io::Result<RecordIndex> {
-        match NonZeroU64::new(value) {
-            Some(v) => Ok(RecordIndex(v)),
-            None => Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "record index must not be zero",
-            )),
-        }
+    /// Create a new RecordIndex from a u64 value.
+    /// Returns None if the value is zero.
+    #[inline]
+    pub fn try_new(value: u64) -> Option<RecordIndex> {
+        NonZeroU64::new(value).map(RecordIndex)
     }
 
+    /// Create a new RecordIndex from a u64 value.
+    /// Returns an io::Error if the value is zero.
+    #[cfg(feature = "std")]
+    pub fn new(value: u64) -> std::io::Result<RecordIndex> {
+        Self::try_new(value).ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "record index must not be zero",
+            )
+        })
+    }
+
+    #[inline]
     pub fn get(self) -> u64 {
         self.0.get()
     }
@@ -126,8 +137,8 @@ pub struct BoxMetadata<'a> {
     pub(crate) block_fst: Option<box_fst::Fst<Cow<'a, [u8]>>>,
 }
 
-impl std::fmt::Debug for BoxMetadata<'_> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl core::fmt::Debug for BoxMetadata<'_> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("BoxMetadata")
             .field("root", &self.root)
             .field("records", &self.records)
@@ -251,13 +262,13 @@ impl<'a, 'b> Iterator for FstRecordsIterator<'a, 'b> {
 
     fn next(&mut self) -> Option<Self::Item> {
         for (path_bytes, idx) in self.inner.by_ref() {
-            let Some(index) = RecordIndex::new(idx).ok() else {
+            let Some(index) = RecordIndex::try_new(idx) else {
                 continue;
             };
             let Some(record) = self.meta.record(index) else {
                 continue;
             };
-            let Ok(path_str) = std::str::from_utf8(&path_bytes) else {
+            let Ok(path_str) = core::str::from_utf8(&path_bytes) else {
                 continue;
             };
             return Some(RecordsItem {
@@ -301,6 +312,7 @@ impl<'a, 'b> FindRecord<'a, 'b> {
         query: VecDeque<&'b str>,
         entries: &'a [RecordIndex],
     ) -> FindRecord<'a, 'b> {
+        #[cfg(feature = "std")]
         tracing::trace!("FindRecord query: {:?}", query);
 
         FindRecord {
@@ -317,6 +329,7 @@ impl<'a, 'b> Iterator for FindRecord<'a, 'b> {
     fn next(&mut self) -> Option<Self::Item> {
         let candidate_name = self.query.pop_front()?;
 
+        #[cfg(feature = "std")]
         tracing::trace!("candidate_name: {}", candidate_name);
 
         let result = self
@@ -327,13 +340,15 @@ impl<'a, 'b> Iterator for FindRecord<'a, 'b> {
 
         match result {
             Some(v) => {
+                #[cfg(feature = "std")]
                 tracing::trace!("{:?}", v);
                 if self.query.is_empty() {
                     Some(v.0)
                 } else if let Record::Directory(record) = v.1 {
                     let mut tmp = VecDeque::new();
-                    std::mem::swap(&mut self.query, &mut tmp);
+                    core::mem::swap(&mut self.query, &mut tmp);
                     let result = FindRecord::new(self.meta, tmp, &record.entries).next();
+                    #[cfg(feature = "std")]
                     tracing::trace!("FindRecord result: {:?}", &result);
                     result
                 } else {
@@ -381,7 +396,7 @@ impl<'a> BoxMetadata<'a> {
                 .prefix_iter(&[])
                 .filter(|(key, _)| !key.contains(&0x1f)) // No separator = root level
                 .filter_map(|(_, idx)| {
-                    let index = RecordIndex::new(idx).ok()?;
+                    let index = RecordIndex::try_new(idx)?;
                     self.record(index).map(|r| (index, r))
                 })
                 .collect();
@@ -442,7 +457,7 @@ impl<'a> BoxMetadata<'a> {
         fst.prefix_iter(&prefix)
             .filter(|(key, _)| !key[prefix.len()..].contains(&0x1f))
             .filter_map(|(_, idx)| {
-                let index = RecordIndex::new(idx).ok()?;
+                let index = RecordIndex::try_new(idx)?;
                 self.record(index).map(|r| (index, r))
             })
             .collect()
@@ -454,7 +469,7 @@ impl<'a> BoxMetadata<'a> {
         if let Some(fst) = &self.fst {
             let path_bytes: &[u8] = path.as_ref();
             if let Some(value) = fst.get(path_bytes) {
-                return std::num::NonZeroU64::new(value).map(RecordIndex);
+                return crate::compat::NonZeroU64::new(value).map(RecordIndex);
             }
         }
         // Fall back to directory traversal (O(depth × entries))
@@ -474,7 +489,8 @@ impl<'a> BoxMetadata<'a> {
     #[inline(always)]
     pub fn insert_record(&mut self, record: Record<'a>) -> RecordIndex {
         self.records.push(record);
-        RecordIndex::new(self.records.len() as u64).unwrap()
+        // Safety: len() is always >= 1 after push, so try_new cannot fail
+        RecordIndex::try_new(self.records.len() as u64).unwrap()
     }
 
     #[inline(always)]
@@ -488,6 +504,7 @@ impl<'a> BoxMetadata<'a> {
         }
     }
 
+    #[cfg(feature = "std")]
     pub fn file_attrs(&self) -> BTreeMap<&str, AttrValue<'_>> {
         let mut map = BTreeMap::new();
 
@@ -502,13 +519,14 @@ impl<'a> BoxMetadata<'a> {
     }
 
     /// Parse raw bytes into AttrValue based on the stored type
+    #[cfg(feature = "std")]
     pub fn parse_attr_value<'b>(&self, v: &'b [u8], attr_type: AttrType) -> AttrValue<'b> {
         match attr_type {
             AttrType::Bytes => AttrValue::Bytes(v),
-            AttrType::String => std::str::from_utf8(v)
+            AttrType::String => core::str::from_utf8(v)
                 .map(AttrValue::String)
                 .unwrap_or(AttrValue::Bytes(v)),
-            AttrType::Json => std::str::from_utf8(v)
+            AttrType::Json => core::str::from_utf8(v)
                 .map(|s| {
                     serde_json::from_str(s)
                         .map(AttrValue::Json)
@@ -599,6 +617,7 @@ impl<'a> BoxMetadata<'a> {
 
     /// O(n) lookup or insert of attribute key index with type.
     /// Returns an error if the key exists with a different type.
+    #[cfg(feature = "std")]
     #[inline(always)]
     pub fn attr_key_or_create(&mut self, key: &str, attr_type: AttrType) -> std::io::Result<usize> {
         if let Some(idx) = self.attr_key(key) {
@@ -643,7 +662,7 @@ impl<'a> BoxMetadata<'a> {
         if let Some(fst) = &self.fst {
             for (path_bytes, idx) in fst.prefix_iter(&[]) {
                 if idx == target.get()
-                    && let Ok(path_str) = std::str::from_utf8(&path_bytes)
+                    && let Ok(path_str) = core::str::from_utf8(&path_bytes)
                 {
                     return Some(BoxPath(Cow::Owned(path_str.to_string())));
                 }
@@ -760,6 +779,7 @@ impl<'a> BoxMetadata<'a> {
 pub enum AttrValue<'a> {
     Bytes(&'a [u8]),
     String(&'a str),
+    #[cfg(feature = "std")]
     Json(serde_json::Value),
     U8(u8),
     Vi32(i32),
@@ -778,6 +798,7 @@ impl AttrValue<'_> {
         match self {
             AttrValue::Bytes(_) => AttrType::Bytes,
             AttrValue::String(_) => AttrType::String,
+            #[cfg(feature = "std")]
             AttrValue::Json(_) => AttrType::Json,
             AttrValue::U8(_) => AttrType::U8,
             AttrValue::Vi32(_) => AttrType::Vi32,
@@ -815,6 +836,7 @@ impl<'a> From<&'a [u8]> for AttrValue<'a> {
     }
 }
 
+#[cfg(feature = "std")]
 impl From<serde_json::Value> for AttrValue<'static> {
     fn from(v: serde_json::Value) -> Self {
         AttrValue::Json(v)
@@ -851,8 +873,10 @@ impl From<u64> for AttrValue<'static> {
     }
 }
 
+#[cfg(feature = "std")]
 impl AttrValue<'_> {
     pub fn as_raw_bytes(&self) -> Cow<'_, [u8]> {
+        use crate::compat::vec;
         match self {
             AttrValue::Bytes(x) => Cow::Borrowed(*x),
             AttrValue::String(x) => Cow::Borrowed(x.as_bytes()),
@@ -878,19 +902,20 @@ impl AttrValue<'_> {
 }
 
 impl Display for AttrValue<'_> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             AttrValue::Bytes(bytes) => {
                 let mut bytes = bytes.iter();
                 if let Some(v) = bytes.next() {
-                    f.write_fmt(format_args!("{:02x}", v))?;
+                    write!(f, "{:02x}", v)?;
                 }
                 for b in bytes {
-                    f.write_fmt(format_args!(" {:02x}", b))?;
+                    write!(f, " {:02x}", b)?;
                 }
                 Ok(())
             }
             AttrValue::String(v) => f.write_str(v),
+            #[cfg(feature = "std")]
             AttrValue::Json(value) => {
                 let v = serde_json::to_string_pretty(value).unwrap();
                 f.write_str(&v)
@@ -902,13 +927,13 @@ impl Display for AttrValue<'_> {
             AttrValue::Vu64(v) => write!(f, "{}", v),
             AttrValue::U128(bytes) => {
                 for b in bytes.iter() {
-                    f.write_fmt(format_args!("{:02x}", b))?;
+                    write!(f, "{:02x}", b)?;
                 }
                 Ok(())
             }
             AttrValue::U256(bytes) => {
                 for b in bytes.iter() {
-                    f.write_fmt(format_args!("{:02x}", b))?;
+                    write!(f, "{:02x}", b)?;
                 }
                 Ok(())
             }

@@ -1,0 +1,3 @@
+# SPDX-License-Identifier: GPL-2.0-only
+
+obj-$(CONFIG_BOXFS_FS) += boxfs_rust.o

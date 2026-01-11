@@ -11,36 +11,70 @@ repository = "https://github.com/bbqsrc/box"
 crate-type = ["rlib"]
 
 [dependencies]
+# Core dependencies (no_std compatible)
 box-fst.workspace = true
 byteorder.workspace = true
-mmap-io.workspace = true
-tokio = { workspace = true, features = ["fs", "io-util", "sync"] }
-tokio-util = { workspace = true, features = ["compat"] }
-async-walkdir.workspace = true
-futures.workspace = true
-blake3 = { workspace = true, features = ["traits-preview", "rayon", "mmap"] }
-hex.workspace = true
-pathdiff.workspace = true
-unic-normal.workspace = true
-unic-ucd.workspace = true
-relative-path.workspace = true
-fastvint = { workspace = true, features = ["async-tokio"] }
-tracing.workspace = true
-serde_json.workspace = true
-lru.workspace = true
-thiserror.workspace = true
-digest.workspace = true
-sysinfo.workspace = true
-tempfile.workspace = true
-string-interner.workspace = true
+fastvint.workspace = true
+hashbrown = "0.15"
+
+# Std-only dependencies
+mmap-io = { workspace = true, optional = true }
+tokio = { workspace = true, features = ["fs", "io-util", "sync"], optional = true }
+tokio-util = { workspace = true, features = ["compat"], optional = true }
+async-walkdir = { workspace = true, optional = true }
+futures = { workspace = true, optional = true }
+blake3 = { workspace = true, features = ["traits-preview", "rayon", "mmap"], optional = true }
+hex = { workspace = true, optional = true }
+pathdiff = { workspace = true, optional = true }
+unic-normal = { workspace = true, optional = true }
+unic-ucd = { workspace = true, optional = true }
+relative-path = { workspace = true, optional = true }
+tracing = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }
+lru = { workspace = true, optional = true }
+thiserror = { workspace = true, optional = true }
+digest = { workspace = true, optional = true }
+sysinfo = { workspace = true, optional = true }
+tempfile = { workspace = true, optional = true }
+string-interner = { workspace = true, optional = true }
 xattr = { workspace = true, optional = true }
 zstd = { workspace = true, optional = true }
 zstd-safe = { workspace = true, optional = true }
 xz2 = { workspace = true, optional = true }
 
 [features]
-default = ["xz", "zstd", "writer", "reader", "xattr"]
-reader = []
+default = ["std", "xz", "zstd", "writer", "reader", "xattr"]
+
+# no_std support
+std = [
+    "alloc",
+    "box-fst/std",
+    "dep:mmap-io",
+    "dep:tokio",
+    "dep:tokio-util",
+    "dep:async-walkdir",
+    "dep:futures",
+    "dep:blake3",
+    "dep:hex",
+    "dep:pathdiff",
+    "dep:unic-normal",
+    "dep:unic-ucd",
+    "dep:relative-path",
+    "dep:tracing",
+    "dep:serde_json",
+    "dep:lru",
+    "dep:thiserror",
+    "dep:digest",
+    "dep:sysinfo",
+    "dep:tempfile",
+    "dep:string-interner",
+]
+alloc = ["box-fst/alloc"]
+
+# Minimal kernel build (core parsing only)
+kernel = ["alloc"]
+
+reader = ["std"]
 writer = ["reader"]
 
 xz = ["dep:xz2"]
@@ -50,6 +84,7 @@ xattr = ["dep:xattr"]
 [workspace]
 resolver = "3"
 members = ["cli", "crates/*"]
+exclude = ["kmod/rust"]
 
 [workspace.dependencies]
 # Shared dependencies
@@ -120,5 +155,5 @@ block2 = "0.6"
 
 # Workspace crates
 box-format = { version = "0.4.0", path = "." }
-box-fst = { version = "0.1.0", path = "crates/fst" }
+box-fst = { version = "0.1.0", path = "crates/fst", default-features = false }
 mimalloc = { version = "0.1", features = ["v3"] }

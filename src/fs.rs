@@ -1,6 +1,6 @@
 //! Filesystem utilities for extracting metadata as archive attributes.
 
-use std::collections::HashMap;
+use crate::compat::HashMap;
 
 use fastvint::Vi64;
 

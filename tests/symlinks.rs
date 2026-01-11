@@ -3,8 +3,7 @@
 //! These tests verify that symlinks are correctly stored as RecordIndex references
 //! and that extraction computes the correct relative paths.
 
-use box_format::{BoxFileWriter, BoxPath, Compression, CompressionConfig, RecordIndex};
-use std::collections::HashMap;
+use box_format::{BoxFileWriter, BoxPath, Compression, CompressionConfig, HashMap, RecordIndex};
 use tempfile::TempDir;
 use tokio::fs;
 

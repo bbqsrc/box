@@ -1,9 +1,9 @@
-use std::{
-    borrow::Cow,
-    fmt,
-    path::{Path, PathBuf},
-};
+use crate::compat::Cow;
+use core::fmt;
+#[cfg(feature = "std")]
+use std::path::{Path, PathBuf};
 
+#[cfg(feature = "std")]
 use unic_ucd::GeneralCategory;
 
 mod error;
@@ -30,6 +30,7 @@ pub const PATH_BOX_SEP: &str = "\x1f";
 #[repr(transparent)]
 pub struct BoxPath<'a>(pub(crate) Cow<'a, str>);
 
+#[cfg(feature = "std")]
 pub fn sanitize<P: AsRef<Path>>(path: P) -> Option<Vec<String>> {
     use std::path::Component;
     use unic_normal::StrNormalForm;
@@ -64,6 +65,7 @@ pub fn sanitize<P: AsRef<Path>>(path: P) -> Option<Vec<String>> {
 }
 
 /// Check if a character is allowed in a filename (used for both direct chars and decoded escapes).
+#[cfg(feature = "std")]
 fn is_char_allowed(c: char) -> bool {
     let cat = GeneralCategory::of(c);
     // Reject: backslash, control chars, separators (except space)
@@ -73,6 +75,7 @@ fn is_char_allowed(c: char) -> bool {
 /// Validate a path component that may contain `\xNN` escape sequences.
 /// Returns true if the component is valid (all escapes decode to allowed chars,
 /// and non-escape chars are also allowed).
+#[cfg(feature = "std")]
 fn validate_component_with_escapes(s: &str) -> bool {
     let bytes = s.as_bytes();
     let mut i = 0;
@@ -112,6 +115,7 @@ fn validate_component_with_escapes(s: &str) -> bool {
 
 /// Sanitize a path, allowing `\xNN` escape sequences.
 /// Used when the archive has the allow_escapes flag set.
+#[cfg(feature = "std")]
 pub fn sanitize_with_escapes<P: AsRef<Path>>(path: P) -> Option<Vec<String>> {
     use std::path::Component;
     use unic_normal::StrNormalForm;
@@ -145,6 +149,7 @@ impl AsRef<[u8]> for BoxPath<'_> {
     }
 }
 
+#[cfg(feature = "std")]
 impl BoxPath<'static> {
     pub fn new<P: AsRef<Path>>(path: P) -> std::result::Result<BoxPath<'static>, IntoBoxPathError> {
         let out = sanitize(&path).ok_or(IntoBoxPathError::UnrepresentableStr)?;
@@ -172,6 +177,46 @@ impl BoxPath<'static> {
 }
 
 impl<'a> BoxPath<'a> {
+    /// Basic validation of a deserialized BoxPath (no_std compatible).
+    /// Checks that:
+    /// - Path is not empty
+    /// - No empty components (consecutive separators, leading/trailing separator)
+    /// - No `.` or `..` components
+    /// - No `/` or `\` characters within components
+    ///
+    /// For full validation including control character checks, use `validate()` (std only).
+    pub fn validate_basic(&self) -> Result<(), &'static str> {
+        if self.0.is_empty() {
+            return Err("empty path");
+        }
+
+        // Check for leading/trailing separator
+        if self.0.starts_with(PATH_BOX_SEP) || self.0.ends_with(PATH_BOX_SEP) {
+            return Err("path has empty component (leading/trailing separator)");
+        }
+
+        for component in self.0.split(PATH_BOX_SEP) {
+            // Empty component (consecutive separators)
+            if component.is_empty() {
+                return Err("path has empty component");
+            }
+
+            // Dot and dot-dot components
+            if component == "." || component == ".." {
+                return Err("path contains . or .. component");
+            }
+
+            // Check for slash/backslash
+            for c in component.chars() {
+                if c == '/' || c == '\\' {
+                    return Err("path component contains slash or backslash");
+                }
+            }
+        }
+
+        Ok(())
+    }
+
     /// Validate a deserialized BoxPath.
     /// Checks that:
     /// - Path is not empty
@@ -179,6 +224,7 @@ impl<'a> BoxPath<'a> {
     /// - No `.` or `..` components
     /// - No `/` or `\` characters within components
     /// - No control characters within components (except separators)
+    #[cfg(feature = "std")]
     pub fn validate(&self) -> std::io::Result<()> {
         if self.0.is_empty() {
             return Err(std::io::Error::new(
@@ -234,6 +280,7 @@ impl<'a> BoxPath<'a> {
         Ok(())
     }
 
+    #[cfg(feature = "std")]
     pub fn to_path_buf(&self) -> PathBuf {
         PathBuf::from(self.to_string())
     }
@@ -260,6 +307,7 @@ impl<'a> BoxPath<'a> {
             .any(|(a, b)| a != b)
     }
 
+    #[cfg(feature = "std")]
     pub fn join<P: AsRef<Path>>(
         &self,
         tail: P,
@@ -268,6 +316,7 @@ impl<'a> BoxPath<'a> {
     }
 
     pub(crate) fn join_unchecked(&self, tail: &str) -> BoxPath<'static> {
+        use crate::compat::String;
         let mut s = String::with_capacity(self.0.len() + 1 + tail.len());
         s.push_str(&self.0);
         s.push_str(PATH_BOX_SEP);
@@ -275,7 +324,7 @@ impl<'a> BoxPath<'a> {
         BoxPath(Cow::Owned(s))
     }
 
-    pub fn iter(&self) -> std::str::Split<'_, &str> {
+    pub fn iter(&self) -> core::str::Split<'_, &str> {
         self.0.split(PATH_BOX_SEP)
     }
 

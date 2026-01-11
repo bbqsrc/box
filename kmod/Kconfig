@@ -1,0 +1,20 @@
+# SPDX-License-Identifier: GPL-2.0-only
+
+config BOXFS_FS
+	tristate "Box archive filesystem support"
+	depends on RUST
+	help
+	  Box is a read-only archive format optimized for fast random access
+	  and efficient storage. This filesystem allows mounting .box archives
+	  directly.
+
+	  Box archives support:
+	  - Zstd and XZ compression
+	  - Extended attributes
+	  - Symlinks (internal and external)
+	  - Efficient directory indexing via FST
+
+	  To compile this as a module, choose M here: the module will be
+	  called boxfs.
+
+	  If unsure, say N.

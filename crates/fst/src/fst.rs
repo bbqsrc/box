@@ -1,3 +1,6 @@
+#[cfg(feature = "alloc")]
+use alloc::vec::Vec;
+
 use crate::error::FstError;
 use crate::node::{HEADER_SIZE, Header, INDEX_ENTRY_SIZE, NodeIndex, NodeRef, read_header};
 
@@ -6,11 +9,11 @@ use crate::node::{HEADER_SIZE, Header, INDEX_ENTRY_SIZE, NodeIndex, NodeRef, rea
 fn prefetch_read(ptr: *const u8) {
     #[cfg(target_arch = "aarch64")]
     unsafe {
-        std::arch::asm!("prfm pldl1keep, [{ptr}]", ptr = in(reg) ptr, options(nostack, preserves_flags));
+        core::arch::asm!("prfm pldl1keep, [{ptr}]", ptr = in(reg) ptr, options(nostack, preserves_flags));
     }
     #[cfg(all(target_arch = "x86_64", target_feature = "sse"))]
     unsafe {
-        std::arch::x86_64::_mm_prefetch(ptr as *const i8, std::arch::x86_64::_MM_HINT_T0);
+        core::arch::x86_64::_mm_prefetch(ptr as *const i8, core::arch::x86_64::_MM_HINT_T0);
     }
 }
 
@@ -38,7 +41,7 @@ fn fast_eq(a: &[u8], b: &[u8]) -> bool {
 #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
 #[inline]
 fn fast_eq_simd_neon(a: &[u8], b: &[u8]) -> bool {
-    use std::arch::aarch64::*;
+    use core::arch::aarch64::*;
 
     unsafe {
         let mut i = 0;
@@ -64,7 +67,7 @@ fn fast_eq_simd_neon(a: &[u8], b: &[u8]) -> bool {
 #[cfg(all(target_arch = "x86_64", target_feature = "sse2"))]
 #[inline]
 fn fast_eq_simd_sse2(a: &[u8], b: &[u8]) -> bool {
-    use std::arch::x86_64::*;
+    use core::arch::x86_64::*;
 
     unsafe {
         let mut i = 0;

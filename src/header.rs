@@ -1,4 +1,4 @@
-use std::num::NonZeroU64;
+use crate::compat::NonZeroU64;
 
 /// Box archive header (32 bytes on disk).
 #[derive(Debug, Clone)]

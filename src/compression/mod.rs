@@ -15,8 +15,10 @@
 //! For simple use cases with complete buffers:
 //! - [`compress_bytes_sync`] / [`decompress_bytes_sync`]
 
+#[cfg(feature = "std")]
 use std::collections::HashMap;
-use std::fmt;
+use core::fmt;
+#[cfg(feature = "std")]
 use std::io::Result;
 
 #[cfg(feature = "xz")]
@@ -160,6 +162,7 @@ impl fmt::Debug for Compression {
 }
 
 /// Configuration for compression algorithms with optional parameters.
+#[cfg(feature = "std")]
 #[derive(Clone, Debug, Default)]
 pub struct CompressionConfig {
     pub compression: Compression,
@@ -168,6 +171,7 @@ pub struct CompressionConfig {
     pub dictionary: Option<Vec<u8>>,
 }
 
+#[cfg(feature = "std")]
 impl CompressionConfig {
     pub fn new(compression: Compression) -> Self {
         Self {
@@ -226,6 +230,7 @@ impl CompressionConfig {
 // ============================================================================
 
 /// Compress a byte slice synchronously.
+#[cfg(feature = "std")]
 pub fn compress_bytes_sync(data: &[u8], config: &CompressionConfig) -> Result<Vec<u8>> {
     match config.compression {
         Compression::Stored => Ok(data.to_vec()),
@@ -254,6 +259,7 @@ pub fn compress_bytes_sync(data: &[u8], config: &CompressionConfig) -> Result<Ve
 }
 
 /// Decompress a byte slice synchronously.
+#[cfg(feature = "std")]
 pub fn decompress_bytes_sync(
     data: &[u8],
     compression: Compression,

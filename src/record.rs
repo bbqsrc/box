@@ -1,6 +1,7 @@
-use std::borrow::Cow;
-use std::num::NonZeroU64;
+use crate::compat::{Cow, String, Vec};
+use crate::compat::NonZeroU64;
 
+#[cfg(feature = "std")]
 use crate::AttrValue;
 use crate::core::{BoxMetadata, RecordIndex};
 use crate::{AttrMap, compression::Compression};
@@ -113,6 +114,7 @@ impl<'a> Record<'a> {
     }
 
     /// Get a typed attribute value.
+    #[cfg(feature = "std")]
     #[inline(always)]
     pub fn attr_value<S: AsRef<str>>(
         &self,
@@ -251,11 +253,13 @@ pub struct DirectoryRecord<'a> {
     pub attrs: AttrMap,
 }
 
+#[cfg(feature = "alloc")]
 impl DirectoryRecord<'static> {
     pub fn new(name: String) -> DirectoryRecord<'static> {
+        use crate::compat::Vec;
         DirectoryRecord {
             name: Cow::Owned(name),
-            entries: vec![],
+            entries: Vec::new(),
             attrs: AttrMap::new(),
         }
     }

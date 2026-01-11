@@ -1,31 +1,60 @@
-use thiserror::Error;
+use core::fmt;
 
-#[derive(Debug, Error)]
+#[derive(Debug)]
 pub enum BuildError {
-    #[error("keys must be inserted in lexicographic order")]
     OutOfOrder,
-
-    #[error("duplicate key")]
     DuplicateKey,
-
-    #[error("FST is empty (no keys inserted)")]
     Empty,
-
-    #[error("I/O error: {0}")]
-    Io(#[from] std::io::Error),
+    #[cfg(feature = "std")]
+    Io(std::io::Error),
 }
 
-#[derive(Debug, Error)]
+impl fmt::Display for BuildError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            BuildError::OutOfOrder => write!(f, "keys must be inserted in lexicographic order"),
+            BuildError::DuplicateKey => write!(f, "duplicate key"),
+            BuildError::Empty => write!(f, "FST is empty (no keys inserted)"),
+            #[cfg(feature = "std")]
+            BuildError::Io(e) => write!(f, "I/O error: {}", e),
+        }
+    }
+}
+
+impl core::error::Error for BuildError {
+    fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
+        match self {
+            #[cfg(feature = "std")]
+            BuildError::Io(e) => Some(e),
+            _ => None,
+        }
+    }
+}
+
+#[cfg(feature = "std")]
+impl From<std::io::Error> for BuildError {
+    fn from(e: std::io::Error) -> Self {
+        BuildError::Io(e)
+    }
+}
+
+#[derive(Debug)]
 pub enum FstError {
-    #[error("invalid magic bytes")]
     InvalidMagic,
-
-    #[error("unsupported version: {0}")]
     UnsupportedVersion(u8),
-
-    #[error("data too short")]
     TooShort,
-
-    #[error("corrupted data")]
     Corrupted,
 }
+
+impl fmt::Display for FstError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            FstError::InvalidMagic => write!(f, "invalid magic bytes"),
+            FstError::UnsupportedVersion(v) => write!(f, "unsupported version: {}", v),
+            FstError::TooShort => write!(f, "data too short"),
+            FstError::Corrupted => write!(f, "corrupted data"),
+        }
+    }
+}
+
+impl core::error::Error for FstError {}
