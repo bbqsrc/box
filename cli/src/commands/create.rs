@@ -199,7 +199,7 @@ pub async fn run(args: CreateArgs) -> Result<()> {
                 && bf.metadata().index(&parent).is_none()
             {
                 let parent_owned = parent.into_owned();
-                bf.mkdir_all(parent_owned.clone(), std::collections::HashMap::new())
+                bf.mkdir_all(parent_owned.clone(), Default::default())
                     .map_err(|source| Error::CreateDirectory {
                         path: parent_owned,
                         source,
@@ -242,7 +242,7 @@ pub async fn run(args: CreateArgs) -> Result<()> {
             && bf.metadata().index(&parent).is_none()
         {
             let parent_owned = parent.into_owned();
-            bf.mkdir_all(parent_owned.clone(), std::collections::HashMap::new())
+            bf.mkdir_all(parent_owned.clone(), Default::default())
                 .map_err(|source| Error::CreateDirectory {
                     path: parent_owned.clone(),
                     source,
@@ -313,7 +313,7 @@ pub async fn run(args: CreateArgs) -> Result<()> {
                 && bf.metadata().index(&parent).is_none()
             {
                 let parent_owned = parent.into_owned();
-                bf.mkdir_all(parent_owned.clone(), std::collections::HashMap::new())
+                bf.mkdir_all(parent_owned.clone(), Default::default())
                     .map_err(|source| Error::CreateDirectory {
                         path: parent_owned.clone(),
                         source,
@@ -379,7 +379,7 @@ pub async fn run(args: CreateArgs) -> Result<()> {
                 && bf.metadata().index(&parent).is_none()
             {
                 let parent_owned = parent.into_owned();
-                bf.mkdir_all(parent_owned.clone(), std::collections::HashMap::new())
+                bf.mkdir_all(parent_owned.clone(), Default::default())
                     .map_err(|source| Error::CreateDirectory {
                         path: parent_owned.clone(),
                         source,

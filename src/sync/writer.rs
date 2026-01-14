@@ -237,25 +237,27 @@ impl BoxWriter {
 
     fn convert_attrs(
         &mut self,
-        attrs: HashMap<String, Vec<u8>>,
+        attrs_map: HashMap<String, Vec<u8>>,
     ) -> std::io::Result<HashMap<usize, Box<[u8]>>> {
+        use crate::attrs;
+
         // Set archive-level uid/gid defaults from first file if not already set
-        if let Some(uid) = attrs.get("unix.uid") {
+        if let Some(uid) = attrs_map.get(attrs::UNIX_UID) {
             let uid_key = self
                 .core
                 .meta
-                .attr_key_or_create("unix.uid", AttrType::Vu32)?;
+                .attr_key_or_create(attrs::UNIX_UID, AttrType::Vu32)?;
             self.core
                 .meta
                 .attrs
                 .entry(uid_key)
                 .or_insert_with(|| uid.clone().into_boxed_slice());
         }
-        if let Some(gid) = attrs.get("unix.gid") {
+        if let Some(gid) = attrs_map.get(attrs::UNIX_GID) {
             let gid_key = self
                 .core
                 .meta
-                .attr_key_or_create("unix.gid", AttrType::Vu32)?;
+                .attr_key_or_create(attrs::UNIX_GID, AttrType::Vu32)?;
             self.core
                 .meta
                 .attrs
@@ -263,25 +265,25 @@ impl BoxWriter {
                 .or_insert_with(|| gid.clone().into_boxed_slice());
         }
 
-        let attrs: Vec<_> = {
+        let filtered: Vec<_> = {
             let default_uid = self
                 .core
                 .meta
-                .attr_key("unix.uid")
+                .attr_key(attrs::UNIX_UID)
                 .and_then(|k| self.core.meta.attrs.get(&k).map(|v| &**v));
             let default_gid = self
                 .core
                 .meta
-                .attr_key("unix.gid")
+                .attr_key(attrs::UNIX_GID)
                 .and_then(|k| self.core.meta.attrs.get(&k).map(|v| &**v));
 
-            attrs
+            attrs_map
                 .into_iter()
                 .filter(|(k, v)| {
-                    if k == "unix.uid" && default_uid.is_some_and(|d| v.as_slice() == d) {
+                    if k == attrs::UNIX_UID && default_uid.is_some_and(|d| v.as_slice() == d) {
                         return false;
                     }
-                    if k == "unix.gid" && default_gid.is_some_and(|d| v.as_slice() == d) {
+                    if k == attrs::UNIX_GID && default_gid.is_some_and(|d| v.as_slice() == d) {
                         return false;
                     }
                     true
@@ -290,15 +292,17 @@ impl BoxWriter {
         };
 
         let mut result = HashMap::new();
-        for (k, v) in attrs {
+        for (k, v) in filtered {
             let attr_type = match k.as_str() {
-                "unix.mode" | "unix.uid" | "unix.gid" => AttrType::Vu32,
-                "created" | "modified" | "accessed" => AttrType::DateTime,
-                "created.seconds" | "modified.seconds" | "accessed.seconds" => AttrType::U8,
-                "created.nanoseconds" | "modified.nanoseconds" | "accessed.nanoseconds" => {
-                    AttrType::Vu64
+                attrs::UNIX_MODE | attrs::UNIX_UID | attrs::UNIX_GID => AttrType::Vu32,
+                attrs::CREATED | attrs::MODIFIED | attrs::ACCESSED => AttrType::DateTime,
+                attrs::CREATED_SECONDS | attrs::MODIFIED_SECONDS | attrs::ACCESSED_SECONDS => {
+                    AttrType::U8
                 }
-                "blake3" => AttrType::U256,
+                attrs::CREATED_NANOSECONDS
+                | attrs::MODIFIED_NANOSECONDS
+                | attrs::ACCESSED_NANOSECONDS => AttrType::Vu64,
+                attrs::BLAKE3 => AttrType::U256,
                 _ => AttrType::Bytes,
             };
             let key = self.core.meta.attr_key_or_create(&k, attr_type)?;

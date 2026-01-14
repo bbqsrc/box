@@ -568,11 +568,13 @@ impl BoxReader {
         for item in self.core.iter() {
             match item.record {
                 Record::File(f) => {
-                    let expected_hash: Option<[u8; 32]> =
-                        match item.record.attr_value(self.metadata(), "blake3") {
-                            Some(AttrValue::U256(h)) => Some(*h),
-                            _ => None,
-                        };
+                    let expected_hash: Option<[u8; 32]> = match item
+                        .record
+                        .attr_value(self.metadata(), crate::attrs::BLAKE3)
+                    {
+                        Some(AttrValue::U256(h)) => Some(*h),
+                        _ => None,
+                    };
 
                     if let Some(expected) = expected_hash {
                         out_buf.clear();
@@ -587,11 +589,13 @@ impl BoxReader {
                     stats.files_checked += 1;
                 }
                 Record::ChunkedFile(f) => {
-                    let expected_hash: Option<[u8; 32]> =
-                        match item.record.attr_value(self.metadata(), "blake3") {
-                            Some(AttrValue::U256(h)) => Some(*h),
-                            _ => None,
-                        };
+                    let expected_hash: Option<[u8; 32]> = match item
+                        .record
+                        .attr_value(self.metadata(), crate::attrs::BLAKE3)
+                    {
+                        Some(AttrValue::U256(h)) => Some(*h),
+                        _ => None,
+                    };
 
                     if let Some(expected) = expected_hash {
                         out_buf.clear();
@@ -702,7 +706,8 @@ impl BoxReader {
                 #[cfg(target_os = "linux")]
                 if options.xattrs {
                     for (key, value) in record.attrs_iter(self.metadata()) {
-                        if let Some(xattr_name) = key.strip_prefix("linux.xattr.") {
+                        if let Some(xattr_name) = key.strip_prefix(crate::attrs::LINUX_XATTR_PREFIX)
+                        {
                             let _ = xattr::set(&new_file, xattr_name, value);
                         }
                     }
@@ -711,7 +716,7 @@ impl BoxReader {
                 // Verify checksum if enabled
                 if options.verify_checksums {
                     if let Some(AttrValue::U256(expected)) =
-                        record.attr_value(self.metadata(), "blake3")
+                        record.attr_value(self.metadata(), crate::attrs::BLAKE3)
                     {
                         let contents = std::fs::read(&new_file)
                             .map_err(|e| ExtractError::VerificationFailed(e, new_file.clone()))?;
@@ -750,7 +755,8 @@ impl BoxReader {
                 #[cfg(target_os = "linux")]
                 if options.xattrs {
                     for (key, value) in record.attrs_iter(self.metadata()) {
-                        if let Some(xattr_name) = key.strip_prefix("linux.xattr.") {
+                        if let Some(xattr_name) = key.strip_prefix(crate::attrs::LINUX_XATTR_PREFIX)
+                        {
                             let _ = xattr::set(&new_file, xattr_name, value);
                         }
                     }
@@ -758,7 +764,7 @@ impl BoxReader {
 
                 if options.verify_checksums {
                     if let Some(AttrValue::U256(expected)) =
-                        record.attr_value(self.metadata(), "blake3")
+                        record.attr_value(self.metadata(), crate::attrs::BLAKE3)
                     {
                         let contents = std::fs::read(&new_file)
                             .map_err(|e| ExtractError::VerificationFailed(e, new_file.clone()))?;

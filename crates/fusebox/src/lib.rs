@@ -10,7 +10,7 @@ use fuser::{
 use libc::{EACCES, ENODATA, ENOENT, ERANGE};
 
 use box_format::sync::BoxReader;
-use box_format::{BOX_EPOCH_UNIX, BoxMetadata, Record, RecordIndex};
+use box_format::{BOX_EPOCH_UNIX, BoxMetadata, Record, RecordIndex, attrs};
 
 /// Cache key for block-level caching
 /// For regular files: (RecordIndex, 0)
@@ -128,7 +128,6 @@ impl BoxFs {
 }
 
 const TTL: Duration = Duration::from_secs(1);
-const XATTR_PREFIX: &str = "linux.xattr.";
 const BLOCK_SIZE: u32 = 4096;
 
 fn parse_archive_time(meta: &BoxMetadata, name: &str) -> Option<SystemTime> {
@@ -142,7 +141,7 @@ fn parse_archive_time(meta: &BoxMetadata, name: &str) -> Option<SystemTime> {
 }
 
 fn archive_uid(meta: &BoxMetadata) -> u32 {
-    if let Some(bytes) = meta.file_attr("unix.uid") {
+    if let Some(bytes) = meta.file_attr(attrs::UNIX_UID) {
         let (uid, len) = fastvint::decode_vu32_slice(bytes);
         if len > 0 {
             return uid;
@@ -152,7 +151,7 @@ fn archive_uid(meta: &BoxMetadata) -> u32 {
 }
 
 fn archive_gid(meta: &BoxMetadata) -> u32 {
-    if let Some(bytes) = meta.file_attr("unix.gid") {
+    if let Some(bytes) = meta.file_attr(attrs::UNIX_GID) {
         let (gid, len) = fastvint::decode_vu32_slice(bytes);
         if len > 0 {
             return gid;
@@ -162,7 +161,7 @@ fn archive_gid(meta: &BoxMetadata) -> u32 {
 }
 
 fn root_dir_attr(meta: &BoxMetadata) -> FileAttr {
-    let ctime = parse_archive_time(meta, "created").unwrap_or(UNIX_EPOCH);
+    let ctime = parse_archive_time(meta, attrs::CREATED).unwrap_or(UNIX_EPOCH);
 
     FileAttr {
         ino: 1,
@@ -251,7 +250,7 @@ impl RecordExt for box_format::Record<'_> {
     }
 
     fn perm(&self, meta: &BoxMetadata) -> u16 {
-        match self.attr(meta, "unix.mode") {
+        match self.attr(meta, attrs::UNIX_MODE) {
             Some(bytes) => {
                 let (mode, len) = fastvint::decode_vu32_slice(bytes);
                 if len > 0 {
@@ -278,14 +277,14 @@ impl RecordExt for box_format::Record<'_> {
 
     fn uid(&self, meta: &BoxMetadata) -> u32 {
         // Try record attribute
-        if let Some(bytes) = self.attr(meta, "unix.uid") {
+        if let Some(bytes) = self.attr(meta, attrs::UNIX_UID) {
             let (uid, len) = fastvint::decode_vu32_slice(bytes);
             if len > 0 {
                 return uid;
             }
         }
         // Try archive-level default
-        if let Some(bytes) = meta.file_attr("unix.uid") {
+        if let Some(bytes) = meta.file_attr(attrs::UNIX_UID) {
             let (uid, len) = fastvint::decode_vu32_slice(bytes);
             if len > 0 {
                 return uid;
@@ -297,14 +296,14 @@ impl RecordExt for box_format::Record<'_> {
 
     fn gid(&self, meta: &BoxMetadata) -> u32 {
         // Try record attribute
-        if let Some(bytes) = self.attr(meta, "unix.gid") {
+        if let Some(bytes) = self.attr(meta, attrs::UNIX_GID) {
             let (gid, len) = fastvint::decode_vu32_slice(bytes);
             if len > 0 {
                 return gid;
             }
         }
         // Try archive-level default
-        if let Some(bytes) = meta.file_attr("unix.gid") {
+        if let Some(bytes) = meta.file_attr(attrs::UNIX_GID) {
             let (gid, len) = fastvint::decode_vu32_slice(bytes);
             if len > 0 {
                 return gid;
@@ -315,19 +314,20 @@ impl RecordExt for box_format::Record<'_> {
     }
 
     fn ctime(&self, meta: &BoxMetadata) -> SystemTime {
-        self.parse_time_attr(meta, "created").unwrap_or(UNIX_EPOCH)
+        self.parse_time_attr(meta, attrs::CREATED)
+            .unwrap_or(UNIX_EPOCH)
     }
 
     fn mtime(&self, meta: &BoxMetadata) -> SystemTime {
-        self.parse_time_attr(meta, "modified")
-            .or_else(|| self.parse_time_attr(meta, "created"))
+        self.parse_time_attr(meta, attrs::MODIFIED)
+            .or_else(|| self.parse_time_attr(meta, attrs::CREATED))
             .unwrap_or(UNIX_EPOCH)
     }
 
     fn atime(&self, meta: &BoxMetadata) -> SystemTime {
-        self.parse_time_attr(meta, "accessed")
-            .or_else(|| self.parse_time_attr(meta, "modified"))
-            .or_else(|| self.parse_time_attr(meta, "created"))
+        self.parse_time_attr(meta, attrs::ACCESSED)
+            .or_else(|| self.parse_time_attr(meta, attrs::MODIFIED))
+            .or_else(|| self.parse_time_attr(meta, attrs::CREATED))
             .unwrap_or(UNIX_EPOCH)
     }
 
@@ -732,7 +732,7 @@ impl Filesystem for BoxFs {
         tracing::trace!(ino, name, "getxattr");
 
         // Convert xattr name to box attribute name
-        let box_attr_name = format!("{}{}", XATTR_PREFIX, name);
+        let box_attr_name = format!("{}{}", attrs::LINUX_XATTR_PREFIX, name);
 
         // Get the attribute value
         let value = match record_index(ino) {
@@ -772,7 +772,7 @@ impl Filesystem for BoxFs {
         let add_xattrs = |attrs_iter: &mut dyn Iterator<Item = (&str, &[u8])>,
                           xattr_list: &mut Vec<u8>| {
             for (key, _value) in attrs_iter {
-                if let Some(xattr_name) = key.strip_prefix(XATTR_PREFIX) {
+                if let Some(xattr_name) = key.strip_prefix(attrs::LINUX_XATTR_PREFIX) {
                     // Add null-terminated xattr name
                     xattr_list.extend_from_slice(xattr_name.as_bytes());
                     xattr_list.push(0);
@@ -794,7 +794,7 @@ impl Filesystem for BoxFs {
             None => {
                 // Root inode - list archive-level xattrs
                 for key in self.reader.metadata().attr_keys() {
-                    if let Some(xattr_name) = key.strip_prefix(XATTR_PREFIX) {
+                    if let Some(xattr_name) = key.strip_prefix(attrs::LINUX_XATTR_PREFIX) {
                         xattr_list.extend_from_slice(xattr_name.as_bytes());
                         xattr_list.push(0);
                     }

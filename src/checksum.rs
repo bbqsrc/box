@@ -15,7 +15,7 @@ pub trait Checksum: Digest + Default + Unpin {
 }
 
 impl Checksum for blake3::Hasher {
-    const NAME: &'static str = "blake3";
+    const NAME: &'static str = crate::attrs::BLAKE3;
 }
 
 /// A no-op checksum that does nothing.
@@ -67,7 +67,7 @@ mod tests {
 
     #[test]
     fn test_blake3_name() {
-        assert_eq!(blake3::Hasher::NAME, "blake3");
+        assert_eq!(blake3::Hasher::NAME, crate::attrs::BLAKE3);
     }
 
     #[test]

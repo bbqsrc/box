@@ -3,7 +3,7 @@
 //! These callbacks are invoked by Windows when the filesystem is accessed.
 //! Each callback receives a `PRJ_CALLBACK_DATA` containing context and request info.
 
-use box_format::Record;
+use box_format::{Record, attrs};
 use fastvint::ReadVintExt;
 use windows::Win32::Foundation::{
     ERROR_FILE_NOT_FOUND, ERROR_INSUFFICIENT_BUFFER, ERROR_NOT_ENOUGH_MEMORY,
@@ -61,8 +61,9 @@ fn record_to_entry(
         Record::Link(_) => (false, 0), // Treat links as files for now
     };
 
-    let creation_time = get_record_timestamp(provider, record, "created");
-    let last_write_time = get_record_timestamp(provider, record, "modified").max(creation_time);
+    let creation_time = get_record_timestamp(provider, record, attrs::CREATED);
+    let last_write_time =
+        get_record_timestamp(provider, record, attrs::MODIFIED).max(creation_time);
 
     let file_attributes = if is_directory {
         file_attributes::FILE_ATTRIBUTE_DIRECTORY

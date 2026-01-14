@@ -236,7 +236,7 @@ impl<'a> ArchiveReader<'a> {
     /// Get the file mode (permissions) for a record, with fallback to default.
     pub fn get_mode(&self, record: &Record<'_>) -> u32 {
         // Try to get from record attrs first
-        if let Some(value) = self.get_attr_value(record, "mode") {
+        if let Some(value) = self.get_attr_value(record, crate::attrs::UNIX_MODE) {
             match value {
                 AttrValue::Vu32(m) => return m,
                 AttrValue::U8(m) => return m as u32,
@@ -245,10 +245,10 @@ impl<'a> ArchiveReader<'a> {
         }
 
         // Fall back to file-level default
-        if let Some(bytes) = self.meta.file_attr("mode") {
+        if let Some(bytes) = self.meta.file_attr(crate::attrs::UNIX_MODE) {
             if let Some(attr_type) = self
                 .meta
-                .attr_key("mode")
+                .attr_key(crate::attrs::UNIX_MODE)
                 .and_then(|k| self.meta.attr_key_type(k))
             {
                 match self.meta.parse_attr_value(bytes, attr_type) {
@@ -261,8 +261,8 @@ impl<'a> ArchiveReader<'a> {
 
         // Default permissions based on record type
         match record {
-            Record::Directory(_) => 0o755,
-            Record::File(_) | Record::ChunkedFile(_) => 0o644,
+            Record::Directory(_) => crate::fs::DEFAULT_DIR_MODE,
+            Record::File(_) | Record::ChunkedFile(_) => crate::fs::DEFAULT_FILE_MODE,
             Record::Link(_) | Record::ExternalLink(_) => 0o777,
         }
     }

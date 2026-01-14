@@ -708,11 +708,13 @@ impl BoxFileReader {
             match item.record {
                 Record::Directory(_) => directories.push((item.path.clone(), item.record.clone())),
                 Record::File(f) => {
-                    let expected_hash: Option<[u8; 32]> =
-                        match item.record.attr_value(self.metadata(), "blake3") {
-                            Some(AttrValue::U256(h)) => Some(*h),
-                            _ => None,
-                        };
+                    let expected_hash: Option<[u8; 32]> = match item
+                        .record
+                        .attr_value(self.metadata(), crate::attrs::BLAKE3)
+                    {
+                        Some(AttrValue::U256(h)) => Some(*h),
+                        _ => None,
+                    };
                     #[cfg(unix)]
                     let mode = self.get_mode(item.record);
                     #[cfg(not(unix))]
@@ -722,7 +724,7 @@ impl BoxFileReader {
                     let xattrs: Vec<(String, Vec<u8>)> = if options.xattrs {
                         item.record
                             .attrs_iter(self.metadata())
-                            .filter(|(k, _)| k.starts_with("linux.xattr."))
+                            .filter(|(k, _)| k.starts_with(crate::attrs::LINUX_XATTR_PREFIX))
                             .map(|(k, v)| (k.to_string(), v.to_vec()))
                             .collect()
                     } else {
@@ -732,11 +734,13 @@ impl BoxFileReader {
                     files.push((item.path.clone(), f.clone(), expected_hash, mode, xattrs));
                 }
                 Record::ChunkedFile(f) => {
-                    let expected_hash: Option<[u8; 32]> =
-                        match item.record.attr_value(self.metadata(), "blake3") {
-                            Some(AttrValue::U256(h)) => Some(*h),
-                            _ => None,
-                        };
+                    let expected_hash: Option<[u8; 32]> = match item
+                        .record
+                        .attr_value(self.metadata(), crate::attrs::BLAKE3)
+                    {
+                        Some(AttrValue::U256(h)) => Some(*h),
+                        _ => None,
+                    };
                     #[cfg(unix)]
                     let mode = self.get_mode(item.record);
                     #[cfg(not(unix))]
@@ -745,7 +749,7 @@ impl BoxFileReader {
                     let xattrs: Vec<(String, Vec<u8>)> = if options.xattrs {
                         item.record
                             .attrs_iter(self.metadata())
-                            .filter(|(k, _)| k.starts_with("linux.xattr."))
+                            .filter(|(k, _)| k.starts_with(crate::attrs::LINUX_XATTR_PREFIX))
                             .map(|(k, v)| (k.to_string(), v.to_vec()))
                             .collect()
                     } else {
@@ -814,7 +818,7 @@ impl BoxFileReader {
             if options.xattrs {
                 let xattr_iter = record
                     .attrs_iter(self.metadata())
-                    .filter(|(k, _)| k.starts_with("linux.xattr."));
+                    .filter(|(k, _)| k.starts_with(crate::attrs::LINUX_XATTR_PREFIX));
                 crate::fs::write_xattrs(&new_dir, xattr_iter);
             }
 
@@ -1135,14 +1139,16 @@ impl BoxFileReader {
             if let Record::File(file) = item.record {
                 stats.files_checked += 1;
 
-                let expected_hash: [u8; 32] =
-                    match item.record.attr_value(self.metadata(), "blake3") {
-                        Some(AttrValue::U256(h)) => *h,
-                        _ => {
-                            stats.files_without_checksum += 1;
-                            continue;
-                        }
-                    };
+                let expected_hash: [u8; 32] = match item
+                    .record
+                    .attr_value(self.metadata(), crate::attrs::BLAKE3)
+                {
+                    Some(AttrValue::U256(h)) => *h,
+                    _ => {
+                        stats.files_without_checksum += 1;
+                        continue;
+                    }
+                };
 
                 // Decompress to compute hash
                 let mut hasher = blake3::Hasher::new();
@@ -1206,7 +1212,10 @@ impl BoxFileReader {
 
         for item in self.core.iter() {
             if let Record::File(f) = item.record {
-                match item.record.attr_value(self.metadata(), "blake3") {
+                match item
+                    .record
+                    .attr_value(self.metadata(), crate::attrs::BLAKE3)
+                {
                     Some(AttrValue::U256(h)) => {
                         files.push((item.path.clone(), f.clone(), *h));
                     }
@@ -1715,7 +1724,7 @@ impl BoxFileReader {
                 // Verify checksum if requested
                 if options.verify_checksums {
                     if let Some(AttrValue::U256(expected_hash)) =
-                        record.attr_value(self.metadata(), "blake3")
+                        record.attr_value(self.metadata(), crate::attrs::BLAKE3)
                     {
                         let actual_hash = compute_file_blake3(&out_path).await.map_err(|e| {
                             ExtractError::VerificationFailed(e, out_path.to_path_buf())
@@ -1737,7 +1746,7 @@ impl BoxFileReader {
                 if options.xattrs {
                     let xattr_iter = record
                         .attrs_iter(self.metadata())
-                        .filter(|(k, _)| k.starts_with("linux.xattr."));
+                        .filter(|(k, _)| k.starts_with(crate::attrs::LINUX_XATTR_PREFIX));
                     crate::fs::write_xattrs(&out_path, xattr_iter);
                 }
 
@@ -1894,7 +1903,7 @@ impl BoxFileReader {
                 // Verify checksum if requested
                 if options.verify_checksums {
                     if let Some(AttrValue::U256(expected_hash)) =
-                        record.attr_value(self.metadata(), "blake3")
+                        record.attr_value(self.metadata(), crate::attrs::BLAKE3)
                     {
                         let actual_hash = compute_file_blake3(&out_path).await.map_err(|e| {
                             ExtractError::VerificationFailed(e, out_path.to_path_buf())
@@ -1916,7 +1925,7 @@ impl BoxFileReader {
                 if options.xattrs {
                     let xattr_iter = record
                         .attrs_iter(self.metadata())
-                        .filter(|(k, _)| k.starts_with("linux.xattr."));
+                        .filter(|(k, _)| k.starts_with(crate::attrs::LINUX_XATTR_PREFIX));
                     crate::fs::write_xattrs(&out_path, xattr_iter);
                 }
 

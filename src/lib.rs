@@ -12,6 +12,8 @@ mod compat;
 /// Box epoch: 2026-01-01 00:00:00 UTC (seconds since Unix epoch)
 pub const BOX_EPOCH_UNIX: i64 = 1767225600;
 
+pub mod attrs;
+
 #[cfg(any(feature = "reader", feature = "writer"))]
 pub mod aio;
 #[cfg(feature = "std")]

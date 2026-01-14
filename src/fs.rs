@@ -4,7 +4,7 @@ use crate::compat::HashMap;
 
 use fastvint::Vi64;
 
-use crate::BOX_EPOCH_UNIX;
+use crate::{BOX_EPOCH_UNIX, attrs};
 
 /// Default mode for files (0o644 = rw-r--r--)
 pub const DEFAULT_FILE_MODE: u32 = 0o100644;
@@ -26,15 +26,15 @@ pub fn metadata_to_attrs(
         let modified_minutes = (meta.mtime() - BOX_EPOCH_UNIX) / 60;
         let accessed_minutes = (meta.atime() - BOX_EPOCH_UNIX) / 60;
         attrs.insert(
-            "created".into(),
+            attrs::CREATED.into(),
             Vi64::new(created_minutes).bytes().to_vec(),
         );
         attrs.insert(
-            "modified".into(),
+            attrs::MODIFIED.into(),
             Vi64::new(modified_minutes).bytes().to_vec(),
         );
         attrs.insert(
-            "accessed".into(),
+            attrs::ACCESSED.into(),
             Vi64::new(accessed_minutes).bytes().to_vec(),
         );
     }
@@ -48,18 +48,18 @@ pub fn metadata_to_attrs(
     };
     if mode != default_mode {
         attrs.insert(
-            "unix.mode".into(),
+            attrs::UNIX_MODE.into(),
             fastvint::Vu32::new(mode).bytes().to_vec(),
         );
     }
 
     if ownership {
         attrs.insert(
-            "unix.uid".into(),
+            attrs::UNIX_UID.into(),
             fastvint::Vu32::new(meta.uid()).bytes().to_vec(),
         );
         attrs.insert(
-            "unix.gid".into(),
+            attrs::UNIX_GID.into(),
             fastvint::Vu32::new(meta.gid()).bytes().to_vec(),
         );
     }
@@ -80,21 +80,21 @@ pub fn metadata_to_attrs(
             && let Ok(duration) = created.duration_since(std::time::SystemTime::UNIX_EPOCH)
         {
             let minutes = (duration.as_secs() as i64 - BOX_EPOCH_UNIX) / 60;
-            attrs.insert("created".into(), Vi64::new(minutes).bytes().to_vec());
+            attrs.insert(attrs::CREATED.into(), Vi64::new(minutes).bytes().to_vec());
         }
 
         if let Ok(modified) = meta.modified()
             && let Ok(duration) = modified.duration_since(std::time::SystemTime::UNIX_EPOCH)
         {
             let minutes = (duration.as_secs() as i64 - BOX_EPOCH_UNIX) / 60;
-            attrs.insert("modified".into(), Vi64::new(minutes).bytes().to_vec());
+            attrs.insert(attrs::MODIFIED.into(), Vi64::new(minutes).bytes().to_vec());
         }
 
         if let Ok(accessed) = meta.accessed()
             && let Ok(duration) = accessed.duration_since(std::time::SystemTime::UNIX_EPOCH)
         {
             let minutes = (duration.as_secs() as i64 - BOX_EPOCH_UNIX) / 60;
-            attrs.insert("accessed".into(), Vi64::new(minutes).bytes().to_vec());
+            attrs.insert(attrs::ACCESSED.into(), Vi64::new(minutes).bytes().to_vec());
         }
     }
 
@@ -128,15 +128,15 @@ pub fn is_hidden(path: &std::path::Path) -> bool {
 /// Returns HashMap where keys are "linux.xattr.<name>" (e.g., "linux.xattr.user.myattr").
 #[cfg(all(feature = "xattr", target_os = "linux"))]
 pub fn read_xattrs(path: &std::path::Path) -> std::io::Result<HashMap<String, Vec<u8>>> {
-    let mut attrs = HashMap::new();
+    let mut result = HashMap::new();
     for name in xattr::list(path)? {
         if let Some(name_str) = name.to_str() {
             if let Some(value) = xattr::get(path, &name)? {
-                attrs.insert(format!("linux.xattr.{}", name_str), value);
+                result.insert(format!("{}{}", attrs::LINUX_XATTR_PREFIX, name_str), value);
             }
         }
     }
-    Ok(attrs)
+    Ok(result)
 }
 
 #[cfg(not(all(feature = "xattr", target_os = "linux")))]
@@ -147,9 +147,9 @@ pub fn read_xattrs(_path: &std::path::Path) -> std::io::Result<HashMap<String, V
 /// Write extended attributes to a path.
 /// Expects keys in "linux.xattr.<name>" format.
 #[cfg(all(feature = "xattr", target_os = "linux"))]
-pub fn write_xattrs<'a>(path: &std::path::Path, attrs: impl Iterator<Item = (&'a str, &'a [u8])>) {
-    for (key, value) in attrs {
-        if let Some(name) = key.strip_prefix("linux.xattr.") {
+pub fn write_xattrs<'a>(path: &std::path::Path, xattrs: impl Iterator<Item = (&'a str, &'a [u8])>) {
+    for (key, value) in xattrs {
+        if let Some(name) = key.strip_prefix(attrs::LINUX_XATTR_PREFIX) {
             if let Err(e) = xattr::set(path, name, value) {
                 tracing::warn!("Failed to set xattr {} on {}: {}", name, path.display(), e);
             }

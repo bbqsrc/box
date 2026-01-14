@@ -2,7 +2,7 @@
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use box_format::{BOX_EPOCH_UNIX, BoxMetadata, Record, RecordIndex};
+use box_format::{BOX_EPOCH_UNIX, BoxMetadata, Record, RecordIndex, attrs};
 
 use crate::bindings::{FSItemIdentifier, FSItemType};
 
@@ -54,7 +54,7 @@ impl BoxItem {
 
     /// Get the file mode from a Box record.
     pub fn mode(record: &Record<'_>, meta: &BoxMetadata) -> u32 {
-        match record.attr(meta, "unix.mode") {
+        match record.attr(meta, attrs::UNIX_MODE) {
             Some(bytes) => {
                 let (mode, len) = fastvint::decode_vu32_slice(bytes);
                 if len > 0 {
@@ -77,7 +77,7 @@ impl BoxItem {
 
     /// Get the uid from a Box record.
     pub fn uid(record: &Record<'_>, meta: &BoxMetadata) -> u32 {
-        match record.attr(meta, "unix.uid") {
+        match record.attr(meta, attrs::UNIX_UID) {
             Some(bytes) => {
                 let (v, len) = fastvint::decode_vu32_slice(bytes);
                 if len > 0 { v } else { 501 }
@@ -88,7 +88,7 @@ impl BoxItem {
 
     /// Get the gid from a Box record.
     pub fn gid(record: &Record<'_>, meta: &BoxMetadata) -> u32 {
-        match record.attr(meta, "unix.gid") {
+        match record.attr(meta, attrs::UNIX_GID) {
             Some(bytes) => {
                 let (v, len) = fastvint::decode_vu32_slice(bytes);
                 if len > 0 { v } else { 20 }
@@ -99,17 +99,17 @@ impl BoxItem {
 
     /// Get the creation time from a Box record.
     pub fn ctime(record: &Record<'_>, meta: &BoxMetadata) -> SystemTime {
-        Self::get_time(record, meta, "created")
+        Self::get_time(record, meta, attrs::CREATED)
     }
 
     /// Get the modification time from a Box record.
     pub fn mtime(record: &Record<'_>, meta: &BoxMetadata) -> SystemTime {
-        Self::get_time(record, meta, "modified")
+        Self::get_time(record, meta, attrs::MODIFIED)
     }
 
     /// Get the access time from a Box record.
     pub fn atime(record: &Record<'_>, meta: &BoxMetadata) -> SystemTime {
-        Self::get_time(record, meta, "accessed")
+        Self::get_time(record, meta, attrs::ACCESSED)
     }
 
     fn get_time(record: &Record<'_>, meta: &BoxMetadata, attr_name: &str) -> SystemTime {
