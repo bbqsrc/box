@@ -1,5 +1,5 @@
-use crate::compat::{Cow, String, Vec};
 use crate::compat::NonZeroU64;
+use crate::compat::{Cow, String, Vec};
 
 #[cfg(feature = "std")]
 use crate::AttrValue;

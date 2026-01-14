@@ -1,6 +1,6 @@
-use crate::compat::{Box, Cow, HashMap, NonZeroU64, String, Vec, VecDeque};
 #[cfg(feature = "std")]
 use crate::compat::BTreeMap;
+use crate::compat::{Box, Cow, HashMap, NonZeroU64, String, Vec, VecDeque};
 use core::fmt::Display;
 
 // For to_string() method on &str in no_std

@@ -24,7 +24,11 @@ fn main() {
     tracing_subscriber::fmt::init();
     let opts = Options::parse();
 
-    let bf = BoxReader::open(opts.box_file).unwrap();
+    let mountpoint = std::fs::canonicalize(&opts.mountpoint).unwrap();
+    let boxfile = std::fs::canonicalize(&opts.box_file).unwrap();
+    tracing::info!("Mounting box file {:?} at {:?}", boxfile, mountpoint);
+
+    let bf = BoxReader::open(boxfile).unwrap();
     tracing::trace!("{:?}", &bf);
 
     let mount_opts = &[

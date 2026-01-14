@@ -11,9 +11,9 @@
 #[cfg(feature = "alloc")]
 use alloc::vec::Vec;
 
-use fastvint::decode_vu64_slice;
 #[cfg(feature = "std")]
 use fastvint::WriteVintExt;
+use fastvint::decode_vu64_slice;
 
 /// Header constants
 pub const MAGIC: &[u8; 4] = b"BFST";

@@ -1,5 +1,5 @@
-use std::borrow::Cow;
 use crate::compat::HashMap;
+use std::borrow::Cow;
 use std::default::Default;
 use std::io::SeekFrom;
 use std::num::NonZeroU64;

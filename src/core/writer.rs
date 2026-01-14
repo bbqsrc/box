@@ -7,8 +7,8 @@
 // This module requires std for encoding and complex operations
 #![cfg(feature = "std")]
 
-use std::borrow::Cow;
 use crate::compat::HashMap;
+use std::borrow::Cow;
 use std::num::NonZeroU64;
 
 use crate::compression::Compression;

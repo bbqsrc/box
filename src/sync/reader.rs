@@ -307,6 +307,151 @@ impl BoxReader {
         Ok(())
     }
 
+    /// Decompress only the blocks covering a byte range [start_byte, end_byte).
+    ///
+    /// This is optimized for random access patterns - instead of decompressing
+    /// the entire file, only the blocks that contain the requested range are
+    /// decompressed. Returns exactly the bytes from start_byte to end_byte.
+    pub fn decompress_chunked_range(
+        &self,
+        record: &ChunkedFileRecord<'_>,
+        record_index: RecordIndex,
+        start_byte: u64,
+        end_byte: u64,
+    ) -> std::io::Result<Vec<u8>> {
+        let file_size = record.decompressed_length;
+
+        // Clamp range to file size
+        let start_byte = start_byte.min(file_size);
+        let end_byte = end_byte.min(file_size);
+
+        if start_byte >= end_byte {
+            return Ok(Vec::new());
+        }
+
+        let block_size = record.block_size as u64;
+
+        // Find the first block containing start_byte
+        let first_block = self
+            .core
+            .find_block(record_index, start_byte)
+            .ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "could not find block for start offset",
+                )
+            })?;
+
+        // Get all blocks we need to decompress
+        let mut blocks_needed = vec![first_block];
+        let mut current_logical = first_block.0;
+
+        // Keep getting next blocks until we've covered end_byte
+        while current_logical + block_size < end_byte {
+            if let Some(next) = self.core.next_block(record_index, current_logical) {
+                current_logical = next.0;
+                blocks_needed.push(next);
+            } else {
+                break;
+            }
+        }
+
+        // Memory map the chunked file data
+        let segment = self.memory_map_chunked(record)?;
+        let all_data = segment.as_slice().map_err(std::io::Error::other)?;
+        let data_start = record.data.get();
+
+        // Pre-calculate total output size
+        let first_block_logical = blocks_needed[0].0;
+        let total_blocks = blocks_needed.len();
+
+        // Calculate expected decompressed size for our blocks
+        let mut output = Vec::with_capacity((total_blocks as u64 * block_size) as usize);
+
+        for (i, &(logical_offset, physical_offset)) in blocks_needed.iter().enumerate() {
+            // Calculate compressed size for this block
+            let compressed_end = if i + 1 < total_blocks {
+                blocks_needed[i + 1].1
+            } else {
+                // For the last block we need, find the next block's physical offset
+                // or use the end of data
+                self.core
+                    .next_block(record_index, logical_offset)
+                    .map(|(_, phys)| phys)
+                    .unwrap_or(data_start + record.length)
+            };
+
+            let compressed_size = (compressed_end - physical_offset) as usize;
+            let block_offset = (physical_offset - data_start) as usize;
+            let block_data = &all_data[block_offset..block_offset + compressed_size];
+
+            let block_output = self.core.decompress_chunked_block(record, block_data)?;
+            output.extend_from_slice(&block_output);
+        }
+
+        // Slice to exact requested range
+        let offset_in_output = (start_byte - first_block_logical) as usize;
+        let end_in_output = offset_in_output + (end_byte - start_byte) as usize;
+
+        // Handle case where last block may be partial (smaller than block_size)
+        let end_in_output = end_in_output.min(output.len());
+
+        Ok(output[offset_in_output..end_in_output].to_vec())
+    }
+
+    /// Decompress a single block from a chunked file by block index.
+    ///
+    /// Returns the decompressed block data. Block indices are 0-based.
+    /// This is useful for caching individual blocks.
+    pub fn decompress_chunked_block(
+        &self,
+        record: &ChunkedFileRecord<'_>,
+        record_index: RecordIndex,
+        block_index: u64,
+    ) -> std::io::Result<Vec<u8>> {
+        let block_size = record.block_size as u64;
+        let logical_offset = block_index * block_size;
+
+        let (block_logical, physical_offset) = self
+            .core
+            .find_block(record_index, logical_offset)
+            .ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("block {} not found", block_index),
+            )
+        })?;
+
+        // Verify we found the right block
+        if block_logical != logical_offset {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "block mismatch: requested {} but found block at {}",
+                    logical_offset, block_logical
+                ),
+            ));
+        }
+
+        // Find the end of this block's compressed data
+        let data_start = record.data.get();
+        let compressed_end = self
+            .core
+            .next_block(record_index, logical_offset)
+            .map(|(_, phys)| phys)
+            .unwrap_or(data_start + record.length);
+
+        let compressed_size = (compressed_end - physical_offset) as usize;
+
+        // Memory map and decompress
+        let segment = self.memory_map_chunked(record)?;
+        let all_data = segment.as_slice().map_err(std::io::Error::other)?;
+        let block_offset = (physical_offset - data_start) as usize;
+        let block_data = &all_data[block_offset..block_offset + compressed_size];
+
+        self.core.decompress_chunked_block(record, block_data)
+    }
+
     pub fn find(&self, path: &BoxPath<'_>) -> Result<&Record<'static>, ExtractError> {
         self.core
             .find(path)

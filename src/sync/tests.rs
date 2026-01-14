@@ -1,9 +1,9 @@
 #[cfg(test)]
 mod tests {
+    use crate::compat::HashMap;
     use crate::compression::{Compression, CompressionConfig};
     use crate::path::BoxPath;
     use crate::sync::{BoxReader, BoxWriter};
-    use crate::compat::HashMap;
 
     fn create_test_box_sync(filename: &str) {
         let _ = std::fs::remove_file(filename);

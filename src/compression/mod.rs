@@ -15,9 +15,9 @@
 //! For simple use cases with complete buffers:
 //! - [`compress_bytes_sync`] / [`decompress_bytes_sync`]
 
+use core::fmt;
 #[cfg(feature = "std")]
 use std::collections::HashMap;
-use core::fmt;
 #[cfg(feature = "std")]
 use std::io::Result;
 

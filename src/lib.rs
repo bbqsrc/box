@@ -55,9 +55,9 @@ pub use checksum::{Checksum, NullChecksum};
 // Core compression types (no_std compatible)
 pub use compression::{ByteCount, Compression, StreamStatus};
 // Std-only compression types and functions
+pub use compat::HashMap;
 #[cfg(feature = "std")]
 pub use compression::{CompressionConfig, compress_bytes_sync, decompress_bytes_sync};
-pub use compat::HashMap;
 pub use core::{AttrKey, AttrMap, AttrType, AttrValue, BoxMetadata};
 pub use parse::{HeaderData, ParseError, ParseResult, RecordHeader, RecordType};
 pub use path::BoxPath;

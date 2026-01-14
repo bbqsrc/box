@@ -252,8 +252,7 @@ impl FstBuilder {
 
         // Phase 1: Assign node IDs in BFS order
         // Map from node pointer to assigned ID
-        let mut node_ids: HashMap<*const BuilderNode, u32> =
-            HashMap::new();
+        let mut node_ids: HashMap<*const BuilderNode, u32> = HashMap::new();
         let mut queue: VecDeque<&BuilderNode> = VecDeque::new();
 
         queue.push_back(root);
@@ -275,8 +274,7 @@ impl FstBuilder {
 
         // Phase 2: Build NodeData in BFS order
         queue.push_back(root);
-        let mut visited: HashSet<*const BuilderNode> =
-            HashSet::new();
+        let mut visited: HashSet<*const BuilderNode> = HashSet::new();
 
         while let Some(node) = queue.pop_front() {
             let ptr = node as *const BuilderNode;

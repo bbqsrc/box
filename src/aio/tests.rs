@@ -1,7 +1,7 @@
 #[cfg(test)]
 mod tests {
-    use crate::{compression::Compression, *};
     use crate::compat::HashMap;
+    use crate::{compression::Compression, *};
     use std::path::Path;
 
     async fn create_test_box<F: AsRef<Path>>(filename: F) {

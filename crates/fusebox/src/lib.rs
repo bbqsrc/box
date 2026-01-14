@@ -12,10 +12,18 @@ use libc::{EACCES, ENODATA, ENOENT, ERANGE};
 use box_format::sync::BoxReader;
 use box_format::{BOX_EPOCH_UNIX, BoxMetadata, Record, RecordIndex};
 
-/// LRU cache with size limit for decompressed file contents
+/// Cache key for block-level caching
+/// For regular files: (RecordIndex, 0)
+/// For chunked files: (RecordIndex, block_index)
+type CacheKey = (RecordIndex, u64);
+
+/// LRU cache with size limit for decompressed data blocks
+///
+/// For regular files, caches the entire decompressed content.
+/// For chunked files, caches individual 2MB blocks for efficient random access.
 pub struct LruCache {
-    entries: HashMap<RecordIndex, Vec<u8>>,
-    order: VecDeque<RecordIndex>,
+    entries: HashMap<CacheKey, Vec<u8>>,
+    order: VecDeque<CacheKey>,
     current_size: usize,
     max_size: usize,
 }
@@ -30,7 +38,7 @@ impl LruCache {
         }
     }
 
-    fn get(&mut self, key: &RecordIndex) -> Option<&[u8]> {
+    fn get(&mut self, key: &CacheKey) -> Option<&[u8]> {
         if self.entries.contains_key(key) {
             // Move to front (most recently used)
             self.order.retain(|k| k != key);
@@ -41,7 +49,7 @@ impl LruCache {
         }
     }
 
-    fn insert(&mut self, key: RecordIndex, value: Vec<u8>) {
+    fn insert(&mut self, key: CacheKey, value: Vec<u8>) {
         let size = value.len();
 
         // If this single item is larger than max cache, don't cache it
@@ -54,6 +62,12 @@ impl LruCache {
             if let Some(oldest) = self.order.pop_back()
                 && let Some(data) = self.entries.remove(&oldest)
             {
+                tracing::trace!(
+                    record = oldest.0.get(),
+                    block = oldest.1,
+                    size = data.len(),
+                    "cache evict"
+                );
                 self.current_size -= data.len();
             }
         }
@@ -69,11 +83,36 @@ impl LruCache {
         self.current_size += size;
     }
 
-    fn remove(&mut self, key: &RecordIndex) {
-        if let Some(data) = self.entries.remove(key) {
-            self.current_size -= data.len();
-            self.order.retain(|k| k != key);
+    /// Remove all entries for a given record (all blocks)
+    fn remove_record(&mut self, record: &RecordIndex) {
+        let keys_to_remove: Vec<CacheKey> = self
+            .entries
+            .keys()
+            .filter(|(r, _)| r == record)
+            .copied()
+            .collect();
+
+        for key in keys_to_remove {
+            if let Some(data) = self.entries.remove(&key) {
+                self.current_size -= data.len();
+                self.order.retain(|k| k != &key);
+            }
         }
+    }
+
+    /// Get current cache size in bytes
+    pub fn size(&self) -> usize {
+        self.current_size
+    }
+
+    /// Get number of cached entries
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// Check if cache is empty
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
     }
 }
 
@@ -310,6 +349,7 @@ impl Filesystem for BoxFs {
         let name = match name.to_str() {
             Some(v) => v,
             None => {
+                tracing::debug!(parent, "lookup failed: invalid name encoding");
                 reply.error(ENOENT);
                 return;
             }
@@ -322,6 +362,7 @@ impl Filesystem for BoxFs {
 
         match records.iter().find(|(_, record)| record.name() == name) {
             Some((index, record)) => {
+                tracing::trace!(parent, name, ino = index.get() + 1, "lookup");
                 reply.entry(
                     &TTL,
                     &record.fuse_file_attr(self.reader.metadata(), *index),
@@ -329,6 +370,7 @@ impl Filesystem for BoxFs {
                 );
             }
             None => {
+                tracing::trace!(parent, name, "lookup: not found");
                 reply.error(ENOENT);
             }
         }
@@ -348,47 +390,148 @@ impl Filesystem for BoxFs {
         let index = match record_index(ino) {
             Some(v) => v,
             None => {
+                tracing::warn!(ino, "read: invalid inode");
                 reply.error(ENOENT);
                 return;
             }
         };
 
-        let offset = offset as usize;
-        let size = size as usize;
-
-        if let Some(cached) = self.cache.get(&index) {
-            let end = (offset + size).min(cached.len());
-            let start = offset.min(end);
-            reply.data(&cached[start..end]);
-            return;
-        }
+        let offset = offset as u64;
+        let size = size as u64;
 
         let record = match self.reader.metadata().record(index) {
             Some(r) => r,
             None => {
+                tracing::warn!(ino, "read: record not found");
                 reply.error(ENOENT);
                 return;
             }
         };
 
-        let mut buf = Vec::new();
-        let result = match record {
-            Record::File(f) => self.reader.decompress(f, &mut buf),
-            Record::ChunkedFile(f) => self.reader.decompress_chunked(f, index, &mut buf),
+        match record {
+            Record::File(f) => {
+                // Regular files: cache entire decompressed content with key (index, 0)
+                let cache_key = (index, 0u64);
+                if let Some(cached) = self.cache.get(&cache_key) {
+                    let end = (offset as usize + size as usize).min(cached.len());
+                    let start = (offset as usize).min(end);
+                    tracing::debug!(ino, offset, size, "read: cache hit (file)");
+                    reply.data(&cached[start..end]);
+                    return;
+                }
+
+                let mut buf = Vec::new();
+                match self.reader.decompress(f, &mut buf) {
+                    Ok(_) => {
+                        tracing::debug!(
+                            ino,
+                            offset,
+                            size,
+                            decompressed_size = buf.len(),
+                            "read: cache miss, decompressed (file)"
+                        );
+                        let end = (offset as usize + size as usize).min(buf.len());
+                        let start = (offset as usize).min(end);
+                        reply.data(&buf[start..end]);
+                        self.cache.insert(cache_key, buf);
+                    }
+                    Err(e) => {
+                        tracing::error!(ino, error = %e, "read: decompression failed");
+                        reply.error(ENOENT);
+                    }
+                }
+            }
+            Record::ChunkedFile(f) => {
+                // Chunked files: use block-level caching for efficient random access
+                let block_size = f.block_size as u64;
+                let file_size = f.decompressed_length;
+
+                // Clamp to file size
+                let start_byte = offset.min(file_size);
+                let end_byte = (offset + size).min(file_size);
+
+                if start_byte >= end_byte {
+                    reply.data(&[]);
+                    return;
+                }
+
+                // Calculate which blocks we need
+                let first_block_idx = start_byte / block_size;
+                let last_block_idx = (end_byte.saturating_sub(1)) / block_size;
+
+                tracing::debug!(
+                    ino,
+                    offset,
+                    size,
+                    first_block = first_block_idx,
+                    last_block = last_block_idx,
+                    "read: chunked file"
+                );
+
+                // Collect blocks - check cache first, decompress missing ones
+                let mut output = Vec::with_capacity((end_byte - start_byte) as usize);
+                let mut cache_hits = 0u64;
+                let mut cache_misses = 0u64;
+
+                for block_idx in first_block_idx..=last_block_idx {
+                    let cache_key = (index, block_idx);
+
+                    let block_data = if let Some(cached) = self.cache.get(&cache_key) {
+                        cache_hits += 1;
+                        cached.to_vec()
+                    } else {
+                        cache_misses += 1;
+                        // Decompress this single block
+                        match self.reader.decompress_chunked_block(f, index, block_idx) {
+                            Ok(data) => {
+                                let result = data.clone();
+                                self.cache.insert(cache_key, data);
+                                result
+                            }
+                            Err(e) => {
+                                tracing::error!(
+                                    ino,
+                                    block = block_idx,
+                                    error = %e,
+                                    "read: block decompression failed"
+                                );
+                                reply.error(ENOENT);
+                                return;
+                            }
+                        }
+                    };
+
+                    // Calculate the slice of this block we need
+                    let block_start_byte = block_idx * block_size;
+
+                    // Offset within this block where our data starts
+                    let slice_start = if block_idx == first_block_idx {
+                        (start_byte - block_start_byte) as usize
+                    } else {
+                        0
+                    };
+
+                    // Offset within this block where our data ends
+                    let slice_end = if block_idx == last_block_idx {
+                        ((end_byte - block_start_byte) as usize).min(block_data.len())
+                    } else {
+                        block_data.len()
+                    };
+
+                    output.extend_from_slice(&block_data[slice_start..slice_end]);
+                }
+
+                tracing::debug!(
+                    ino,
+                    cache_hits,
+                    cache_misses,
+                    output_size = output.len(),
+                    "read: chunked complete"
+                );
+                reply.data(&output);
+            }
             _ => {
-                reply.error(ENOENT);
-                return;
-            }
-        };
-
-        match result {
-            Ok(_) => {
-                let end = (offset + size).min(buf.len());
-                let start = offset.min(end);
-                reply.data(&buf[start..end]);
-                self.cache.insert(index, buf);
-            }
-            Err(_) => {
+                tracing::warn!(ino, "read: not a file");
                 reply.error(ENOENT);
             }
         }
@@ -405,7 +548,8 @@ impl Filesystem for BoxFs {
         reply: ReplyEmpty,
     ) {
         if let Some(index) = record_index(ino) {
-            self.cache.remove(&index);
+            tracing::trace!(ino, "release");
+            self.cache.remove_record(&index);
             reply.ok();
         } else {
             reply.error(ENOENT);
@@ -413,6 +557,7 @@ impl Filesystem for BoxFs {
     }
 
     fn getattr(&mut self, _req: &Request, ino: u64, _fh: Option<u64>, reply: ReplyAttr) {
+        tracing::trace!(ino, "getattr");
         match record_index(ino) {
             Some(index) => match self.reader.metadata().record(index) {
                 Some(record) => {
@@ -420,6 +565,7 @@ impl Filesystem for BoxFs {
                     reply.attr(&TTL, &file_attr);
                 }
                 None => {
+                    tracing::warn!(ino, "getattr: record not found");
                     reply.error(ENOENT);
                 }
             },
@@ -442,9 +588,9 @@ impl Filesystem for BoxFs {
             None => self.reader.metadata().root_records(),
         };
 
-        for (i, (index, record)) in records.iter().enumerate().skip(offset as usize) {
-            tracing::trace!("{:?}", record);
+        tracing::debug!(ino, offset, entries = records.len(), "readdir");
 
+        for (i, (index, record)) in records.iter().enumerate().skip(offset as usize) {
             let is_full = reply.add(
                 index.get() + 1,
                 i as i64 + 1,
@@ -473,6 +619,8 @@ impl Filesystem for BoxFs {
             None => self.reader.metadata().root_records(),
         };
 
+        tracing::debug!(ino, offset, entries = records.len(), "readdirplus");
+
         for (i, (index, record)) in records.iter().enumerate().skip(offset as usize) {
             let attr = record.fuse_file_attr(self.reader.metadata(), *index);
             let is_full = reply.add(
@@ -493,6 +641,7 @@ impl Filesystem for BoxFs {
     }
 
     fn readlink(&mut self, _req: &Request<'_>, ino: u64, reply: ReplyData) {
+        tracing::trace!(ino, "readlink");
         let index = match record_index(ino) {
             Some(v) => v,
             None => {
@@ -504,6 +653,7 @@ impl Filesystem for BoxFs {
         let record = match self.reader.metadata().record(index) {
             Some(r) => r,
             None => {
+                tracing::warn!(ino, "readlink: record not found");
                 reply.error(ENOENT);
                 return;
             }
@@ -513,14 +663,23 @@ impl Filesystem for BoxFs {
             box_format::Record::Link(link) => {
                 // Internal link - resolve to get the target path
                 match self.reader.metadata().path_for_index(link.target) {
-                    Some(path) => reply.data(path.as_ref()),
-                    None => reply.error(ENOENT),
+                    Some(path) => {
+                        // Convert BoxPath to string with / separators (as_ref() returns \x1f separators)
+                        reply.data(path.to_string().as_bytes())
+                    }
+                    None => {
+                        tracing::warn!(ino, "readlink: could not resolve internal link");
+                        reply.error(ENOENT);
+                    }
                 }
             }
             box_format::Record::ExternalLink(link) => {
                 reply.data(link.target.as_bytes());
             }
-            _ => reply.error(ENOENT),
+            _ => {
+                tracing::warn!(ino, "readlink: not a link");
+                reply.error(ENOENT);
+            }
         }
     }
 
@@ -539,6 +698,8 @@ impl Filesystem for BoxFs {
         }
 
         let blocks = total_size.div_ceil(BLOCK_SIZE as u64);
+
+        tracing::debug!(blocks, file_count, total_size, "statfs");
 
         reply.statfs(
             blocks,     // blocks: total blocks
@@ -567,6 +728,8 @@ impl Filesystem for BoxFs {
                 return;
             }
         };
+
+        tracing::trace!(ino, name, "getxattr");
 
         // Convert xattr name to box attribute name
         let box_attr_name = format!("{}{}", XATTR_PREFIX, name);
@@ -602,6 +765,7 @@ impl Filesystem for BoxFs {
     }
 
     fn listxattr(&mut self, _req: &Request<'_>, ino: u64, size: u32, reply: ReplyXattr) {
+        tracing::trace!(ino, "listxattr");
         // Collect all xattr names for this inode
         let mut xattr_list = Vec::new();
 
@@ -648,6 +812,7 @@ impl Filesystem for BoxFs {
     }
 
     fn access(&mut self, req: &Request<'_>, ino: u64, mask: i32, reply: ReplyEmpty) {
+        tracing::trace!(ino, mask, "access");
         // F_OK (existence check) is always successful if we got here
         if mask == libc::F_OK {
             reply.ok();
