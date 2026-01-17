@@ -2,23 +2,24 @@
 //! Parsed box archive metadata
 //!
 //! This module holds the in-memory representation of the box archive
-//! metadata that was parsed from the trailer.
+//! metadata that was parsed from the trailer. Supports mounting multiple
+//! archives into a unified filesystem hierarchy.
 
 use alloc::borrow::Cow;
 use alloc::boxed::Box;
-use alloc::string::{String, ToString};
+use alloc::string::String;
 use alloc::vec::Vec;
 use core::cell::RefCell;
 
-use box_fst::Fst;
+use box_fst::{Fst, FstBuilder};
 use hashbrown::HashMap;
 
 // ============================================================================
 // BLOCK CACHE
 // ============================================================================
 
-/// Cache key: (record_index, block_logical_offset)
-type CacheKey = (u64, u64);
+/// Cache key: (composite_index, block_logical_offset)
+type CacheKey = (u128, u64);
 
 /// Entry in the block cache with access tracking for LRU eviction.
 struct CacheEntry {
@@ -57,8 +58,8 @@ impl BlockCache {
     }
 
     /// Get a cached block if present, updating LRU order.
-    pub fn get(&mut self, record_index: u64, block_offset: u64) -> Option<&[u8]> {
-        let key = (record_index, block_offset);
+    pub fn get(&mut self, composite: u128, block_offset: u64) -> Option<&[u8]> {
+        let key = (composite, block_offset);
         if let Some(entry) = self.entries.get_mut(&key) {
             self.access_counter += 1;
             entry.last_access = self.access_counter;
@@ -70,8 +71,8 @@ impl BlockCache {
 
     /// Insert a decompressed block into the cache.
     /// Evicts least recently used entries until there's room.
-    pub fn insert(&mut self, record_index: u64, block_offset: u64, data: Box<[u8]>) {
-        let key = (record_index, block_offset);
+    pub fn insert(&mut self, composite: u128, block_offset: u64, data: Box<[u8]>) {
+        let key = (composite, block_offset);
         let data_size = data.len();
 
         // Don't cache blocks larger than total capacity
@@ -282,120 +283,198 @@ impl Record {
     }
 }
 
-/// Parsed metadata from a box archive
-pub struct BoxfsMetadata {
-    /// All records in the archive (0-indexed, but record indices are 1-based)
+/// Per-archive metadata for multi-archive mounting.
+pub struct ArchiveData {
+    /// Archive identifier (used in composite indices)
+    pub id: u64,
+    /// All records in this archive (0-indexed, but record indices are 1-based)
     pub records: Vec<Record>,
-    /// Root record index (1-based)
+    /// Root record index within this archive (1-based, local)
     pub root_index: u64,
     /// Total archive size
     pub archive_size: u64,
-    /// Offset to data section
-    pub data_offset: u64,
-    /// FST data for path lookups (optional)
+    /// Base offset of this archive's data in the block device
+    pub data_offset_base: u64,
+    /// FST data for path lookups within this archive (optional)
     pub fst_data: Option<Box<[u8]>>,
     /// Block FST data for chunked file block lookups (optional)
     /// Keys: record_index(u64 BE) || logical_offset(u64 BE) = 16 bytes
     /// Values: physical offset within compressed data region
     pub block_fst_data: Option<Box<[u8]>>,
-    /// Cache for decompressed blocks (interior mutability for shared access)
-    pub block_cache: RefCell<BlockCache>,
     /// Global attribute keys table (name -> type)
     pub attr_keys: Vec<AttrKey>,
+}
+
+/// Parsed metadata supporting multiple box archives merged into one hierarchy.
+///
+/// Uses composite indices: `(archive_id << 64) | local_record_index`
+pub struct BoxfsMetadata {
+    /// Per-archive metadata, keyed by archive_id
+    pub archives: HashMap<u64, ArchiveData>,
+    /// Merged path→composite_index FST (in-memory, queryable)
+    pub merged_fst: FstBuilder<u128>,
+    /// Next archive ID to assign
+    next_archive_id: u64,
+    /// Cache for decompressed blocks (interior mutability for shared access)
+    /// Keys use composite indices
+    pub block_cache: RefCell<BlockCache>,
 }
 
 /// Prefix for Linux extended attributes in box format
 pub const LINUX_XATTR_PREFIX: &str = "linux.xattr.";
 
 impl BoxfsMetadata {
-    /// Create empty metadata (for stub implementation)
-    pub fn empty() -> Self {
-        // Create a minimal root directory
-        let root = Record {
-            name: String::new(),
-            data: RecordData::Directory { children: Vec::new() },
-            mode: 0o40755, // S_IFDIR | 0755
-            mtime: 0,
-            attrs: HashMap::new(),
-        };
+    /// Pack archive_id and local_index into a composite index.
+    #[inline]
+    pub fn pack_index(archive_id: u64, local_index: u64) -> u128 {
+        ((archive_id as u128) << 64) | (local_index as u128)
+    }
 
+    /// Unpack composite index into (archive_id, local_index).
+    #[inline]
+    pub fn unpack_index(composite: u128) -> (u64, u64) {
+        let archive_id = (composite >> 64) as u64;
+        let local_index = composite as u64;
+        (archive_id, local_index)
+    }
+
+    /// Create empty metadata (for initialization).
+    pub fn empty() -> Self {
         BoxfsMetadata {
-            records: alloc::vec![root],
-            root_index: 1,
-            archive_size: 0,
-            data_offset: 0,
-            fst_data: None,
-            block_fst_data: None,
+            archives: HashMap::new(),
+            merged_fst: FstBuilder::new(),
+            next_archive_id: 0,
             block_cache: RefCell::new(BlockCache::default()),
-            attr_keys: Vec::new(),
         }
     }
 
-    /// Get attribute key name by index
-    pub fn attr_key_name(&self, index: usize) -> Option<&str> {
-        self.attr_keys.get(index).map(|k| k.name.as_str())
+    /// Add an archive, merging its paths into the unified FST.
+    ///
+    /// Conflict policy:
+    /// - Directories merge (both remain, children combine)
+    /// - Files use last-wins (newer archive shadows older)
+    pub fn add_archive(&mut self, mut archive: ArchiveData) -> u64 {
+        let archive_id = self.next_archive_id;
+        self.next_archive_id += 1;
+        archive.id = archive_id;
+
+        // Merge this archive's paths into the unified FST
+        if let Some(ref fst_bytes) = archive.fst_data {
+            if let Ok(fst) = Fst::<_, u64>::new(Cow::Borrowed(fst_bytes.as_ref())) {
+                for (path, local_idx) in fst.prefix_iter(&[]) {
+                    if local_idx == 0 {
+                        continue;
+                    }
+
+                    let composite = Self::pack_index(archive_id, local_idx);
+
+                    // Check for conflicts
+                    if let Some(existing) = self.merged_fst.get(&path) {
+                        let existing_record = self.get(existing);
+                        let new_record = archive.records.get(local_idx as usize - 1);
+
+                        // If both are directories, keep existing (children will merge via iteration)
+                        if existing_record.map_or(false, |r| r.is_dir())
+                            && new_record.map_or(false, |r| r.is_dir())
+                        {
+                            continue;
+                        }
+                        // Otherwise fall through to overwrite (last-wins for files)
+                    }
+
+                    // Insert or overwrite
+                    self.merged_fst.insert_or_replace(&path, composite);
+                }
+            }
+        }
+
+        self.archives.insert(archive_id, archive);
+        archive_id
     }
 
-    /// Find attribute key index by name
-    pub fn find_attr_key(&self, name: &str) -> Option<usize> {
-        self.attr_keys.iter().position(|k| k.name == name)
+    /// Get the archive for a composite index.
+    pub fn get_archive(&self, composite: u128) -> Option<&ArchiveData> {
+        let (archive_id, _) = Self::unpack_index(composite);
+        self.archives.get(&archive_id)
+    }
+
+    /// Get attribute key name by index from the appropriate archive.
+    pub fn attr_key_name(&self, composite: u128, key_index: usize) -> Option<&str> {
+        let archive = self.get_archive(composite)?;
+        archive.attr_keys.get(key_index).map(|k| k.name.as_str())
+    }
+
+    /// Find attribute key index by name in the appropriate archive.
+    pub fn find_attr_key(&self, composite: u128, name: &str) -> Option<usize> {
+        let archive = self.get_archive(composite)?;
+        archive.attr_keys.iter().position(|k| k.name == name)
     }
 
     /// Get an xattr value for a record by xattr name (e.g., "user.myattr")
     /// This looks up "linux.xattr.{name}" in the record's attrs
-    pub fn get_xattr<'a>(&self, record: &'a Record, name: &str) -> Option<&'a [u8]> {
-        // Construct the full key name
+    pub fn get_xattr<'a>(&'a self, composite: u128, record: &'a Record, name: &str) -> Option<&'a [u8]> {
         let full_name = alloc::format!("{}{}", LINUX_XATTR_PREFIX, name);
-        let key_idx = self.find_attr_key(&full_name)?;
+        let key_idx = self.find_attr_key(composite, &full_name)?;
         record.attrs.get(&key_idx).map(|v| v.as_ref())
     }
 
     /// List all xattr names for a record
     /// Returns iterator over xattr names (without "linux.xattr." prefix)
-    pub fn list_xattrs<'a>(&'a self, record: &'a Record) -> impl Iterator<Item = &'a str> {
+    pub fn list_xattrs<'a>(&'a self, composite: u128, record: &'a Record) -> impl Iterator<Item = &'a str> {
+        let archive = self.get_archive(composite);
         record.attrs.keys().filter_map(move |&key_idx| {
-            self.attr_key_name(key_idx)
+            archive
+                .and_then(|a| a.attr_keys.get(key_idx))
+                .map(|k| k.name.as_str())
                 .and_then(|name| name.strip_prefix(LINUX_XATTR_PREFIX))
         })
     }
 
-    /// Get a record by 1-based index
-    pub fn get(&self, index: u64) -> Option<&Record> {
-        if index == 0 {
+    /// Get a record by composite index.
+    pub fn get(&self, composite: u128) -> Option<&Record> {
+        let (archive_id, local_idx) = Self::unpack_index(composite);
+        if local_idx == 0 {
             return None;
         }
-        self.records.get(index as usize - 1)
+        let archive = self.archives.get(&archive_id)?;
+        archive.records.get(local_idx as usize - 1)
     }
 
-    /// Get record count
+    /// Get total record count across all archives.
     pub fn record_count(&self) -> u64 {
-        self.records.len() as u64
+        self.archives.values().map(|a| a.records.len() as u64).sum()
     }
 
-    /// Find a child record by name within a directory
-    pub fn find_child(&self, parent_index: u64, name: &str) -> Option<u64> {
-        // First try FST lookup if available
-        if let Some(ref fst_data) = self.fst_data {
-            // Get parent path and append child name
-            if let Some(parent_path) = self.path_for_index(parent_index) {
-                let child_path = if parent_path.is_empty() {
-                    name.to_string()
-                } else {
-                    alloc::format!("{}/{}", parent_path, name)
-                };
-                if let Some(idx) = crate::parser::fst_lookup(fst_data, &child_path) {
-                    return Some(idx);
-                }
+    /// Find a child record by name within a directory.
+    /// Uses the merged FST for lookups.
+    pub fn find_child(&self, parent_composite: u128, name: &str) -> Option<u128> {
+        // Get parent path from merged FST
+        if let Some(parent_path) = self.path_for_index(parent_composite) {
+            // Build child path key (using 0x1f as separator)
+            let child_key: Vec<u8> = if parent_path.is_empty() {
+                name.as_bytes().to_vec()
+            } else {
+                let mut key = parent_path;
+                key.push(0x1f);
+                key.extend_from_slice(name.as_bytes());
+                key
+            };
+
+            // Look up in merged FST
+            if let Some(composite) = self.merged_fst.get(&child_key) {
+                return Some(composite);
             }
         }
 
-        // Fall back to linear search in directory children
-        let parent = self.get(parent_index)?;
+        // Fall back to linear search in directory children (for non-FST archives)
+        let parent = self.get(parent_composite)?;
         if let RecordData::Directory { children } = &parent.data {
-            for &child_idx in children {
-                if let Some(child) = self.get(child_idx) {
+            let (archive_id, _) = Self::unpack_index(parent_composite);
+            for &local_child_idx in children {
+                let child_composite = Self::pack_index(archive_id, local_child_idx);
+                if let Some(child) = self.get(child_composite) {
                     if child.name == name {
-                        return Some(child_idx);
+                        return Some(child_composite);
                     }
                 }
             }
@@ -403,60 +482,69 @@ impl BoxfsMetadata {
         None
     }
 
-    /// Get path for a record index (for symlink resolution)
-    pub fn path_for_index(&self, index: u64) -> Option<String> {
-        // If we have FST data, search through it
-        if let Some(ref fst_data) = self.fst_data {
-            if let Ok(fst) = Fst::new(Cow::Borrowed(fst_data.as_ref())) {
-                for (key, idx) in fst.prefix_iter(&[]) {
-                    if idx == index {
-                        // Convert key to path string (0x1f -> /)
-                        let path_bytes: Vec<u8> = key.iter()
-                            .map(|&b| if b == 0x1f { b'/' } else { b })
-                            .collect();
-                        if let Ok(path) = core::str::from_utf8(&path_bytes) {
-                            return Some(String::from(path));
-                        }
-                    }
-                }
+    /// Get path (as FST key bytes) for a composite index.
+    /// Returns None if not found in merged FST.
+    pub fn path_for_index(&self, composite: u128) -> Option<Vec<u8>> {
+        // Search merged FST for this composite index
+        for (key, idx) in self.merged_fst.prefix_iter(&[]) {
+            if idx == composite {
+                return Some(key);
             }
         }
 
-        // Simple fallback for root
-        if index == self.root_index {
-            return Some(String::new());
+        // Check if this is a root of any archive
+        for (archive_id, archive) in &self.archives {
+            if Self::pack_index(*archive_id, archive.root_index) == composite {
+                return Some(Vec::new()); // Root has empty path
+            }
         }
 
         None
     }
 
-    /// Get direct children of a directory
-    pub fn children(&self, dir_index: u64) -> Vec<(u64, &Record)> {
+    /// Get path as a string for a composite index (for symlink resolution).
+    pub fn path_string_for_index(&self, composite: u128) -> Option<String> {
+        let key = self.path_for_index(composite)?;
+        // Convert key to path string (0x1f -> /)
+        let path_bytes: Vec<u8> = key.iter()
+            .map(|&b| if b == 0x1f { b'/' } else { b })
+            .collect();
+        core::str::from_utf8(&path_bytes).ok().map(String::from)
+    }
+
+    /// Get direct children of a directory from merged FST.
+    /// Merges children from all archives for directories that exist in multiple.
+    pub fn children(&self, dir_composite: u128) -> Vec<(u128, &Record)> {
         let mut result = Vec::new();
+        let mut seen_names: HashMap<&str, u128> = HashMap::new();
 
-        // Try FST first
-        if let Some(ref fst_data) = self.fst_data {
-            if let Some(parent_path) = self.path_for_index(dir_index) {
-                let children = crate::parser::fst_children(fst_data, &parent_path);
-                for (_, idx) in children {
-                    if let Some(record) = self.get(idx) {
-                        result.push((idx, record));
-                    }
-                }
-                if !result.is_empty() {
-                    return result;
-                }
+        // Get parent path
+        let parent_path = match self.path_for_index(dir_composite) {
+            Some(p) => p,
+            None => return result,
+        };
+
+        // Build prefix for children
+        let prefix: Vec<u8> = if parent_path.is_empty() {
+            Vec::new()
+        } else {
+            let mut p = parent_path;
+            p.push(0x1f); // Add separator for children
+            p
+        };
+
+        // Iterate merged FST for children
+        for (key, composite) in self.merged_fst.prefix_iter(&prefix) {
+            // Check if this is a direct child (no more separators after prefix)
+            let suffix = &key[prefix.len()..];
+            if suffix.contains(&0x1f) {
+                continue; // Not a direct child
             }
-        }
 
-        // Fall back to directory entries
-        if let Some(dir) = self.get(dir_index) {
-            if let RecordData::Directory { children } = &dir.data {
-                for &child_idx in children {
-                    if let Some(record) = self.get(child_idx) {
-                        result.push((child_idx, record));
-                    }
-                }
+            if let Some(record) = self.get(composite) {
+                // For merged directories, use last-seen (which is last-mounted)
+                seen_names.insert(&record.name, composite);
+                result.push((composite, record));
             }
         }
 
@@ -466,13 +554,16 @@ impl BoxfsMetadata {
     /// Find the block containing a logical offset for a chunked file.
     /// Returns (physical_offset, block_logical_offset) or None if not found.
     ///
-    /// Uses predecessor query: finds largest key <= (record_index, logical_offset).
-    pub fn find_block(&self, record_index: u64, logical_offset: u64) -> Option<(u64, u64)> {
-        let block_fst_data = self.block_fst_data.as_ref()?;
-        let fst = Fst::new(Cow::Borrowed(block_fst_data.as_ref())).ok()?;
+    /// Note: For multi-archive, the physical_offset is relative to the archive's data section.
+    /// Caller must add archive.data_offset_base.
+    pub fn find_block(&self, composite: u128, logical_offset: u64) -> Option<(u64, u64)> {
+        let (archive_id, local_idx) = Self::unpack_index(composite);
+        let archive = self.archives.get(&archive_id)?;
+        let block_fst_data = archive.block_fst_data.as_ref()?;
+        let fst = Fst::<_, u64>::new(Cow::Borrowed(block_fst_data.as_ref())).ok()?;
 
-        // Prefix is just the record_index (first 8 bytes)
-        let prefix = record_index.to_be_bytes();
+        // Prefix is the local record_index (first 8 bytes)
+        let prefix = local_idx.to_be_bytes();
 
         // FST iteration gives keys in sorted order
         // Find the last key <= our query (predecessor)
@@ -494,11 +585,13 @@ impl BoxfsMetadata {
 
     /// Get the next block after a given logical offset for a chunked file.
     /// Returns (next_logical_offset, next_physical_offset) or None if no more blocks.
-    pub fn next_block(&self, record_index: u64, current_logical: u64) -> Option<(u64, u64)> {
-        let block_fst_data = self.block_fst_data.as_ref()?;
-        let fst = Fst::new(Cow::Borrowed(block_fst_data.as_ref())).ok()?;
+    pub fn next_block(&self, composite: u128, current_logical: u64) -> Option<(u64, u64)> {
+        let (archive_id, local_idx) = Self::unpack_index(composite);
+        let archive = self.archives.get(&archive_id)?;
+        let block_fst_data = archive.block_fst_data.as_ref()?;
+        let fst = Fst::<_, u64>::new(Cow::Borrowed(block_fst_data.as_ref())).ok()?;
 
-        let prefix = record_index.to_be_bytes();
+        let prefix = local_idx.to_be_bytes();
 
         // Keys are sorted, find first block with logical > current_logical
         for (k, physical_offset) in fst.prefix_iter(&prefix) {
@@ -515,15 +608,19 @@ impl BoxfsMetadata {
 
     /// Get all blocks for a chunked file record.
     /// Returns Vec of (logical_offset, physical_offset) in sorted order.
-    pub fn blocks_for_record(&self, record_index: u64) -> Vec<(u64, u64)> {
-        let Some(block_fst_data) = self.block_fst_data.as_ref() else {
+    pub fn blocks_for_record(&self, composite: u128) -> Vec<(u64, u64)> {
+        let (archive_id, local_idx) = Self::unpack_index(composite);
+        let Some(archive) = self.archives.get(&archive_id) else {
             return Vec::new();
         };
-        let Ok(fst) = Fst::new(Cow::Borrowed(block_fst_data.as_ref())) else {
+        let Some(block_fst_data) = archive.block_fst_data.as_ref() else {
+            return Vec::new();
+        };
+        let Ok(fst) = Fst::<_, u64>::new(Cow::Borrowed(block_fst_data.as_ref())) else {
             return Vec::new();
         };
 
-        let prefix = record_index.to_be_bytes();
+        let prefix = local_idx.to_be_bytes();
 
         // FST iteration is already sorted by key
         let mut blocks = Vec::new();
@@ -534,5 +631,16 @@ impl BoxfsMetadata {
             }
         }
         blocks
+    }
+
+    /// Get the first archive's root as the filesystem root.
+    /// Returns composite index or 0 if no archives.
+    pub fn root_index(&self) -> u128 {
+        // Return first archive's root
+        if let Some((&archive_id, archive)) = self.archives.iter().next() {
+            Self::pack_index(archive_id, archive.root_index)
+        } else {
+            0
+        }
     }
 }

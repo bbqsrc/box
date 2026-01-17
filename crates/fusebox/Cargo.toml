@@ -14,9 +14,12 @@ path = "src/main.rs"
 
 [dependencies]
 box-format.workspace = true
+box-fst.workspace = true
 fastvint.workspace = true
 fuser.workspace = true
 clap = { workspace = true, features = ["derive"] }
 tracing.workspace = true
 tracing-subscriber.workspace = true
 libc.workspace = true
+lru = "0.12"
+pathdiff.workspace = true

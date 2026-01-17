@@ -5,8 +5,6 @@ pub enum BuildError {
     OutOfOrder,
     DuplicateKey,
     Empty,
-    #[cfg(feature = "std")]
-    Io(std::io::Error),
 }
 
 impl fmt::Display for BuildError {
@@ -15,28 +13,11 @@ impl fmt::Display for BuildError {
             BuildError::OutOfOrder => write!(f, "keys must be inserted in lexicographic order"),
             BuildError::DuplicateKey => write!(f, "duplicate key"),
             BuildError::Empty => write!(f, "FST is empty (no keys inserted)"),
-            #[cfg(feature = "std")]
-            BuildError::Io(e) => write!(f, "I/O error: {}", e),
         }
     }
 }
 
-impl core::error::Error for BuildError {
-    fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
-        match self {
-            #[cfg(feature = "std")]
-            BuildError::Io(e) => Some(e),
-            _ => None,
-        }
-    }
-}
-
-#[cfg(feature = "std")]
-impl From<std::io::Error> for BuildError {
-    fn from(e: std::io::Error) -> Self {
-        BuildError::Io(e)
-    }
-}
+impl core::error::Error for BuildError {}
 
 #[derive(Debug)]
 pub enum FstError {

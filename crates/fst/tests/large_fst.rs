@@ -1,4 +1,4 @@
-use box_fst::{Fst, FstBuilder};
+use box_fst::{Fst, FstBuilder, FstValue};
 use rand::distributions::WeightedIndex;
 use rand::prelude::*;
 
@@ -322,7 +322,7 @@ fn test_large_fst_realistic() {
 
     println!("\nBuilding FST...");
     let start = std::time::Instant::now();
-    let mut builder = FstBuilder::new();
+    let mut builder: FstBuilder<u64> = FstBuilder::new();
     for (path, value) in &paths {
         builder.insert(path, *value).unwrap();
     }
@@ -347,7 +347,7 @@ fn test_large_fst_realistic() {
         raw_size as f64 / fst_data.len() as f64
     );
 
-    let fst = Fst::new(&fst_data).unwrap();
+    let fst: Fst<_, u64> = Fst::new(&fst_data).unwrap();
     assert_eq!(fst.len(), paths.len() as u64);
 
     println!("\nVerifying all {} lookups...", paths.len());
@@ -381,12 +381,12 @@ fn test_large_fst_prefix_queries_realistic() {
     let paths = generator.generate_paths(TARGET_COUNT);
 
     println!("Building FST...");
-    let mut builder = FstBuilder::new();
+    let mut builder: FstBuilder<u64> = FstBuilder::new();
     for (path, value) in &paths {
         builder.insert(path, *value).unwrap();
     }
     let fst_data = builder.finish().unwrap();
-    let fst = Fst::new(&fst_data).unwrap();
+    let fst: Fst<_, u64> = Fst::new(&fst_data).unwrap();
 
     // Test prefix query for "src" directory
     let prefix = format!("src{}", PATH_SEP).into_bytes();

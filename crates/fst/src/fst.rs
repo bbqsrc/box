@@ -1,8 +1,10 @@
-#[cfg(feature = "alloc")]
 use alloc::vec::Vec;
+use core::marker::PhantomData;
 
 use crate::error::FstError;
-use crate::node::{HEADER_SIZE, Header, INDEX_ENTRY_SIZE, NodeIndex, NodeRef, read_header};
+use crate::node::{
+    FstValue, HEADER_SIZE, Header, INDEX_ENTRY_SIZE, NodeIndex, NodeRef, read_header,
+};
 
 /// Prefetch memory for read.
 #[inline(always)]
@@ -92,23 +94,25 @@ fn fast_eq_simd_sse2(a: &[u8], b: &[u8]) -> bool {
 
 /// Internal state for prefix traversal.
 #[derive(Clone)]
-struct EachState {
+struct EachState<V: FstValue> {
     node_id: u32,
     edge_idx: usize,
     key_len: usize,
-    output_sum: u64,
+    output_sum: V,
     emitted_final: bool,
 }
 
 /// An immutable FST that can be queried.
 ///
 /// Generic over `D: AsRef<[u8]>` to support zero-copy from memory-mapped data.
-pub struct Fst<D> {
+/// Generic over `V: FstValue` for the output type (default: `u64`).
+pub struct Fst<D, V: FstValue = u64> {
     data: D,
     header: Header,
+    _marker: PhantomData<V>,
 }
 
-impl<D: AsRef<[u8]>> Fst<D> {
+impl<D: AsRef<[u8]>, V: FstValue> Fst<D, V> {
     /// Open an FST from bytes.
     pub fn new(data: D) -> Result<Self, FstError> {
         let bytes = data.as_ref();
@@ -119,7 +123,11 @@ impl<D: AsRef<[u8]>> Fst<D> {
 
         let header = read_header(bytes)?;
 
-        Ok(Self { data, header })
+        Ok(Self {
+            data,
+            header,
+            _marker: PhantomData,
+        })
     }
 
     /// Get node index entry by node ID.
@@ -132,7 +140,7 @@ impl<D: AsRef<[u8]>> Fst<D> {
 
     /// Get node by ID.
     #[inline]
-    fn get_node(&self, node_id: u32) -> Option<NodeRef<'_>> {
+    fn get_node(&self, node_id: u32) -> Option<NodeRef<'_, V>> {
         let bytes = self.data.as_ref();
         let idx = self.get_node_index(node_id);
 
@@ -146,11 +154,11 @@ impl<D: AsRef<[u8]>> Fst<D> {
     }
 
     /// Get the value for an exact key match.
-    pub fn get(&self, key: &[u8]) -> Option<u64> {
+    pub fn get(&self, key: &[u8]) -> Option<V> {
         let bytes = self.data.as_ref();
         let mut current_node_id = 0u32; // Root is always node 0
         let mut remaining = key;
-        let mut output_sum: u64 = 0;
+        let mut output_sum: V = V::default();
 
         while !remaining.is_empty() {
             let node = self.get_node(current_node_id)?;
@@ -205,14 +213,14 @@ impl<D: AsRef<[u8]>> Fst<D> {
     }
 
     /// Iterate all entries with a given prefix.
-    pub fn prefix_iter(&self, prefix: &[u8]) -> PrefixIter<'_, D> {
+    pub fn prefix_iter(&self, prefix: &[u8]) -> PrefixIter<'_, D, V> {
         PrefixIter::new(self, prefix)
     }
 
     /// Zero-allocation prefix traversal via callback.
     pub fn prefix_each<F>(&self, prefix: &[u8], mut f: F) -> bool
     where
-        F: FnMut(&[u8], u64) -> bool,
+        F: FnMut(&[u8], V) -> bool,
     {
         let bytes = self.data.as_ref();
         let mut key_buffer = Vec::new();
@@ -292,11 +300,11 @@ impl<D: AsRef<[u8]>> Fst<D> {
     }
 
     /// Navigate to prefix node.
-    fn navigate_to_prefix(&self, prefix: &[u8], key_buffer: &mut Vec<u8>) -> Option<(u32, u64)> {
+    fn navigate_to_prefix(&self, prefix: &[u8], key_buffer: &mut Vec<u8>) -> Option<(u32, V)> {
         let bytes = self.data.as_ref();
         let mut current_node_id = 0u32; // Root is always node 0
         let mut remaining = prefix;
-        let mut output_sum: u64 = 0;
+        let mut output_sum: V = V::default();
 
         while !remaining.is_empty() {
             let node = self.get_node(current_node_id)?;
@@ -345,23 +353,23 @@ impl<D: AsRef<[u8]>> Fst<D> {
 }
 
 /// Compact iterator state.
-struct IterState {
+struct IterState<V: FstValue> {
     node_id: u32,
     edge_idx: usize,
     key_len: usize,
-    output_sum: u64,
+    output_sum: V,
     emitted_final: bool,
 }
 
 /// Iterator over all entries with a given prefix.
-pub struct PrefixIter<'a, D> {
-    fst: &'a Fst<D>,
+pub struct PrefixIter<'a, D, V: FstValue = u64> {
+    fst: &'a Fst<D, V>,
     key_buffer: Vec<u8>,
-    stack: Vec<IterState>,
+    stack: Vec<IterState<V>>,
 }
 
-impl<'a, D: AsRef<[u8]>> PrefixIter<'a, D> {
-    fn new(fst: &'a Fst<D>, prefix: &[u8]) -> Self {
+impl<'a, D: AsRef<[u8]>, V: FstValue> PrefixIter<'a, D, V> {
+    fn new(fst: &'a Fst<D, V>, prefix: &[u8]) -> Self {
         let mut iter = Self {
             fst,
             key_buffer: Vec::new(),
@@ -381,11 +389,11 @@ impl<'a, D: AsRef<[u8]>> PrefixIter<'a, D> {
         iter
     }
 
-    fn navigate_to_prefix(&mut self, prefix: &[u8]) -> Option<(u32, u64)> {
+    fn navigate_to_prefix(&mut self, prefix: &[u8]) -> Option<(u32, V)> {
         let bytes = self.fst.data.as_ref();
         let mut current_node_id = 0u32; // Root is always node 0
         let mut remaining = prefix;
-        let mut output_sum: u64 = 0;
+        let mut output_sum: V = V::default();
 
         while !remaining.is_empty() {
             let node = self.fst.get_node(current_node_id)?;
@@ -428,8 +436,8 @@ impl<'a, D: AsRef<[u8]>> PrefixIter<'a, D> {
     }
 }
 
-impl<D: AsRef<[u8]>> Iterator for PrefixIter<'_, D> {
-    type Item = (Vec<u8>, u64);
+impl<D: AsRef<[u8]>, V: FstValue> Iterator for PrefixIter<'_, D, V> {
+    type Item = (Vec<u8>, V);
 
     fn next(&mut self) -> Option<Self::Item> {
         let bytes = self.fst.data.as_ref();
@@ -494,11 +502,11 @@ mod tests {
 
     #[test]
     fn test_get_single() {
-        let mut builder = FstBuilder::new();
+        let mut builder: FstBuilder<u64> = FstBuilder::new();
         builder.insert(b"hello", 42).unwrap();
         let data = builder.finish().unwrap();
 
-        let fst = Fst::new(data).unwrap();
+        let fst: Fst<_, u64> = Fst::new(data).unwrap();
         assert_eq!(fst.get(b"hello"), Some(42));
         assert_eq!(fst.get(b"hell"), None);
         assert_eq!(fst.get(b"hello!"), None);
@@ -507,13 +515,13 @@ mod tests {
 
     #[test]
     fn test_get_multiple() {
-        let mut builder = FstBuilder::new();
+        let mut builder: FstBuilder<u64> = FstBuilder::new();
         builder.insert(b"bar", 1).unwrap();
         builder.insert(b"baz", 2).unwrap();
         builder.insert(b"foo", 3).unwrap();
         let data = builder.finish().unwrap();
 
-        let fst = Fst::new(data).unwrap();
+        let fst: Fst<_, u64> = Fst::new(data).unwrap();
         assert_eq!(fst.get(b"bar"), Some(1));
         assert_eq!(fst.get(b"baz"), Some(2));
         assert_eq!(fst.get(b"foo"), Some(3));
@@ -523,13 +531,13 @@ mod tests {
 
     #[test]
     fn test_shared_prefix() {
-        let mut builder = FstBuilder::new();
+        let mut builder: FstBuilder<u64> = FstBuilder::new();
         builder.insert(b"test", 1).unwrap();
         builder.insert(b"testing", 2).unwrap();
         builder.insert(b"tests", 3).unwrap();
         let data = builder.finish().unwrap();
 
-        let fst = Fst::new(data).unwrap();
+        let fst: Fst<_, u64> = Fst::new(data).unwrap();
         assert_eq!(fst.get(b"test"), Some(1));
         assert_eq!(fst.get(b"testing"), Some(2));
         assert_eq!(fst.get(b"tests"), Some(3));
@@ -538,14 +546,14 @@ mod tests {
 
     #[test]
     fn test_prefix_iter() {
-        let mut builder = FstBuilder::new();
+        let mut builder: FstBuilder<u64> = FstBuilder::new();
         builder.insert(b"foo", 1).unwrap();
         builder.insert(b"foobar", 2).unwrap();
         builder.insert(b"foobaz", 3).unwrap();
         builder.insert(b"qux", 4).unwrap();
         let data = builder.finish().unwrap();
 
-        let fst = Fst::new(data).unwrap();
+        let fst: Fst<_, u64> = Fst::new(data).unwrap();
 
         let results: Vec<_> = fst.prefix_iter(b"foo").collect();
         assert_eq!(results.len(), 3);
@@ -566,13 +574,13 @@ mod tests {
 
     #[test]
     fn test_prefix_iter_all() {
-        let mut builder = FstBuilder::new();
+        let mut builder: FstBuilder<u64> = FstBuilder::new();
         builder.insert(b"a", 1).unwrap();
         builder.insert(b"b", 2).unwrap();
         builder.insert(b"c", 3).unwrap();
         let data = builder.finish().unwrap();
 
-        let fst = Fst::new(data).unwrap();
+        let fst: Fst<_, u64> = Fst::new(data).unwrap();
 
         let results: Vec<_> = fst.prefix_iter(b"").collect();
         assert_eq!(results.len(), 3);
@@ -580,14 +588,14 @@ mod tests {
 
     #[test]
     fn test_prefix_each() {
-        let mut builder = FstBuilder::new();
+        let mut builder: FstBuilder<u64> = FstBuilder::new();
         builder.insert(b"foo", 1).unwrap();
         builder.insert(b"foobar", 2).unwrap();
         builder.insert(b"foobaz", 3).unwrap();
         builder.insert(b"qux", 4).unwrap();
         let data = builder.finish().unwrap();
 
-        let fst = Fst::new(data).unwrap();
+        let fst: Fst<_, u64> = Fst::new(data).unwrap();
 
         let mut results = Vec::new();
         fst.prefix_each(b"foo", |key, value| {

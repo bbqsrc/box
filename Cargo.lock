@@ -306,7 +306,7 @@ dependencies = [
  "futures",
  "hashbrown",
  "hex",
- "lru",
+ "lru 0.14.0",
  "mmap-io",
  "pathdiff",
  "relative-path",
@@ -761,10 +761,13 @@ name = "fusebox"
 version = "0.1.0"
 dependencies = [
  "box-format",
+ "box-fst",
  "clap",
  "fastvint",
  "fuser",
  "libc",
+ "lru 0.12.5",
+ "pathdiff",
  "tracing",
  "tracing-subscriber",
 ]
@@ -772,7 +775,7 @@ dependencies = [
 [[package]]
 name = "fuser"
 version = "0.16.0"
-source = "git+https://github.com/cberner/fuser#1b0f90fd59af86e484997cdf9a3b5d05d32a5788"
+source = "git+https://github.com/cberner/fuser#ad577c581f91f1a95d9b27f3782746031ba94c3f"
 dependencies = [
  "bitflags",
  "libc",
@@ -1130,6 +1133,15 @@ name = "log"
 version = "0.4.29"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5e5032e24019045c762d3c0f28f5b6b8bbf38563a65908389bf7978758920897"
+
+[[package]]
+name = "lru"
+version = "0.12.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "234cf4f4a04dc1f57e24b96cc0cd600cf2af460d4161ac5ecdd0af8e1f3b2a38"
+dependencies = [
+ "hashbrown",
+]
 
 [[package]]
 name = "lru"

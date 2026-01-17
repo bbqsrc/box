@@ -12,7 +12,7 @@ use alloc::vec::Vec;
 use box_fst::Fst;
 
 use crate::error::KernelError;
-use crate::metadata::{AttrKey, AttrMap, AttrType, BoxfsMetadata, Compression, Record, RecordData};
+use crate::metadata::{ArchiveData, AttrKey, AttrMap, AttrType, Compression, Record, RecordData};
 use hashbrown::HashMap;
 
 /// Magic bytes for Box format.
@@ -548,8 +548,9 @@ fn parse_fst_data(data: &[u8]) -> Result<Option<Box<[u8]>>, KernelError> {
 // FULL METADATA PARSING
 // ============================================================================
 
-/// Parse the complete trailer into metadata.
-pub fn parse_trailer(data: &[u8], cache_capacity: usize) -> Result<BoxfsMetadata, KernelError> {
+/// Parse the complete trailer into archive data.
+/// Returns ArchiveData that can be added to BoxfsMetadata via add_archive().
+pub fn parse_trailer(data: &[u8]) -> Result<ArchiveData, KernelError> {
     let mut pos = 0;
 
     // Parse attr_keys
@@ -593,14 +594,14 @@ pub fn parse_trailer(data: &[u8], cache_capacity: usize) -> Result<BoxfsMetadata
         .map(|i| i as u64 + 1) // +1 because indices are 1-based
         .unwrap_or(1);
 
-    Ok(BoxfsMetadata {
+    Ok(ArchiveData {
+        id: 0, // Will be assigned by add_archive()
         records,
         root_index,
         archive_size: 0, // Set later by caller
-        data_offset: 32, // Header size, data starts after
+        data_offset_base: 32, // Header size, data starts after
         fst_data,
         block_fst_data,
-        block_cache: core::cell::RefCell::new(crate::metadata::BlockCache::new(cache_capacity)),
         attr_keys,
     })
 }
@@ -626,7 +627,7 @@ fn build_directory_tree(records: &mut [Record], fst_data: Option<&[u8]>) {
     // Then use that to populate directory children
 
     // For efficiency, we iterate FST entries and populate parent directories
-    let fst = match Fst::new(Cow::Borrowed(fst_bytes)) {
+    let fst = match Fst::<_, u64>::new(Cow::Borrowed(fst_bytes)) {
         Ok(f) => f,
         Err(_) => return,
     };
@@ -681,7 +682,7 @@ fn build_directory_tree(records: &mut [Record], fst_data: Option<&[u8]>) {
 
 /// Look up a path in the FST and return the record index.
 pub fn fst_lookup(fst_data: &[u8], path: &str) -> Option<u64> {
-    let fst = Fst::new(Cow::Borrowed(fst_data)).ok()?;
+    let fst = Fst::<_, u64>::new(Cow::Borrowed(fst_data)).ok()?;
 
     // Convert path to FST key format (using 0x1f as separator)
     let key: Vec<u8> = path.as_bytes()
@@ -694,7 +695,7 @@ pub fn fst_lookup(fst_data: &[u8], path: &str) -> Option<u64> {
 
 /// Get direct children of a directory from FST.
 pub fn fst_children(fst_data: &[u8], parent_path: &str) -> Vec<(String, u64)> {
-    let fst = match Fst::new(Cow::Borrowed(fst_data)) {
+    let fst = match Fst::<_, u64>::new(Cow::Borrowed(fst_data)) {
         Ok(f) => f,
         Err(_) => return Vec::new(),
     };

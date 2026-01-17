@@ -8,12 +8,66 @@
 //! [Cold Section]                       <- edge labels, outputs, target_node_ids
 //! ```
 
-#[cfg(feature = "alloc")]
 use alloc::vec::Vec;
+use fastvint::{decode_vu64_slice, encode_vu64};
 
-#[cfg(feature = "std")]
-use fastvint::WriteVintExt;
-use fastvint::decode_vu64_slice;
+/// Trait for FST value types (outputs stored at nodes and edges).
+///
+/// Implemented for `u64` and `u128`. Can be extended to other types.
+pub trait FstValue: Copy + Default + PartialEq {
+    /// Write this value as VLQ-encoded bytes.
+    fn write_vlq(&self, buf: &mut Vec<u8>);
+
+    /// Read a VLQ-encoded value from the given position.
+    /// Updates `pos` to point past the read bytes.
+    fn read_vlq(data: &[u8], pos: &mut usize) -> Option<Self>;
+
+    /// Wrapping addition (for accumulating outputs along paths).
+    fn wrapping_add(self, other: Self) -> Self;
+}
+
+impl FstValue for u64 {
+    #[inline]
+    fn write_vlq(&self, buf: &mut Vec<u8>) {
+        let v = encode_vu64(*self);
+        buf.extend_from_slice(&v.bytes()[..v.len() as usize]);
+    }
+
+    #[inline]
+    fn read_vlq(data: &[u8], pos: &mut usize) -> Option<Self> {
+        let (value, len) = decode_vu64_slice(data.get(*pos..)?);
+        *pos += len;
+        Some(value)
+    }
+
+    #[inline]
+    fn wrapping_add(self, other: Self) -> Self {
+        u64::wrapping_add(self, other)
+    }
+}
+
+impl FstValue for u128 {
+    #[inline]
+    fn write_vlq(&self, buf: &mut Vec<u8>) {
+        // Write as two VLQ u64s: low then high
+        let low = *self as u64;
+        let high = (*self >> 64) as u64;
+        u64::write_vlq(&low, buf);
+        u64::write_vlq(&high, buf);
+    }
+
+    #[inline]
+    fn read_vlq(data: &[u8], pos: &mut usize) -> Option<Self> {
+        let low = u64::read_vlq(data, pos)?;
+        let high = u64::read_vlq(data, pos)?;
+        Some((high as u128) << 64 | low as u128)
+    }
+
+    #[inline]
+    fn wrapping_add(self, other: Self) -> Self {
+        u128::wrapping_add(self, other)
+    }
+}
 
 /// Header constants
 pub const MAGIC: &[u8; 4] = b"BFST";
@@ -45,7 +99,6 @@ impl Header {
 }
 
 /// Write the FST header.
-#[cfg(feature = "alloc")]
 pub fn write_header(header: &Header, buf: &mut Vec<u8>) {
     buf.extend_from_slice(MAGIC);
     buf.push(VERSION);
@@ -82,18 +135,18 @@ pub fn read_header(data: &[u8]) -> Result<Header, crate::FstError> {
     })
 }
 
-/// Read a VLQ u64 directly from slice.
+/// Read a VLQ u64 directly from slice (internal helper).
 #[inline(always)]
-fn read_vlq(data: &[u8], pos: &mut usize) -> Option<u64> {
+fn read_vlq_u64(data: &[u8], pos: &mut usize) -> Option<u64> {
     let (value, len) = decode_vu64_slice(data.get(*pos..)?);
     *pos += len;
     Some(value)
 }
 
-/// Write a VLQ u64 to a buffer.
-#[cfg(feature = "std")]
-fn write_vlq(buf: &mut Vec<u8>, value: u64) -> std::io::Result<()> {
-    buf.write_vu64(value)
+/// Write a VLQ u64 to a buffer (internal helper).
+fn write_vlq_u64(buf: &mut Vec<u8>, value: u64) {
+    let v = encode_vu64(value);
+    buf.extend_from_slice(&v.bytes()[..v.len() as usize]);
 }
 
 /// Index entry for a node.
@@ -120,9 +173,9 @@ impl NodeIndex {
 
 /// Serialized edge in cold section.
 #[derive(Debug, Clone)]
-pub struct EdgeRef<'a> {
+pub struct EdgeRef<'a, V: FstValue = u64> {
     pub label: &'a [u8],
-    pub output: u64,
+    pub output: V,
     pub target_node_id: u32,
 }
 
@@ -137,9 +190,9 @@ pub(crate) enum NodeFormat {
 
 /// Node reference with hot/cold data separation.
 #[derive(Debug)]
-pub struct NodeRef<'a> {
+pub struct NodeRef<'a, V: FstValue = u64> {
     pub is_final: bool,
-    pub final_output: u64,
+    pub final_output: V,
     pub(crate) format: NodeFormat,
     edge_count: usize,
     /// For Compact: first_bytes array; For Indexed: 256-byte index table
@@ -148,7 +201,7 @@ pub struct NodeRef<'a> {
     cold_data: &'a [u8],
 }
 
-impl<'a> NodeRef<'a> {
+impl<'a, V: FstValue> NodeRef<'a, V> {
     /// Parse a node from hot and cold section data.
     /// hot_data: slice starting at this node's hot section offset
     /// cold_data: slice starting at this node's cold section offset
@@ -162,7 +215,7 @@ impl<'a> NodeRef<'a> {
         let is_indexed = (flags & FLAG_INDEXED) != 0;
         let mut pos = 1;
 
-        let edge_count = read_vlq(hot_data, &mut pos)? as usize;
+        let edge_count = read_vlq_u64(hot_data, &mut pos)? as usize;
 
         let (format, index_data, offsets) = if is_indexed {
             // Indexed format: 256-byte index table + offsets
@@ -184,7 +237,7 @@ impl<'a> NodeRef<'a> {
         let final_output = if is_final {
             Self::parse_final_output(cold_data, edge_count)?
         } else {
-            0
+            V::default()
         };
 
         Some(NodeRef {
@@ -199,19 +252,19 @@ impl<'a> NodeRef<'a> {
     }
 
     /// Parse final_output from cold data (it's after all edge data).
-    fn parse_final_output(cold_data: &[u8], edge_count: usize) -> Option<u64> {
+    fn parse_final_output(cold_data: &[u8], edge_count: usize) -> Option<V> {
         let mut pos = 0;
 
         // Skip all edges
         for _ in 0..edge_count {
-            let label_len = read_vlq(cold_data, &mut pos)? as usize;
+            let label_len = read_vlq_u64(cold_data, &mut pos)? as usize;
             pos += label_len;
-            read_vlq(cold_data, &mut pos)?; // output
+            V::read_vlq(cold_data, &mut pos)?; // output
             pos += 4; // target_node_id
         }
 
         // Read final_output
-        read_vlq(cold_data, &mut pos)
+        V::read_vlq(cold_data, &mut pos)
     }
 
     /// Number of edges.
@@ -222,7 +275,7 @@ impl<'a> NodeRef<'a> {
 
     /// Get edge by index. O(1) via offset table.
     #[inline]
-    pub fn edge(&self, index: usize) -> Option<EdgeRef<'a>> {
+    pub fn edge(&self, index: usize) -> Option<EdgeRef<'a, V>> {
         if index >= self.edge_count {
             return None;
         }
@@ -234,10 +287,10 @@ impl<'a> NodeRef<'a> {
 
         let mut pos = offset;
 
-        let label_len = read_vlq(self.cold_data, &mut pos)? as usize;
+        let label_len = read_vlq_u64(self.cold_data, &mut pos)? as usize;
         let label = self.cold_data.get(pos..pos + label_len)?;
         pos += label_len;
-        let output = read_vlq(self.cold_data, &mut pos)?;
+        let output = V::read_vlq(self.cold_data, &mut pos)?;
         let target_node_id = u32::from_le_bytes([
             self.cold_data[pos],
             self.cold_data[pos + 1],
@@ -255,7 +308,7 @@ impl<'a> NodeRef<'a> {
     /// Find edge whose label starts with the given byte.
     /// Uses O(1) index lookup for large nodes, SIMD/binary search for small nodes.
     #[inline]
-    pub fn find_edge(&self, target: u8) -> Option<EdgeRef<'a>> {
+    pub fn find_edge(&self, target: u8) -> Option<EdgeRef<'a, V>> {
         if self.edge_count == 0 {
             return None;
         }
@@ -291,7 +344,7 @@ impl<'a> NodeRef<'a> {
     /// SIMD edge search for x86_64 with SSE2.
     #[cfg(all(target_arch = "x86_64", target_feature = "sse2"))]
     #[inline]
-    fn find_edge_simd(&self, target: u8) -> Option<EdgeRef<'a>> {
+    fn find_edge_simd(&self, target: u8) -> Option<EdgeRef<'a, V>> {
         use core::arch::x86_64::*;
 
         unsafe {
@@ -326,7 +379,7 @@ impl<'a> NodeRef<'a> {
     /// SIMD edge search for aarch64 with NEON.
     #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
     #[inline]
-    fn find_edge_simd(&self, target: u8) -> Option<EdgeRef<'a>> {
+    fn find_edge_simd(&self, target: u8) -> Option<EdgeRef<'a, V>> {
         use core::arch::aarch64::*;
 
         unsafe {
@@ -367,32 +420,29 @@ impl<'a> NodeRef<'a> {
 
     /// Iterate all edges.
     #[allow(dead_code)]
-    pub fn edges(&self) -> impl Iterator<Item = EdgeRef<'a>> + '_ {
+    pub fn edges(&self) -> impl Iterator<Item = EdgeRef<'a, V>> + '_ {
         (0..self.edge_count).filter_map(|i| self.edge(i))
     }
 }
 
 /// Intermediate node data for building.
-#[cfg(feature = "std")]
 #[derive(Debug)]
-pub struct NodeData {
+pub struct NodeData<V: FstValue = u64> {
     pub is_final: bool,
-    pub final_output: u64,
-    pub edges: Vec<EdgeData>,
+    pub final_output: V,
+    pub edges: Vec<EdgeData<V>>,
 }
 
 /// Intermediate edge data for building.
-#[cfg(feature = "std")]
 #[derive(Debug)]
-pub struct EdgeData {
+pub struct EdgeData<V: FstValue = u64> {
     pub label: Vec<u8>,
-    pub output: u64,
+    pub output: V,
     pub target_node_id: u32,
 }
 
 /// Write a node's hot section data, returns bytes written.
-#[cfg(feature = "std")]
-pub fn write_node_hot(node: &NodeData, buf: &mut Vec<u8>) -> std::io::Result<usize> {
+pub fn write_node_hot<V: FstValue>(node: &NodeData<V>, buf: &mut Vec<u8>) -> usize {
     let start = buf.len();
     let edge_count = node.edges.len();
     let use_indexed = edge_count >= INDEXED_THRESHOLD;
@@ -408,7 +458,7 @@ pub fn write_node_hot(node: &NodeData, buf: &mut Vec<u8>) -> std::io::Result<usi
     buf.push(flags);
 
     // Edge count
-    write_vlq(buf, edge_count as u64)?;
+    write_vlq_u64(buf, edge_count as u64);
 
     if use_indexed {
         // Indexed format: 256-byte index table
@@ -431,18 +481,17 @@ pub fn write_node_hot(node: &NodeData, buf: &mut Vec<u8>) -> std::io::Result<usi
         buf.extend_from_slice(&0u16.to_le_bytes());
     }
 
-    Ok(buf.len() - start)
+    buf.len() - start
 }
 
 /// Write a node's cold section data and update hot section offsets.
 /// Returns bytes written to cold section.
-#[cfg(feature = "std")]
-pub fn write_node_cold(
-    node: &NodeData,
+pub fn write_node_cold<V: FstValue>(
+    node: &NodeData<V>,
     hot_buf: &mut [u8],
     hot_offsets_start: usize,
     cold_buf: &mut Vec<u8>,
-) -> std::io::Result<usize> {
+) -> usize {
     let cold_start = cold_buf.len();
 
     // Write edge data, recording offsets
@@ -452,27 +501,28 @@ pub fn write_node_cold(
         hot_buf[hot_offsets_start + i * 2] = off_bytes[0];
         hot_buf[hot_offsets_start + i * 2 + 1] = off_bytes[1];
 
-        write_vlq(cold_buf, edge.label.len() as u64)?;
+        write_vlq_u64(cold_buf, edge.label.len() as u64);
         cold_buf.extend_from_slice(&edge.label);
-        write_vlq(cold_buf, edge.output)?;
+        edge.output.write_vlq(cold_buf);
         cold_buf.extend_from_slice(&edge.target_node_id.to_le_bytes());
     }
 
     // Final output
     if node.is_final {
-        write_vlq(cold_buf, node.final_output)?;
+        node.final_output.write_vlq(cold_buf);
     }
 
-    Ok(cold_buf.len() - cold_start)
+    cold_buf.len() - cold_start
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::vec;
 
     #[test]
     fn test_node_roundtrip() {
-        let node = NodeData {
+        let node: NodeData<u64> = NodeData {
             is_final: true,
             final_output: 42,
             edges: vec![
@@ -490,15 +540,15 @@ mod tests {
         };
 
         let mut hot_buf = Vec::new();
-        write_node_hot(&node, &mut hot_buf).unwrap();
+        write_node_hot(&node, &mut hot_buf);
 
         // Calculate offsets start: flags(1) + vlq(1) + first_bytes(2) = 4
         let offsets_start = 1 + 1 + node.edges.len();
 
         let mut cold_buf = Vec::new();
-        write_node_cold(&node, &mut hot_buf, offsets_start, &mut cold_buf).unwrap();
+        write_node_cold(&node, &mut hot_buf, offsets_start, &mut cold_buf);
 
-        let parsed = NodeRef::from_sections(&hot_buf, &cold_buf).unwrap();
+        let parsed: NodeRef<'_, u64> = NodeRef::from_sections(&hot_buf, &cold_buf).unwrap();
         assert!(parsed.is_final);
         assert_eq!(parsed.final_output, 42);
         assert_eq!(parsed.edge_count(), 2);
@@ -514,7 +564,7 @@ mod tests {
 
     #[test]
     fn test_find_edge() {
-        let node = NodeData {
+        let node: NodeData<u64> = NodeData {
             is_final: false,
             final_output: 0,
             edges: vec![
@@ -537,13 +587,13 @@ mod tests {
         };
 
         let mut hot_buf = Vec::new();
-        write_node_hot(&node, &mut hot_buf).unwrap();
+        write_node_hot(&node, &mut hot_buf);
         let offsets_start = 1 + 1 + node.edges.len();
 
         let mut cold_buf = Vec::new();
-        write_node_cold(&node, &mut hot_buf, offsets_start, &mut cold_buf).unwrap();
+        write_node_cold(&node, &mut hot_buf, offsets_start, &mut cold_buf);
 
-        let parsed = NodeRef::from_sections(&hot_buf, &cold_buf).unwrap();
+        let parsed: NodeRef<'_, u64> = NodeRef::from_sections(&hot_buf, &cold_buf).unwrap();
 
         let e = parsed.find_edge(b'a').unwrap();
         assert_eq!(e.label, b"apple");
@@ -562,7 +612,7 @@ mod tests {
     #[test]
     fn test_indexed_node() {
         // Create a node with >= INDEXED_THRESHOLD edges to trigger indexed format
-        let mut edges = Vec::new();
+        let mut edges: Vec<EdgeData<u64>> = Vec::new();
         for i in 0..20u8 {
             edges.push(EdgeData {
                 label: vec![b'a' + i],
@@ -571,22 +621,22 @@ mod tests {
             });
         }
 
-        let node = NodeData {
+        let node: NodeData<u64> = NodeData {
             is_final: true,
             final_output: 999,
             edges,
         };
 
         let mut hot_buf = Vec::new();
-        write_node_hot(&node, &mut hot_buf).unwrap();
+        write_node_hot(&node, &mut hot_buf);
 
         // For indexed: flags(1) + vlq(1) + index_table(256)
         let offsets_start = 1 + 1 + 256;
 
         let mut cold_buf = Vec::new();
-        write_node_cold(&node, &mut hot_buf, offsets_start, &mut cold_buf).unwrap();
+        write_node_cold(&node, &mut hot_buf, offsets_start, &mut cold_buf);
 
-        let parsed = NodeRef::from_sections(&hot_buf, &cold_buf).unwrap();
+        let parsed: NodeRef<'_, u64> = NodeRef::from_sections(&hot_buf, &cold_buf).unwrap();
         assert!(parsed.is_final);
         assert_eq!(parsed.final_output, 999);
         assert_eq!(parsed.edge_count(), 20);
@@ -627,19 +677,19 @@ mod tests {
 
     #[test]
     fn test_empty_node() {
-        let node = NodeData {
+        let node: NodeData<u64> = NodeData {
             is_final: true,
             final_output: 999,
             edges: vec![],
         };
 
         let mut hot_buf = Vec::new();
-        write_node_hot(&node, &mut hot_buf).unwrap();
+        write_node_hot(&node, &mut hot_buf);
 
         let mut cold_buf = Vec::new();
-        write_node_cold(&node, &mut hot_buf, 2, &mut cold_buf).unwrap();
+        write_node_cold(&node, &mut hot_buf, 2, &mut cold_buf);
 
-        let parsed = NodeRef::from_sections(&hot_buf, &cold_buf).unwrap();
+        let parsed: NodeRef<'_, u64> = NodeRef::from_sections(&hot_buf, &cold_buf).unwrap();
         assert!(parsed.is_final);
         assert_eq!(parsed.final_output, 999);
         assert_eq!(parsed.edge_count(), 0);

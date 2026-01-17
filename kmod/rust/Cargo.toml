@@ -13,7 +13,7 @@ path = "lib.rs"
 crate-type = ["staticlib"]
 
 [dependencies]
-box-fst = { path = "../../crates/fst", default-features = false, features = ["alloc"] }
+box-fst = { path = "../../crates/fst" }
 hashbrown = "0.15"
 
 [features]

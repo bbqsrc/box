@@ -1,52 +1,61 @@
-use std::collections::{HashMap, VecDeque};
 use std::ffi::OsStr;
+use std::num::NonZeroUsize;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use lru::LruCache as LruCacheImpl;
 
 use fastvint::ReadVintExt;
 use fuser::{
-    FileAttr, FileType, Filesystem, ReplyAttr, ReplyData, ReplyDirectory, ReplyDirectoryPlus,
-    ReplyEmpty, ReplyEntry, ReplyStatfs, ReplyXattr, Request,
+    FileAttr, FileType, Filesystem, OpenFlags, ReplyAttr, ReplyData, ReplyDirectory,
+    ReplyDirectoryPlus, ReplyEmpty, ReplyEntry, ReplyOpen, ReplyStatfs, ReplyXattr, Request,
 };
 use libc::{EACCES, ENODATA, ENOENT, ERANGE};
 
 use box_format::sync::BoxReader;
 use box_format::{BOX_EPOCH_UNIX, BoxMetadata, Record, RecordIndex, attrs};
 
+mod multi;
+pub use multi::MultiArchive;
+
+// Re-export fuser types needed by consumers (avoids version mismatches)
+pub use fuser::{MountOption, mount2};
+
 /// Cache key for block-level caching
-/// For regular files: (RecordIndex, 0)
-/// For chunked files: (RecordIndex, block_index)
-type CacheKey = (RecordIndex, u64);
+/// For regular files: (composite_index, 0)
+/// For chunked files: (composite_index, block_index)
+type CacheKey = (u128, u64);
 
 /// LRU cache with size limit for decompressed data blocks
 ///
 /// For regular files, caches the entire decompressed content.
 /// For chunked files, caches individual 2MB blocks for efficient random access.
+///
+/// Uses the `lru` crate for O(1) get/put operations.
 pub struct LruCache {
-    entries: HashMap<CacheKey, Vec<u8>>,
-    order: VecDeque<CacheKey>,
+    inner: LruCacheImpl<CacheKey, Vec<u8>>,
     current_size: usize,
     max_size: usize,
 }
 
 impl LruCache {
     pub fn new(max_size_mb: usize) -> Self {
+        let max_size = max_size_mb * 1024 * 1024;
+        // Estimate max entries (assume avg 64KB per entry, minimum 1024 entries)
+        let cap = NonZeroUsize::new((max_size / 65536).max(1024)).unwrap();
         Self {
-            entries: HashMap::new(),
-            order: VecDeque::new(),
+            inner: LruCacheImpl::new(cap),
             current_size: 0,
-            max_size: max_size_mb * 1024 * 1024,
+            max_size,
         }
     }
 
     fn get(&mut self, key: &CacheKey) -> Option<&[u8]> {
-        if self.entries.contains_key(key) {
-            // Move to front (most recently used)
-            self.order.retain(|k| k != key);
-            self.order.push_front(*key);
-            self.entries.get(key).map(|v| v.as_slice())
-        } else {
-            None
-        }
+        self.inner.get(key).map(|v| v.as_slice()) // O(1)
+    }
+
+    /// Check if key exists without updating LRU order (no mutation)
+    fn contains(&self, key: &CacheKey) -> bool {
+        self.inner.contains(key)
     }
 
     fn insert(&mut self, key: CacheKey, value: Vec<u8>) {
@@ -57,47 +66,26 @@ impl LruCache {
             return;
         }
 
-        // Evict oldest entries until we have room
-        while self.current_size + size > self.max_size && !self.order.is_empty() {
-            if let Some(oldest) = self.order.pop_back()
-                && let Some(data) = self.entries.remove(&oldest)
-            {
+        // Evict oldest entries until we have room (by size, not count)
+        while self.current_size + size > self.max_size {
+            if let Some((evicted_key, evicted)) = self.inner.pop_lru() {
                 tracing::trace!(
-                    record = oldest.0.get(),
-                    block = oldest.1,
-                    size = data.len(),
+                    composite = evicted_key.0,
+                    block = evicted_key.1,
+                    size = evicted.len(),
                     "cache evict"
                 );
-                self.current_size -= data.len();
+                self.current_size -= evicted.len();
+            } else {
+                break;
             }
         }
 
-        // Remove existing entry if present
-        if let Some(old) = self.entries.remove(&key) {
+        // Remove existing entry if present (put returns old value)
+        if let Some(old) = self.inner.put(key, value) {
             self.current_size -= old.len();
-            self.order.retain(|k| k != &key);
         }
-
-        self.entries.insert(key, value);
-        self.order.push_front(key);
         self.current_size += size;
-    }
-
-    /// Remove all entries for a given record (all blocks)
-    fn remove_record(&mut self, record: &RecordIndex) {
-        let keys_to_remove: Vec<CacheKey> = self
-            .entries
-            .keys()
-            .filter(|(r, _)| r == record)
-            .copied()
-            .collect();
-
-        for key in keys_to_remove {
-            if let Some(data) = self.entries.remove(&key) {
-                self.current_size -= data.len();
-                self.order.retain(|k| k != &key);
-            }
-        }
     }
 
     /// Get current cache size in bytes
@@ -107,27 +95,33 @@ impl LruCache {
 
     /// Get number of cached entries
     pub fn len(&self) -> usize {
-        self.entries.len()
+        self.inner.len()
     }
 
     /// Check if cache is empty
     pub fn is_empty(&self) -> bool {
-        self.entries.is_empty()
+        self.inner.is_empty()
     }
 }
 
 pub struct BoxFs {
-    reader: BoxReader,
+    archives: MultiArchive,
     cache: LruCache,
 }
 
 impl BoxFs {
-    pub fn new(reader: BoxReader, cache: LruCache) -> Self {
-        Self { reader, cache }
+    pub fn new(archives: MultiArchive, cache: LruCache) -> Self {
+        Self { archives, cache }
+    }
+
+    /// Add an archive to the multi-archive container.
+    pub fn add_archive(&mut self, reader: BoxReader) -> u64 {
+        self.archives.add_archive(reader)
     }
 }
 
-const TTL: Duration = Duration::from_secs(1);
+// Read-only filesystem - attributes never change, cache aggressively
+const TTL: Duration = Duration::from_secs(3600);
 const BLOCK_SIZE: u32 = 4096;
 
 fn parse_archive_time(meta: &BoxMetadata, name: &str) -> Option<SystemTime> {
@@ -184,7 +178,7 @@ fn root_dir_attr(meta: &BoxMetadata) -> FileAttr {
 
 trait RecordExt {
     fn fuse_file_type(&self) -> FileType;
-    fn fuse_file_attr(&self, meta: &BoxMetadata, index: RecordIndex) -> FileAttr;
+    fn fuse_file_attr(&self, meta: &BoxMetadata, composite: u128) -> FileAttr;
 
     fn perm(&self, meta: &BoxMetadata) -> u16;
     fn uid(&self, meta: &BoxMetadata) -> u32;
@@ -206,7 +200,7 @@ impl RecordExt for box_format::Record<'_> {
         }
     }
 
-    fn fuse_file_attr(&self, meta: &BoxMetadata, index: RecordIndex) -> FileAttr {
+    fn fuse_file_attr(&self, meta: &BoxMetadata, composite: u128) -> FileAttr {
         let kind = self.fuse_file_type();
         let nlink = 1;
         let blocks = if kind == FileType::RegularFile { 1 } else { 0 };
@@ -225,13 +219,13 @@ impl RecordExt for box_format::Record<'_> {
             ExternalLink(record) => record.target.as_ref().len() as u64,
         };
 
-        let perm = self.perm(meta) & 0o0555;
+        let perm = self.perm(meta);
         let ctime = self.ctime(meta);
         let mtime = self.mtime(meta);
         let atime = self.atime(meta);
 
         FileAttr {
-            ino: index.get() + 1,
+            ino: composite_to_ino(composite),
             size,
             blocks,
             atime,
@@ -340,8 +334,32 @@ impl RecordExt for box_format::Record<'_> {
     }
 }
 
-fn record_index(parent: u64) -> Option<RecordIndex> {
-    RecordIndex::new(parent - 1).ok()
+/// Convert inode to composite index.
+/// Returns None for inode 1 (root).
+///
+/// FUSE uses u64 inodes, so we pack the composite index using:
+/// `(archive_id << 48) | local_index` for the inode.
+fn ino_to_composite(ino: u64) -> Option<u128> {
+    if ino <= 1 {
+        None
+    } else {
+        // Unpack the 48-bit scheme used for FUSE compatibility
+        let packed = ino - 1;
+        let archive_id = (packed >> 48) as u64;
+        let local_index = packed & 0xFFFF_FFFF_FFFF;
+        Some(MultiArchive::pack_index(archive_id, local_index))
+    }
+}
+
+/// Convert composite index to inode.
+///
+/// FUSE uses u64 inodes, so we pack the composite index using:
+/// `(archive_id << 48) | local_index` + 1 for the inode.
+fn composite_to_ino(composite: u128) -> u64 {
+    let (archive_id, local_index) = MultiArchive::unpack_index(composite);
+    // Pack into u64 using 48-bit scheme for FUSE compatibility
+    // This limits archive_id to 16 bits and local_index to 48 bits
+    ((archive_id << 48) | (local_index & 0xFFFF_FFFF_FFFF)) + 1
 }
 
 impl Filesystem for BoxFs {
@@ -355,25 +373,32 @@ impl Filesystem for BoxFs {
             }
         };
 
-        let records = match record_index(parent) {
-            Some(index) => self.reader.metadata().dir_records_by_index(index),
-            None => self.reader.metadata().root_records(),
-        };
+        // Direct FST lookup - O(1) path lookup + O(key_len) FST lookup
+        let parent_composite = ino_to_composite(parent);
 
-        match records.iter().find(|(_, record)| record.name() == name) {
-            Some((index, record)) => {
-                tracing::trace!(parent, name, ino = index.get() + 1, "lookup");
-                reply.entry(
-                    &TTL,
-                    &record.fuse_file_attr(self.reader.metadata(), *index),
-                    0,
-                );
+        match self.archives.lookup_child(parent_composite, name) {
+            Some((composite, record)) => {
+                let ino = composite_to_ino(composite);
+                tracing::trace!(parent, name, ino, "lookup");
+                if let Some(meta) = self.archives.get_metadata(composite) {
+                    reply.entry(&TTL, &record.fuse_file_attr(meta, composite), 0);
+                } else {
+                    reply.error(ENOENT);
+                }
             }
             None => {
                 tracing::trace!(parent, name, "lookup: not found");
                 reply.error(ENOENT);
             }
         }
+    }
+
+    fn open(&mut self, _req: &Request<'_>, ino: u64, _flags: OpenFlags, reply: ReplyOpen) {
+        // FOPEN_KEEP_CACHE tells the kernel to keep file data cached across open/close.
+        // This is safe for a read-only filesystem where files never change.
+        const FOPEN_KEEP_CACHE: u32 = 2;
+        tracing::trace!(ino, "open");
+        reply.opened(0, FOPEN_KEEP_CACHE);
     }
 
     fn read(
@@ -387,10 +412,10 @@ impl Filesystem for BoxFs {
         _lock_owner: Option<u64>,
         reply: ReplyData,
     ) {
-        let index = match record_index(ino) {
+        let composite = match ino_to_composite(ino) {
             Some(v) => v,
             None => {
-                tracing::warn!(ino, "read: invalid inode");
+                tracing::warn!(ino, "read: invalid inode (root)");
                 reply.error(ENOENT);
                 return;
             }
@@ -399,7 +424,7 @@ impl Filesystem for BoxFs {
         let offset = offset as u64;
         let size = size as u64;
 
-        let record = match self.reader.metadata().record(index) {
+        let record = match self.archives.get_record(composite) {
             Some(r) => r,
             None => {
                 tracing::warn!(ino, "read: record not found");
@@ -408,10 +433,21 @@ impl Filesystem for BoxFs {
             }
         };
 
+        // Get local index for decompression
+        let (_, local_idx) = MultiArchive::unpack_index(composite);
+        let local_index = match RecordIndex::try_new(local_idx) {
+            Some(idx) => idx,
+            None => {
+                tracing::warn!(ino, "read: invalid local index");
+                reply.error(ENOENT);
+                return;
+            }
+        };
+
         match record {
             Record::File(f) => {
-                // Regular files: cache entire decompressed content with key (index, 0)
-                let cache_key = (index, 0u64);
+                // Regular files: cache entire decompressed content with key (composite, 0)
+                let cache_key = (composite, 0u64);
                 if let Some(cached) = self.cache.get(&cache_key) {
                     let end = (offset as usize + size as usize).min(cached.len());
                     let start = (offset as usize).min(end);
@@ -420,8 +456,18 @@ impl Filesystem for BoxFs {
                     return;
                 }
 
+                // Get the archive reader for decompression
+                let archive = match self.archives.get_archive(composite) {
+                    Some(a) => a,
+                    None => {
+                        tracing::warn!(ino, "read: archive not found");
+                        reply.error(ENOENT);
+                        return;
+                    }
+                };
+
                 let mut buf = Vec::new();
-                match self.reader.decompress(f, &mut buf) {
+                match archive.reader.decompress(f, &mut buf) {
                     Ok(_) => {
                         tracing::debug!(
                             ino,
@@ -474,19 +520,29 @@ impl Filesystem for BoxFs {
                 let mut cache_misses = 0u64;
 
                 for block_idx in first_block_idx..=last_block_idx {
-                    let cache_key = (index, block_idx);
+                    let cache_key = (composite, block_idx);
 
-                    let block_data = if let Some(cached) = self.cache.get(&cache_key) {
-                        cache_hits += 1;
-                        cached.to_vec()
-                    } else {
+                    // Check if block needs decompression (without updating LRU order)
+                    if !self.cache.contains(&cache_key) {
                         cache_misses += 1;
                         // Decompress this single block
-                        match self.reader.decompress_chunked_block(f, index, block_idx) {
+                        let archive = match self.archives.get_archive(composite) {
+                            Some(a) => a,
+                            None => {
+                                tracing::error!(
+                                    ino,
+                                    "read: archive not found for block decompression"
+                                );
+                                reply.error(ENOENT);
+                                return;
+                            }
+                        };
+                        match archive
+                            .reader
+                            .decompress_chunked_block(f, local_index, block_idx)
+                        {
                             Ok(data) => {
-                                let result = data.clone();
                                 self.cache.insert(cache_key, data);
-                                result
                             }
                             Err(e) => {
                                 tracing::error!(
@@ -499,7 +555,15 @@ impl Filesystem for BoxFs {
                                 return;
                             }
                         }
-                    };
+                    } else {
+                        cache_hits += 1;
+                    }
+
+                    // Get from cache (updates LRU order) and slice directly - no clone needed
+                    let block_data = self
+                        .cache
+                        .get(&cache_key)
+                        .expect("block should be in cache");
 
                     // Calculate the slice of this block we need
                     let block_start_byte = block_idx * block_size;
@@ -547,22 +611,23 @@ impl Filesystem for BoxFs {
         _flush: bool,
         reply: ReplyEmpty,
     ) {
-        if let Some(index) = record_index(ino) {
-            tracing::trace!(ino, "release");
-            self.cache.remove_record(&index);
-            reply.ok();
-        } else {
-            reply.error(ENOENT);
-        }
+        // Don't evict cache on file close - let LRU naturally handle eviction.
+        // This allows repeated reads of the same file to benefit from caching.
+        tracing::trace!(ino, "release");
+        reply.ok();
     }
 
     fn getattr(&mut self, _req: &Request, ino: u64, _fh: Option<u64>, reply: ReplyAttr) {
         tracing::trace!(ino, "getattr");
-        match record_index(ino) {
-            Some(index) => match self.reader.metadata().record(index) {
+        match ino_to_composite(ino) {
+            Some(composite) => match self.archives.get_record(composite) {
                 Some(record) => {
-                    let file_attr = record.fuse_file_attr(self.reader.metadata(), index);
-                    reply.attr(&TTL, &file_attr);
+                    if let Some(meta) = self.archives.get_metadata(composite) {
+                        let file_attr = record.fuse_file_attr(meta, composite);
+                        reply.attr(&TTL, &file_attr);
+                    } else {
+                        reply.error(ENOENT);
+                    }
                 }
                 None => {
                     tracing::warn!(ino, "getattr: record not found");
@@ -570,7 +635,12 @@ impl Filesystem for BoxFs {
                 }
             },
             None => {
-                reply.attr(&TTL, &root_dir_attr(self.reader.metadata()));
+                // Root inode
+                if let Some(meta) = self.archives.first_metadata() {
+                    reply.attr(&TTL, &root_dir_attr(meta));
+                } else {
+                    reply.error(ENOENT);
+                }
             }
         }
     }
@@ -583,16 +653,16 @@ impl Filesystem for BoxFs {
         offset: i64,
         mut reply: ReplyDirectory,
     ) {
-        let records = match record_index(ino) {
-            Some(index) => self.reader.metadata().dir_records_by_index(index),
-            None => self.reader.metadata().root_records(),
+        let children = match ino_to_composite(ino) {
+            Some(composite) => self.archives.children(composite),
+            None => self.archives.root_children(),
         };
 
-        tracing::debug!(ino, offset, entries = records.len(), "readdir");
+        tracing::debug!(ino, offset, entries = children.len(), "readdir");
 
-        for (i, (index, record)) in records.iter().enumerate().skip(offset as usize) {
+        for (i, (composite, record)) in children.iter().enumerate().skip(offset as usize) {
             let is_full = reply.add(
-                index.get() + 1,
+                composite_to_ino(*composite),
                 i as i64 + 1,
                 record.fuse_file_type(),
                 record.name(),
@@ -614,26 +684,28 @@ impl Filesystem for BoxFs {
         offset: i64,
         mut reply: ReplyDirectoryPlus,
     ) {
-        let records = match record_index(ino) {
-            Some(index) => self.reader.metadata().dir_records_by_index(index),
-            None => self.reader.metadata().root_records(),
+        let children = match ino_to_composite(ino) {
+            Some(composite) => self.archives.children(composite),
+            None => self.archives.root_children(),
         };
 
-        tracing::debug!(ino, offset, entries = records.len(), "readdirplus");
+        tracing::debug!(ino, offset, entries = children.len(), "readdirplus");
 
-        for (i, (index, record)) in records.iter().enumerate().skip(offset as usize) {
-            let attr = record.fuse_file_attr(self.reader.metadata(), *index);
-            let is_full = reply.add(
-                index.get() + 1,
-                i as i64 + 1,
-                record.name(),
-                &TTL,
-                &attr,
-                0, // generation
-            );
-            if is_full {
-                reply.ok();
-                return;
+        for (i, &(composite, record)) in children.iter().enumerate().skip(offset as usize) {
+            if let Some(meta) = self.archives.get_metadata(composite) {
+                let attr = record.fuse_file_attr(meta, composite);
+                let is_full = reply.add(
+                    composite_to_ino(composite),
+                    i as i64 + 1,
+                    record.name(),
+                    &TTL,
+                    &attr,
+                    0, // generation
+                );
+                if is_full {
+                    reply.ok();
+                    return;
+                }
             }
         }
 
@@ -642,7 +714,7 @@ impl Filesystem for BoxFs {
 
     fn readlink(&mut self, _req: &Request<'_>, ino: u64, reply: ReplyData) {
         tracing::trace!(ino, "readlink");
-        let index = match record_index(ino) {
+        let composite = match ino_to_composite(ino) {
             Some(v) => v,
             None => {
                 reply.error(ENOENT);
@@ -650,7 +722,7 @@ impl Filesystem for BoxFs {
             }
         };
 
-        let record = match self.reader.metadata().record(index) {
+        let record = match self.archives.get_record(composite) {
             Some(r) => r,
             None => {
                 tracing::warn!(ino, "readlink: record not found");
@@ -661,16 +733,40 @@ impl Filesystem for BoxFs {
 
         match record {
             box_format::Record::Link(link) => {
-                // Internal link - resolve to get the target path
-                match self.reader.metadata().path_for_index(link.target) {
-                    Some(path) => {
-                        // Convert BoxPath to string with / separators (as_ref() returns \x1f separators)
-                        reply.data(path.to_string().as_bytes())
+                // Internal link - compute relative path from link location to target
+                if let Some(meta) = self.archives.get_metadata(composite) {
+                    // Get the link's own RecordIndex from composite
+                    let (_, local_idx) = MultiArchive::unpack_index(composite);
+                    let link_index = match RecordIndex::try_new(local_idx) {
+                        Some(idx) => idx,
+                        None => {
+                            reply.error(ENOENT);
+                            return;
+                        }
+                    };
+
+                    // Get both paths
+                    let link_path = meta.path_for_index(link_index);
+                    let target_path = meta.path_for_index(link.target);
+
+                    match (link_path, target_path) {
+                        (Some(link_p), Some(target_p)) => {
+                            // Compute relative path from link's parent directory to target
+                            let link_parent =
+                                link_p.parent().map(|p| p.to_path_buf()).unwrap_or_default();
+                            let target_path_buf = target_p.to_path_buf();
+                            let relative = pathdiff::diff_paths(&target_path_buf, &link_parent)
+                                .unwrap_or(target_path_buf);
+                            reply.data(relative.to_string_lossy().as_bytes());
+                        }
+                        _ => {
+                            tracing::warn!(ino, "readlink: could not resolve internal link paths");
+                            reply.error(ENOENT);
+                        }
                     }
-                    None => {
-                        tracing::warn!(ino, "readlink: could not resolve internal link");
-                        reply.error(ENOENT);
-                    }
+                } else {
+                    tracing::warn!(ino, "readlink: archive not found");
+                    reply.error(ENOENT);
                 }
             }
             box_format::Record::ExternalLink(link) => {
@@ -684,19 +780,9 @@ impl Filesystem for BoxFs {
     }
 
     fn statfs(&mut self, _req: &Request<'_>, _ino: u64, reply: ReplyStatfs) {
-        // Count records and estimate total size
-        let mut total_size: u64 = 0;
-        let mut file_count: u64 = 0;
-
-        for item in self.reader.metadata().iter() {
-            file_count += 1;
-            if let Some(file) = item.record.as_file() {
-                total_size += file.decompressed_length;
-            } else if let Some(file) = item.record.as_chunked_file() {
-                total_size += file.decompressed_length;
-            }
-        }
-
+        // Count records and estimate total size across all archives
+        let total_size = self.archives.total_size();
+        let file_count = self.archives.record_count();
         let blocks = total_size.div_ceil(BLOCK_SIZE as u64);
 
         tracing::debug!(blocks, file_count, total_size, "statfs");
@@ -735,17 +821,29 @@ impl Filesystem for BoxFs {
         let box_attr_name = format!("{}{}", attrs::LINUX_XATTR_PREFIX, name);
 
         // Get the attribute value
-        let value = match record_index(ino) {
-            Some(index) => match self.reader.metadata().record(index) {
-                Some(record) => record.attr(self.reader.metadata(), &box_attr_name),
-                None => {
-                    reply.error(ENOENT);
-                    return;
-                }
-            },
+        let value = match ino_to_composite(ino) {
+            Some(composite) => {
+                let record = match self.archives.get_record(composite) {
+                    Some(r) => r,
+                    None => {
+                        reply.error(ENOENT);
+                        return;
+                    }
+                };
+                let meta = match self.archives.get_metadata(composite) {
+                    Some(m) => m,
+                    None => {
+                        reply.error(ENOENT);
+                        return;
+                    }
+                };
+                record.attr(meta, &box_attr_name)
+            }
             None => {
-                // Root inode - check archive-level attributes
-                self.reader.metadata().file_attr(&box_attr_name)
+                // Root inode - check archive-level attributes from first archive
+                self.archives
+                    .first_metadata()
+                    .and_then(|m| m.file_attr(&box_attr_name))
             }
         };
 
@@ -780,23 +878,33 @@ impl Filesystem for BoxFs {
             }
         };
 
-        match record_index(ino) {
-            Some(index) => match self.reader.metadata().record(index) {
-                Some(record) => {
-                    let mut iter = record.attrs_iter(self.reader.metadata());
-                    add_xattrs(&mut iter, &mut xattr_list);
-                }
-                None => {
-                    reply.error(ENOENT);
-                    return;
-                }
-            },
+        match ino_to_composite(ino) {
+            Some(composite) => {
+                let record = match self.archives.get_record(composite) {
+                    Some(r) => r,
+                    None => {
+                        reply.error(ENOENT);
+                        return;
+                    }
+                };
+                let meta = match self.archives.get_metadata(composite) {
+                    Some(m) => m,
+                    None => {
+                        reply.error(ENOENT);
+                        return;
+                    }
+                };
+                let mut iter = record.attrs_iter(meta);
+                add_xattrs(&mut iter, &mut xattr_list);
+            }
             None => {
-                // Root inode - list archive-level xattrs
-                for key in self.reader.metadata().attr_keys() {
-                    if let Some(xattr_name) = key.strip_prefix(attrs::LINUX_XATTR_PREFIX) {
-                        xattr_list.extend_from_slice(xattr_name.as_bytes());
-                        xattr_list.push(0);
+                // Root inode - list archive-level xattrs from first archive
+                if let Some(meta) = self.archives.first_metadata() {
+                    for key in meta.attr_keys() {
+                        if let Some(xattr_name) = key.strip_prefix(attrs::LINUX_XATTR_PREFIX) {
+                            xattr_list.extend_from_slice(xattr_name.as_bytes());
+                            xattr_list.push(0);
+                        }
                     }
                 }
             }
@@ -819,23 +927,36 @@ impl Filesystem for BoxFs {
             return;
         }
 
-        let (mode, file_uid, file_gid) = match record_index(ino) {
-            Some(index) => match self.reader.metadata().record(index) {
-                Some(record) => {
-                    let mode = record.perm(self.reader.metadata()) as u32;
-                    let uid = record.uid(self.reader.metadata());
-                    let gid = record.gid(self.reader.metadata());
-                    (mode, uid, gid)
-                }
-                None => {
+        let (mode, file_uid, file_gid) = match ino_to_composite(ino) {
+            Some(composite) => {
+                let record = match self.archives.get_record(composite) {
+                    Some(r) => r,
+                    None => {
+                        reply.error(ENOENT);
+                        return;
+                    }
+                };
+                let meta = match self.archives.get_metadata(composite) {
+                    Some(m) => m,
+                    None => {
+                        reply.error(ENOENT);
+                        return;
+                    }
+                };
+                let mode = record.perm(meta) as u32;
+                let uid = record.uid(meta);
+                let gid = record.gid(meta);
+                (mode, uid, gid)
+            }
+            None => {
+                // Root directory
+                if let Some(meta) = self.archives.first_metadata() {
+                    let attr = root_dir_attr(meta);
+                    (attr.perm as u32, attr.uid, attr.gid)
+                } else {
                     reply.error(ENOENT);
                     return;
                 }
-            },
-            None => {
-                // Root directory
-                let attr = root_dir_attr(self.reader.metadata());
-                (attr.perm as u32, attr.uid, attr.gid)
             }
         };
 

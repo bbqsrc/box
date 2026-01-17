@@ -20,7 +20,33 @@ mod parser;
 
 use bindings::*;
 use error::KernelError;
-use metadata::{BoxfsMetadata, RecordData};
+use metadata::{BoxfsMetadata, RecordData, DEFAULT_BLOCK_CACHE_BYTES};
+
+// ============================================================================
+// INODE <-> COMPOSITE INDEX CONVERSION
+// ============================================================================
+
+/// Convert a FUSE/kernel u64 inode to our internal u128 composite index.
+/// Inodes 0 and 1 are special (root), others are packed composites.
+/// Uses 48-bit packing: (archive_id << 48) | local_index, stored as ino - 1.
+fn ino_to_composite(ino: u64) -> Option<u128> {
+    if ino <= 1 {
+        None // Special inodes, handle separately
+    } else {
+        let packed = ino - 1;
+        let archive_id = (packed >> 48) as u64;
+        let local_index = packed & 0xFFFF_FFFF_FFFF;
+        Some(BoxfsMetadata::pack_index(archive_id, local_index))
+    }
+}
+
+/// Convert a u128 composite index to a FUSE/kernel u64 inode.
+/// Uses 48-bit packing to fit in u64.
+fn composite_to_ino(composite: u128) -> u64 {
+    let (archive_id, local_index) = BoxfsMetadata::unpack_index(composite);
+    // Pack into u64: (archive_id << 48) | local_index + 1 (to avoid ino 0)
+    ((archive_id << 48) | (local_index & 0xFFFF_FFFF_FFFF)) + 1
+}
 
 // ============================================================================
 // PREFETCH HELPER
@@ -258,9 +284,16 @@ unsafe fn fill_super_impl(sb: *mut SuperBlock) -> Result<(), KernelError> {
         offset += (end - start) as u64;
     }
 
-    // Parse the trailer
-    let mut metadata = parser::parse_trailer(&trailer_data, metadata::DEFAULT_BLOCK_CACHE_BYTES)?;
-    metadata.archive_size = device_size;
+    // Parse the trailer into archive data
+    let mut archive = parser::parse_trailer(&trailer_data)?;
+    archive.archive_size = device_size;
+    archive.data_offset_base = 0; // First archive starts at device offset 0
+
+    // Create metadata and add the first archive
+    let mut metadata = BoxfsMetadata::empty();
+    // Set block cache capacity
+    *metadata.block_cache.borrow_mut() = metadata::BlockCache::new(DEFAULT_BLOCK_CACHE_BYTES);
+    let _archive_id = metadata.add_archive(archive);
 
     // Store metadata
     let meta_ptr = Box::into_raw(Box::new(metadata));
@@ -268,8 +301,9 @@ unsafe fn fill_super_impl(sb: *mut SuperBlock) -> Result<(), KernelError> {
     boxfs_set_archive_size(sb, device_size);
     boxfs_set_trailer_offset(sb, trailer_offset);
 
-    // Set root inode (use the root_index from metadata)
-    let root_ino = (*(meta_ptr)).root_index;
+    // Set root inode (use the root_index from metadata - now a composite index)
+    let root_composite = (*(meta_ptr)).root_index();
+    let root_ino = composite_to_ino(root_composite);
     boxfs_set_root_ino(sb, root_ino);
 
     Ok(())
@@ -282,9 +316,10 @@ unsafe fn fill_super_impl(sb: *mut SuperBlock) -> Result<(), KernelError> {
 unsafe fn statfs_impl(sb: *mut SuperBlock, buf: *mut KStatfs) -> Result<(), KernelError> {
     let metadata = get_metadata(sb)?;
 
-    // Calculate block counts
+    // Calculate block counts (sum all archive sizes)
     let block_size = boxfs_sb_blocksize(sb) as u64;
-    let total_blocks = metadata.archive_size / block_size;
+    let total_size: u64 = metadata.archives.values().map(|a| a.archive_size).sum();
+    let total_blocks = total_size / block_size;
 
     (*buf).f_type = BOXFS_MAGIC as i64;
     (*buf).f_bsize = block_size as i64;
@@ -309,7 +344,11 @@ unsafe fn lookup_impl(
 ) -> Result<u64, KernelError> {
     let metadata = get_metadata(sb)?;
 
-    metadata.find_child(dir_ino, name).ok_or(KernelError::NotFound)
+    // Convert u64 inode to u128 composite for internal lookup
+    let dir_composite = ino_to_composite(dir_ino).ok_or(KernelError::NotFound)?;
+    let child_composite = metadata.find_child(dir_composite, name).ok_or(KernelError::NotFound)?;
+    // Convert back to u64 inode for return to kernel
+    Ok(composite_to_ino(child_composite))
 }
 
 // ============================================================================
@@ -323,24 +362,29 @@ unsafe fn iterate_dir_impl(
 ) -> Result<(), KernelError> {
     let metadata = get_metadata(sb)?;
 
+    // Convert u64 inode to u128 composite
+    let dir_composite = ino_to_composite(dir_ino).ok_or(KernelError::NotFound)?;
+
     // Get current position
     let pos = boxfs_dir_ctx_pos(ctx);
 
     // Get directory children
-    let children = metadata.children(dir_ino);
+    let children = metadata.children(dir_composite);
 
     // Emit entries starting from pos
-    for (i, (child_idx, record)) in children.iter().enumerate() {
+    for (i, (child_composite, record)) in children.iter().enumerate() {
         if (i as i64) < pos {
             continue;
         }
 
         let name_bytes = record.name.as_bytes();
+        // Convert composite to u64 inode for dir_emit
+        let child_ino = composite_to_ino(*child_composite);
         let emitted = boxfs_dir_emit(
             ctx,
             name_bytes.as_ptr(),
             name_bytes.len() as i32,
-            *child_idx,
+            child_ino,
             record.dtype() as u32,
         );
 
@@ -401,14 +445,16 @@ unsafe fn read_impl(
     let metadata = get_metadata(sb)?;
     let block_size = boxfs_sb_blocksize(sb) as u64;
 
-    let record = metadata.get(ino).ok_or(KernelError::NotFound)?;
+    // Convert u64 inode to u128 composite
+    let composite = ino_to_composite(ino).ok_or(KernelError::NotFound)?;
+    let record = metadata.get(composite).ok_or(KernelError::NotFound)?;
 
     match &record.data {
         RecordData::File { compression, data_offset, compressed_size, decompressed_size } => {
             read_file(sb, *compression, *data_offset, *compressed_size, *decompressed_size, buf, offset, block_size)
         }
         RecordData::ChunkedFile { compression, block_size: chunk_size, data_offset, compressed_size, decompressed_size } => {
-            read_chunked_file(sb, metadata, ino, *compression, *chunk_size, *data_offset, *compressed_size, *decompressed_size, buf, offset, block_size)
+            read_chunked_file(sb, metadata, composite, *compression, *chunk_size, *data_offset, *compressed_size, *decompressed_size, buf, offset, block_size)
         }
         _ => Err(KernelError::IsDir),
     }
@@ -532,7 +578,7 @@ unsafe fn decompress_and_read(
 unsafe fn read_chunked_file(
     sb: *mut SuperBlock,
     metadata: &BoxfsMetadata,
-    ino: u64,
+    composite: u128,
     compression: metadata::Compression,
     chunk_size: u32,
     data_offset: u64,
@@ -582,7 +628,7 @@ unsafe fn read_chunked_file(
     let mut current_offset = offset;
 
     // Find the starting block
-    let Some((mut block_physical, mut block_logical)) = metadata.find_block(ino, current_offset) else {
+    let Some((mut block_physical, mut block_logical)) = metadata.find_block(composite, current_offset) else {
         return Err(KernelError::Io);
     };
 
@@ -591,7 +637,7 @@ unsafe fn read_chunked_file(
         let offset_in_block = (current_offset - block_logical) as usize;
 
         // Check if this block is already in the cache
-        if let Some(cached_data) = metadata.block_cache.borrow_mut().get(ino, block_logical) {
+        if let Some(cached_data) = metadata.block_cache.borrow_mut().get(composite, block_logical) {
             // Prefetch the source data into CPU cache before copying
             prefetch_read(cached_data.as_ptr().wrapping_add(offset_in_block));
 
@@ -607,7 +653,7 @@ unsafe fn read_chunked_file(
             // Cache miss - need to decompress
 
             // Calculate compressed block size from next block's offset (or end of data)
-            let compressed_end = if let Some((_, next_physical)) = metadata.next_block(ino, block_logical) {
+            let compressed_end = if let Some((_, next_physical)) = metadata.next_block(composite, block_logical) {
                 // Next block's physical offset tells us where this block ends
                 next_physical
             } else {
@@ -680,12 +726,12 @@ unsafe fn read_chunked_file(
             current_offset += to_copy as u64;
 
             // Insert into cache
-            metadata.block_cache.borrow_mut().insert(ino, block_logical, block_data);
+            metadata.block_cache.borrow_mut().insert(composite, block_logical, block_data);
         }
 
         // Move to next block if needed
         if bytes_read < to_read {
-            if let Some((next_logical, next_physical)) = metadata.next_block(ino, block_logical) {
+            if let Some((next_logical, next_physical)) = metadata.next_block(composite, block_logical) {
                 block_logical = next_logical;
                 block_physical = next_physical;
             } else {
@@ -709,7 +755,9 @@ unsafe fn getattr_impl(
     let metadata = get_metadata(sb)?;
     let block_size = boxfs_sb_blocksize(sb) as u64;
 
-    let record = metadata.get(ino).ok_or(KernelError::NotFound)?;
+    // Convert u64 inode to u128 composite
+    let composite = ino_to_composite(ino).ok_or(KernelError::NotFound)?;
+    let record = metadata.get(composite).ok_or(KernelError::NotFound)?;
 
     let size = record.size();
     let blocks = (size + block_size - 1) / block_size;
@@ -728,12 +776,17 @@ unsafe fn readlink_impl(
 ) -> Result<(), KernelError> {
     let metadata = get_metadata(sb)?;
 
-    let record = metadata.get(ino).ok_or(KernelError::NotFound)?;
+    // Convert u64 inode to u128 composite
+    let composite = ino_to_composite(ino).ok_or(KernelError::NotFound)?;
+    let record = metadata.get(composite).ok_or(KernelError::NotFound)?;
 
     let target = match &record.data {
         RecordData::InternalLink { target_index } => {
             // Resolve internal link to a path
-            metadata.path_for_index(*target_index)
+            // For internal links, target_index is local to the same archive
+            let (archive_id, _) = BoxfsMetadata::unpack_index(composite);
+            let target_composite = BoxfsMetadata::pack_index(archive_id, *target_index);
+            metadata.path_string_for_index(target_composite)
                 .ok_or(KernelError::NotFound)?
         }
         RecordData::ExternalLink { target } => {
@@ -766,7 +819,9 @@ unsafe fn readahead_impl(
     let metadata = get_metadata(sb)?;
     let dev_block_size = boxfs_sb_blocksize(sb) as u64;
 
-    let record = metadata.get(ino).ok_or(KernelError::NotFound)?;
+    // Convert u64 inode to u128 composite
+    let composite = ino_to_composite(ino).ok_or(KernelError::NotFound)?;
+    let record = metadata.get(composite).ok_or(KernelError::NotFound)?;
 
     // Get file info
     let (compression, chunk_size, data_offset, decompressed_size) = match &record.data {
@@ -801,7 +856,7 @@ unsafe fn readahead_impl(
                 _ => 0,
             };
             read_chunked_file(
-                sb, metadata, ino, compression, chunk_size,
+                sb, metadata, composite, compression, chunk_size,
                 data_offset, compressed_size, decompressed_size,
                 buf, folio_offset, dev_block_size,
             )
@@ -887,10 +942,12 @@ unsafe fn getxattr_impl(
 ) -> Result<usize, KernelError> {
     let metadata = get_metadata(sb)?;
 
-    let record = metadata.get(ino).ok_or(KernelError::NotFound)?;
+    // Convert u64 inode to u128 composite
+    let composite = ino_to_composite(ino).ok_or(KernelError::NotFound)?;
+    let record = metadata.get(composite).ok_or(KernelError::NotFound)?;
 
     // Get the xattr value
-    let xattr_value = metadata.get_xattr(record, name)
+    let xattr_value = metadata.get_xattr(composite, record, name)
         .ok_or(KernelError::NoData)?;
 
     let attr_size = xattr_value.len();
@@ -938,11 +995,13 @@ unsafe fn listxattr_impl(
 ) -> Result<usize, KernelError> {
     let metadata = get_metadata(sb)?;
 
-    let record = metadata.get(ino).ok_or(KernelError::NotFound)?;
+    // Convert u64 inode to u128 composite
+    let composite = ino_to_composite(ino).ok_or(KernelError::NotFound)?;
+    let record = metadata.get(composite).ok_or(KernelError::NotFound)?;
 
     // Calculate total size needed
     let mut total_size = 0;
-    for name in metadata.list_xattrs(record) {
+    for name in metadata.list_xattrs(composite, record) {
         total_size += name.len() + 1; // +1 for null terminator
     }
 
@@ -960,7 +1019,7 @@ unsafe fn listxattr_impl(
     let buf = core::slice::from_raw_parts_mut(list as *mut u8, size);
     let mut pos = 0;
 
-    for name in metadata.list_xattrs(record) {
+    for name in metadata.list_xattrs(composite, record) {
         let name_bytes = name.as_bytes();
         buf[pos..pos + name_bytes.len()].copy_from_slice(name_bytes);
         pos += name_bytes.len();

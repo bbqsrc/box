@@ -48,7 +48,6 @@ default = ["std", "xz", "zstd", "writer", "reader", "xattr"]
 # no_std support
 std = [
     "alloc",
-    "box-fst/std",
     "dep:mmap-io",
     "dep:tokio",
     "dep:tokio-util",
@@ -69,7 +68,7 @@ std = [
     "dep:tempfile",
     "dep:string-interner",
 ]
-alloc = ["box-fst/alloc"]
+alloc = []
 
 # Minimal kernel build (core parsing only)
 kernel = ["alloc"]
