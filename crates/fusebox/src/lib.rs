@@ -6,8 +6,8 @@ use lru::LruCache as LruCacheImpl;
 
 use fastvint::ReadVintExt;
 use fuser::{
-    FileAttr, FileType, Filesystem, OpenFlags, ReplyAttr, ReplyData, ReplyDirectory,
-    ReplyDirectoryPlus, ReplyEmpty, ReplyEntry, ReplyOpen, ReplyStatfs, ReplyXattr, Request,
+    FileAttr, FileType, Filesystem, ReplyAttr, ReplyData, ReplyDirectory, ReplyDirectoryPlus,
+    ReplyEmpty, ReplyEntry, ReplyOpen, ReplyStatfs, ReplyXattr, Request,
 };
 use libc::{EACCES, ENODATA, ENOENT, ERANGE};
 
@@ -393,7 +393,7 @@ impl Filesystem for BoxFs {
         }
     }
 
-    fn open(&mut self, _req: &Request<'_>, ino: u64, _flags: OpenFlags, reply: ReplyOpen) {
+    fn open(&mut self, _req: &Request<'_>, ino: u64, _flags: i32, reply: ReplyOpen) {
         // FOPEN_KEEP_CACHE tells the kernel to keep file data cached across open/close.
         // This is safe for a read-only filesystem where files never change.
         const FOPEN_KEEP_CACHE: u32 = 2;

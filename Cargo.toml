@@ -145,7 +145,7 @@ pin-project-lite = "0.2"
 digest = "0.10"
 string-interner = "0.19"
 smallvec = "1.13"
-fuser = { git = "https://github.com/cberner/fuser", features = ["libfuse"] }
+fuser = { version = "0.16.0", features = ["libfuse"] }
 
 # objc2 for macOS framework bindings
 objc2 = "0.6"

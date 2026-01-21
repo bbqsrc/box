@@ -50,6 +50,8 @@ pub struct FileJob {
     pub box_path: BoxPath<'static>,
     /// Compression configuration for this file.
     pub config: CompressionConfig,
+    /// Additional attributes to set on this file (merged with metadata-derived attrs).
+    pub attrs: HashMap<String, Vec<u8>>,
 }
 
 /// Compressed file data ready to be written to the archive.
@@ -1437,6 +1439,7 @@ impl BoxFileWriter {
                         memory_threshold,
                         timestamps,
                         ownership,
+                        job.attrs,
                     )
                     .await
                 } else {
@@ -1447,6 +1450,7 @@ impl BoxFileWriter {
                         memory_threshold,
                         timestamps,
                         ownership,
+                        job.attrs,
                     )
                     .await
                 };
@@ -1608,6 +1612,9 @@ pub fn calculate_memory_threshold(concurrency: usize) -> u64 {
 ///
 /// This function is safe to run in parallel - it has no shared mutable state.
 /// The resulting `CompressedFile` can be passed to `BoxFileWriter::write_precompressed`.
+///
+/// The `extra_attrs` parameter allows passing additional attributes that will be
+/// merged with the metadata-derived attributes. Extra attrs take precedence.
 pub async fn compress_file<C: Checksum>(
     fs_path: &Path,
     box_path: BoxPath<'static>,
@@ -1615,11 +1622,14 @@ pub async fn compress_file<C: Checksum>(
     memory_threshold: u64,
     timestamps: bool,
     ownership: bool,
+    extra_attrs: HashMap<String, Vec<u8>>,
 ) -> std::io::Result<CompressedFile> {
     let file = tokio::fs::File::open(fs_path).await?;
     let meta = file.metadata().await?;
     let file_size = meta.len();
-    let attrs = crate::fs::metadata_to_attrs(&meta, timestamps, ownership);
+    let mut attrs = crate::fs::metadata_to_attrs(&meta, timestamps, ownership);
+    // Merge extra attrs (they take precedence)
+    attrs.extend(extra_attrs);
 
     // Don't compress small files
     let config = config.for_size(file_size);
