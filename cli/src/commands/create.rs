@@ -395,6 +395,7 @@ pub async fn run(args: CreateArgs) -> Result<()> {
                 fs_path: f.fs_path,
                 box_path: f.box_path,
                 config: f.config,
+                attrs: Default::default(),
             })
             .collect();
 
