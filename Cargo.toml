@@ -37,7 +37,6 @@ digest = { workspace = true, optional = true }
 sysinfo = { workspace = true, optional = true }
 tempfile = { workspace = true, optional = true }
 string-interner = { workspace = true, optional = true }
-xattr = { workspace = true, optional = true }
 zstd = { workspace = true, optional = true }
 zstd-safe = { workspace = true, optional = true }
 xz2 = { workspace = true, optional = true }
@@ -79,6 +78,9 @@ writer = ["reader"]
 xz = ["dep:xz2"]
 zstd = ["dep:zstd", "dep:zstd-safe"]
 xattr = ["dep:xattr"]
+
+[target.'cfg(unix)'.dependencies]
+xattr = { workspace = true, optional = true }
 
 [workspace]
 resolver = "3"
