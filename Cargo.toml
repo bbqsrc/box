@@ -144,7 +144,7 @@ unic-ucd = "0.9"
 relative-path = "2.0"
 cffi = { git = "https://github.com/cffi-rs/cffi", branch = "next" }
 pin-project-lite = "0.2"
-digest = "0.10"
+digest = "0.11"
 string-interner = "0.19"
 smallvec = "1.13"
 fuser = { version = "0.16.0", features = ["libfuse"] }
