@@ -703,7 +703,7 @@ impl BoxReader {
                 }
 
                 // Set xattrs if enabled
-                #[cfg(target_os = "linux")]
+                #[cfg(all(target_os = "linux", feature = "xattr"))]
                 if options.xattrs {
                     for (key, value) in record.attrs_iter(self.metadata()) {
                         if let Some(xattr_name) = key.strip_prefix(crate::attrs::LINUX_XATTR_PREFIX)
@@ -752,7 +752,7 @@ impl BoxReader {
                         .map_err(|e| ExtractError::CreateFileFailed(e, new_file.clone()))?;
                 }
 
-                #[cfg(target_os = "linux")]
+                #[cfg(all(target_os = "linux", feature = "xattr"))]
                 if options.xattrs {
                     for (key, value) in record.attrs_iter(self.metadata()) {
                         if let Some(xattr_name) = key.strip_prefix(crate::attrs::LINUX_XATTR_PREFIX)
