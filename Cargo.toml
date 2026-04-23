@@ -135,7 +135,7 @@ wild = "2.0"
 textwrap = "0.16"
 
 # Other
-lru = "0.14"
+lru = "0.17"
 mmap-io = { version = "0.9.4", features = ["async", "hugepages"] }
 hex = "0.4"
 pathdiff = "0.2"
