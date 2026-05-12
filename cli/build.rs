@@ -22,15 +22,6 @@ fn main() {
         let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
         let cwd = manifest_dir.join("..").join("selfextract");
 
-        #[cfg(unix)]
-        println!(
-            "cargo:rerun-if-changed={}",
-            cwd.join("src")
-                .join("main.rs")
-                .canonicalize()
-                .unwrap()
-                .display()
-        );
         let xargo = cargo_install_dir().join("xargo");
 
         assert!(
