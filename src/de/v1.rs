@@ -32,7 +32,9 @@ fn parse_type_compression(byte: u8) -> (u8, Compression) {
     let compression_id = byte & 0xF0; // High nibble already in position
     let compression = match compression_id {
         COMPRESSION_STORED => Compression::Stored,
+        #[cfg(feature = "zstd")]
         COMPRESSION_ZSTD => Compression::Zstd,
+        #[cfg(feature = "xz")]
         COMPRESSION_XZ => Compression::Xz,
         id => Compression::Unknown(id),
     };

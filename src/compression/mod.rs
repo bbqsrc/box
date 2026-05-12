@@ -112,9 +112,12 @@ pub struct ByteCount {
 /// Compression algorithm identifier.
 #[derive(Clone, Copy, Eq, PartialEq, Default)]
 pub enum Compression {
-    #[default]
+    #[cfg_attr(not(feature = "zstd"), default)]
     Stored,
+    #[cfg(feature = "zstd")]
+    #[cfg_attr(feature = "zstd", default)]
     Zstd,
+    #[cfg(feature = "xz")]
     Xz,
     Unknown(u8),
 }
@@ -137,7 +140,9 @@ impl Compression {
     pub const fn id(self) -> u8 {
         match self {
             Compression::Stored => COMPRESSION_STORED,
+            #[cfg(feature = "zstd")]
             Compression::Zstd => COMPRESSION_ZSTD,
+            #[cfg(feature = "xz")]
             Compression::Xz => COMPRESSION_XZ,
             Compression::Unknown(id) => id,
         }
@@ -148,7 +153,9 @@ impl fmt::Display for Compression {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Compression::Stored => write!(f, "stored"),
-            Compression::Zstd => write!(f, "Zstd"),
+            #[cfg(feature = "zstd")]
+            Compression::Zstd => write!(f, "zstd"),
+            #[cfg(feature = "xz")]
             Compression::Xz => write!(f, "xz"),
             Compression::Unknown(id) => write!(f, "?{:x}?", id),
         }

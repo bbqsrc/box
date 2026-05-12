@@ -57,7 +57,9 @@ impl<'a> DeserializeBorrowed<'a> for Compression {
 
         let compression = match id {
             COMPRESSION_STORED => Stored,
+            #[cfg(feature = "zstd")]
             COMPRESSION_ZSTD => Zstd,
+            #[cfg(feature = "xz")]
             COMPRESSION_XZ => Xz,
             id => Unknown(id),
         };

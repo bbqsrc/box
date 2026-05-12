@@ -6,6 +6,9 @@
 //! All functions return `(value, bytes_consumed)` on success, allowing the
 //! caller to manage buffer positions.
 
+#[cfg(not(feature = "std"))]
+extern crate alloc;
+
 use crate::compat::{Box, Cow, String, Vec};
 use crate::compression::constants::*;
 use crate::core::RecordIndex;
@@ -204,7 +207,9 @@ pub fn parse_record_header(data: &[u8]) -> ParseResult<RecordHeader> {
 
     let compression = match compression_id {
         COMPRESSION_STORED => Compression::Stored,
+        #[cfg(feature = "zstd")]
         COMPRESSION_ZSTD => Compression::Zstd,
+        #[cfg(feature = "xz")]
         COMPRESSION_XZ => Compression::Xz,
         other => Compression::Unknown(other),
     };

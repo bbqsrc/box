@@ -1559,7 +1559,7 @@ pub struct AddOptions {
 impl Default for AddOptions {
     fn default() -> Self {
         Self {
-            config: CompressionConfig::new(Compression::Zstd),
+            config: CompressionConfig::new(Compression::default()),
             checksum: true,
             timestamps: false,
             ownership: false,
