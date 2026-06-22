@@ -31,15 +31,12 @@ The `.box` file format and related tooling is designed to be a modern successor 
 <tr><td>🗜️<td><strong>Multiple compression methods</strong> within a single archive
 <tr><td>🔒<td><strong>BLAKE3 checksums</strong> for data integrity verification
 <tr><td>🖥️<td>A <strong>truly cross-platform command line tool</strong>
-<tr><td>📜<td>Well-defined, <strong><a href="SPEC.md">open specification</a></strong> of file format
+<tr><td>📜<td>Well-defined, <strong><a href="SPEC.html">open specification</a></strong> of file format
 </table>
 
 ### Compression methods
 
 - Stored (no compression)
-- Brotli
-- DEFLATE
-- Snappy
 - xz
 - Zstandard
 

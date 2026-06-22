@@ -1,0 +1,1746 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Box Archive Format Specification</title>
+    <meta name="authors" content="Brendan Molloy">
+    <link rel="stylesheet" href="spec.css">
+  </head>
+  <body>
+    <div>
+      <p>Box Archive Format Specification</p>
+      <p><strong>Version:</strong> 0.2.0<br><strong>Status:</strong> Draft</p>
+    </div>
+    <nav role="doc-toc">
+      <h2>Contents</h2>
+      <ol style="list-style-type: none">
+        <li>
+          <div><span style="text-decoration: underline"><a href="#loc-1"><span class="prefix">1</span> Introduction</a></span></div>
+          <ol style="list-style-type: none">
+            <li><span style="text-decoration: underline"><a href="#loc-2"><span class="prefix">1.1</span> Design Goals</a></span></li>
+            <li><span style="text-decoration: underline"><a href="#loc-3"><span class="prefix">1.2</span> File Extension</a></span></li>
+          </ol>
+        </li>
+        <li><span style="text-decoration: underline"><a href="#loc-4"><span class="prefix">2</span> Terminology</a></span></li>
+        <li><span style="text-decoration: underline"><a href="#loc-5"><span class="prefix">3</span> File Structure Overview</a></span></li>
+        <li>
+          <div><span style="text-decoration: underline"><a href="#loc-6"><span class="prefix">4</span> Data Types</a></span></div>
+          <ol style="list-style-type: none">
+            <li><span style="text-decoration: underline"><a href="#loc-7"><span class="prefix">4.1</span> Fixed-Size Integers</a></span></li>
+            <li><span style="text-decoration: underline"><a href="#loc-8"><span class="prefix">4.2</span> Vu64 Encoding (FastVint)</a></span></li>
+            <li><span style="text-decoration: underline"><a href="#loc-9"><span class="prefix">4.3</span> String</a></span></li>
+            <li><span style="text-decoration: underline"><a href="#loc-10"><span class="prefix">4.4</span> Vec&lt;T></a></span></li>
+            <li><span style="text-decoration: underline"><a href="#loc-11"><span class="prefix">4.5</span> Vec&lt;u8> (Byte Array)</a></span></li>
+            <li><span style="text-decoration: underline"><a href="#loc-12"><span class="prefix">4.6</span> RecordIndex</a></span></li>
+            <li><span style="text-decoration: underline"><a href="#loc-13"><span class="prefix">4.7</span> AttrMap</a></span></li>
+          </ol>
+        </li>
+        <li>
+          <div><span style="text-decoration: underline"><a href="#loc-14"><span class="prefix">5</span> Header</a></span></div>
+          <ol style="list-style-type: none">
+            <li><span style="text-decoration: underline"><a href="#loc-15"><span class="prefix">5.1</span> Header Structure</a></span></li>
+            <li><span style="text-decoration: underline"><a href="#loc-16"><span class="prefix">5.2</span> Magic Bytes</a></span></li>
+            <li><span style="text-decoration: underline"><a href="#loc-17"><span class="prefix">5.3</span> Version</a></span></li>
+            <li><span style="text-decoration: underline"><a href="#loc-18"><span class="prefix">5.4</span> Flags</a></span></li>
+            <li><span style="text-decoration: underline"><a href="#loc-19"><span class="prefix">5.5</span> Alignment</a></span></li>
+            <li><span style="text-decoration: underline"><a href="#loc-20"><span class="prefix">5.6</span> Reserved Fields</a></span></li>
+            <li><span style="text-decoration: underline"><a href="#loc-21"><span class="prefix">5.7</span> Binary Layout</a></span></li>
+          </ol>
+        </li>
+        <li>
+          <div><span style="text-decoration: underline"><a href="#loc-22"><span class="prefix">6</span> Data Section</a></span></div>
+          <ol style="list-style-type: none">
+            <li><span style="text-decoration: underline"><a href="#loc-23"><span class="prefix">6.1</span> Layout</a></span></li>
+            <li><span style="text-decoration: underline"><a href="#loc-24"><span class="prefix">6.2</span> Alignment Padding</a></span></li>
+          </ol>
+        </li>
+        <li>
+          <div><span style="text-decoration: underline"><a href="#loc-25"><span class="prefix">7</span> Trailer (Metadata)</a></span></div>
+          <ol style="list-style-type: none">
+            <li><span style="text-decoration: underline"><a href="#loc-26"><span class="prefix">7.1</span> BoxMetadata Structure</a></span></li>
+            <li><span style="text-decoration: underline"><a href="#loc-27"><span class="prefix">7.2</span> Attribute Key Table (attr_keys)</a></span></li>
+            <li><span style="text-decoration: underline"><a href="#loc-28"><span class="prefix">7.3</span> Attribute Value Types</a></span></li>
+            <li><span style="text-decoration: underline"><a href="#loc-29"><span class="prefix">7.4</span> Archive Attributes (attrs)</a></span></li>
+            <li><span style="text-decoration: underline"><a href="#loc-30"><span class="prefix">7.5</span> Dictionary</a></span></li>
+          </ol>
+        </li>
+        <li>
+          <div><span style="text-decoration: underline"><a href="#loc-31"><span class="prefix">8</span> Record Types</a></span></div>
+          <ol style="list-style-type: none">
+            <li><span style="text-decoration: underline"><a href="#loc-32"><span class="prefix">8.1</span> Type/Compression Byte</a></span></li>
+            <li><span style="text-decoration: underline"><a href="#loc-33"><span class="prefix">8.2</span> Directory Record (Type 0x01)</a></span></li>
+            <li><span style="text-decoration: underline"><a href="#loc-34"><span class="prefix">8.3</span> File Record (Type 0x02)</a></span></li>
+            <li><span style="text-decoration: underline"><a href="#loc-35"><span class="prefix">8.4</span> Symlink Record (Type 0x03)</a></span></li>
+            <li><span style="text-decoration: underline"><a href="#loc-36"><span class="prefix">8.5</span> External Symlink Record (Type 0x0B)</a></span></li>
+            <li><span style="text-decoration: underline"><a href="#loc-37"><span class="prefix">8.6</span> Chunked File Record (Type 0x0A)</a></span></li>
+          </ol>
+        </li>
+        <li>
+          <div><span style="text-decoration: underline"><a href="#loc-38"><span class="prefix">9</span> Path Encoding</a></span></div>
+          <ol style="list-style-type: none">
+            <li><span style="text-decoration: underline"><a href="#loc-39"><span class="prefix">9.1</span> BoxPath Format</a></span></li>
+            <li><span style="text-decoration: underline"><a href="#loc-40"><span class="prefix">9.2</span> Separator Choice</a></span></li>
+            <li><span style="text-decoration: underline"><a href="#loc-41"><span class="prefix">9.3</span> Platform Conversion</a></span></li>
+            <li><span style="text-decoration: underline"><a href="#loc-42"><span class="prefix">9.4</span> Unicode Normalization</a></span></li>
+          </ol>
+        </li>
+        <li>
+          <div><span style="text-decoration: underline"><a href="#loc-43"><span class="prefix">10</span> Compression</a></span></div>
+          <ol style="list-style-type: none">
+            <li><span style="text-decoration: underline"><a href="#loc-44"><span class="prefix">10.1</span> Supported Methods</a></span></li>
+            <li><span style="text-decoration: underline"><a href="#loc-45"><span class="prefix">10.2</span> Zstd Configuration</a></span></li>
+            <li><span style="text-decoration: underline"><a href="#loc-46"><span class="prefix">10.3</span> XZ Configuration</a></span></li>
+            <li><span style="text-decoration: underline"><a href="#loc-47"><span class="prefix">10.4</span> Stored (Uncompressed)</a></span></li>
+            <li><span style="text-decoration: underline"><a href="#loc-48"><span class="prefix">10.5</span> Dictionary Usage</a></span></li>
+          </ol>
+        </li>
+        <li>
+          <div><span style="text-decoration: underline"><a href="#loc-49"><span class="prefix">11</span> Checksums</a></span></div>
+          <ol style="list-style-type: none">
+            <li><span style="text-decoration: underline"><a href="#loc-50"><span class="prefix">11.1</span> Supported Algorithms</a></span></li>
+            <li><span style="text-decoration: underline"><a href="#loc-51"><span class="prefix">11.2</span> Checksum Storage</a></span></li>
+            <li><span style="text-decoration: underline"><a href="#loc-52"><span class="prefix">11.3</span> Verification</a></span></li>
+          </ol>
+        </li>
+        <li>
+          <div><span style="text-decoration: underline"><a href="#loc-53"><span class="prefix">12</span> Standard Attributes</a></span></div>
+          <ol style="list-style-type: none">
+            <li><span style="text-decoration: underline"><a href="#loc-54"><span class="prefix">12.1</span> Timestamps</a></span></li>
+            <li><span style="text-decoration: underline"><a href="#loc-55"><span class="prefix">12.2</span> Sub-Minute Precision</a></span></li>
+            <li><span style="text-decoration: underline"><a href="#loc-56"><span class="prefix">12.3</span> Unix Permissions</a></span></li>
+            <li><span style="text-decoration: underline"><a href="#loc-57"><span class="prefix">12.4</span> Attribute Encoding</a></span></li>
+          </ol>
+        </li>
+        <li>
+          <div><span style="text-decoration: underline"><a href="#loc-58"><span class="prefix">13</span> Implementation Guidance</a></span></div>
+          <ol style="list-style-type: none">
+            <li><span style="text-decoration: underline"><a href="#loc-59"><span class="prefix">13.1</span> Memory Mapping</a></span></li>
+            <li><span style="text-decoration: underline"><a href="#loc-60"><span class="prefix">13.2</span> Streaming Creation</a></span></li>
+            <li><span style="text-decoration: underline"><a href="#loc-61"><span class="prefix">13.3</span> Large File Handling</a></span></li>
+            <li><span style="text-decoration: underline"><a href="#loc-62"><span class="prefix">13.4</span> Error Recovery</a></span></li>
+          </ol>
+        </li>
+        <li>
+          <div><span style="text-decoration: underline"><a href="#loc-63"><span class="prefix">14</span> Path FST</a></span></div>
+          <ol style="list-style-type: none">
+            <li><span style="text-decoration: underline"><a href="#loc-64"><span class="prefix">14.1</span> Overview</a></span></li>
+            <li><span style="text-decoration: underline"><a href="#loc-65"><span class="prefix">14.2</span> FST Layout</a></span></li>
+            <li><span style="text-decoration: underline"><a href="#loc-66"><span class="prefix">14.3</span> FST Header</a></span></li>
+            <li><span style="text-decoration: underline"><a href="#loc-67"><span class="prefix">14.4</span> Node Index</a></span></li>
+            <li><span style="text-decoration: underline"><a href="#loc-68"><span class="prefix">14.5</span> Hot Section</a></span></li>
+            <li><span style="text-decoration: underline"><a href="#loc-69"><span class="prefix">14.6</span> Cold Section</a></span></li>
+            <li><span style="text-decoration: underline"><a href="#loc-70"><span class="prefix">14.7</span> Path Encoding in FST</a></span></li>
+            <li><span style="text-decoration: underline"><a href="#loc-71"><span class="prefix">14.8</span> Output Value Accumulation</a></span></li>
+            <li><span style="text-decoration: underline"><a href="#loc-72"><span class="prefix">14.9</span> FST Implementation Notes</a></span></li>
+            <li><span style="text-decoration: underline"><a href="#loc-73"><span class="prefix">14.10</span> FST Constants</a></span></li>
+          </ol>
+        </li>
+        <li>
+          <div><span style="text-decoration: underline"><a href="#loc-74"><span class="prefix">15</span> Block FST</a></span></div>
+          <ol style="list-style-type: none">
+            <li><span style="text-decoration: underline"><a href="#loc-75"><span class="prefix">15.1</span> Block FST Overview</a></span></li>
+            <li><span style="text-decoration: underline"><a href="#loc-76"><span class="prefix">15.2</span> Block FST Format</a></span></li>
+            <li><span style="text-decoration: underline"><a href="#loc-77"><span class="prefix">15.3</span> Block FST Key Format</a></span></li>
+            <li><span style="text-decoration: underline"><a href="#loc-78"><span class="prefix">15.4</span> Block FST Value Format</a></span></li>
+            <li><span style="text-decoration: underline"><a href="#loc-79"><span class="prefix">15.5</span> Block Lookup</a></span></li>
+            <li><span style="text-decoration: underline"><a href="#loc-80"><span class="prefix">15.6</span> Block FST Build Requirements</a></span></li>
+            <li><span style="text-decoration: underline"><a href="#loc-81"><span class="prefix">15.7</span> Streaming Decompression</a></span></li>
+            <li><span style="text-decoration: underline"><a href="#loc-82"><span class="prefix">15.8</span> Block FST Constants</a></span></li>
+          </ol>
+        </li>
+      </ol>
+    </nav>
+    <h2 id="loc-1">1 Introduction</h2>
+    <p>The Box format is an open archive format designed for storing files with support for compression, checksums, extended attributes, and memory-mapped access. It provides platform-independent path encoding and efficient metadata storage through string interning.</p>
+    <h3 id="loc-2">1.1 Design Goals</h3>
+    <ul>
+      <li><strong>Platform Independence:</strong> Paths are encoded in a platform-neutral format that can be safely represented on all major operating systems.</li>
+      <li><strong>Compression:</strong> Multiple compression algorithms are supported, selectable per-file.</li>
+      <li><strong>Integrity:</strong> Optional Blake3 checksums for content verification.</li>
+      <li><strong>Efficiency:</strong> String interning for attribute keys reduces metadata size. Memory mapping enables zero-copy file access for uncompressed files. Block-level compression enables efficient random access for large compressed files.</li>
+      <li><strong>Extensibility:</strong> The attribute system allows arbitrary metadata without format changes.</li>
+    </ul>
+    <h3 id="loc-3">1.2 File Extension</h3>
+    <p>Box archives SHOULD use the <span style="display: inline-block"><code>.box</code></span> file extension.</p>
+    <h2 id="loc-4">2 Terminology</h2>
+    <p>The key words “MUST”, “MUST NOT”, “REQUIRED”, “SHALL”, “SHALL NOT”, “SHOULD”, “SHOULD NOT”, “RECOMMENDED”, “MAY”, and “OPTIONAL” in this document are to be interpreted as described in <span style="text-decoration: underline"><a href="https://www.rfc-editor.org/rfc/rfc2119">RFC 2119</a></span>.</p>
+    <p><strong>Archive:</strong> A Box format file containing zero or more entries.</p>
+    <p><strong>Entry:</strong> A file, directory, or symbolic link stored in the archive.</p>
+    <p><strong>Record:</strong> The metadata structure describing an entry.</p>
+    <p><strong>Trailer:</strong> The metadata section at the end of the archive containing all records and attributes.</p>
+    <p><strong>Chunked File:</strong> A file stored with block-level compression, enabling random access without decompressing the entire file.</p>
+    <h2 id="loc-5">3 File Structure Overview</h2>
+    <p>A Box archive consists of five sections laid out sequentially:</p>
+    <figure>
+      <table>
+        <tr>
+          <td>Offset 0x00 →</td>
+          <td><strong>Header</strong></td>
+          <td>32 bytes, fixed size</td>
+        </tr>
+        <tr>
+          <td>Offset 0x20 →</td>
+          <td><strong>Data Section</strong></td>
+          <td>Variable size</td>
+        </tr>
+        <tr>
+          <td>header.trailer →</td>
+          <td><strong>Trailer</strong></td>
+          <td>Variable size (BoxMetadata)</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td><strong>Path FST</strong></td>
+          <td>Variable size</td>
+        </tr>
+        <tr>
+          <td>EOF →</td>
+          <td><strong>Block FST</strong></td>
+          <td>Variable size (optional)</td>
+        </tr>
+      </table>
+      <figcaption>Table 1: Box archive structure</figcaption>
+    </figure>
+    <p>The Header is always 32 bytes and located at offset 0. The Header contains a pointer to the Trailer, which stores record metadata. File content data is stored between the Header and Trailer. The Path FST follows the Trailer and provides path-to-record mapping (see <span style="text-decoration: underline"><a href="#loc-63">Section 14</a></span>). The Block FST, if present, follows the Path FST and provides logical-to-physical offset mapping for chunked files (see <span style="text-decoration: underline"><a href="#loc-74">Section 15</a></span>). Both FSTs are prefixed with a u64 length (little-endian), enabling efficient seeking past the Path FST to detect the Block FST’s presence.</p>
+    <p>All multi-byte integers in the Box format are stored in <strong>little-endian</strong> byte order unless otherwise specified.</p>
+    <h2 id="loc-6">4 Data Types</h2>
+    <h3 id="loc-7">4.1 Fixed-Size Integers</h3>
+    <table>
+      <thead>
+        <tr>
+          <th><strong>Type</strong></th>
+          <th><strong>Size</strong></th>
+          <th><strong>Description</strong></th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><span style="display: inline-block"><code>u8</code></span></td>
+          <td>1 byte</td>
+          <td>Unsigned 8-bit integer</td>
+        </tr>
+        <tr>
+          <td><span style="display: inline-block"><code>u32</code></span></td>
+          <td>4 bytes</td>
+          <td>Unsigned 32-bit integer, little-endian</td>
+        </tr>
+        <tr>
+          <td><span style="display: inline-block"><code>u64</code></span></td>
+          <td>8 bytes</td>
+          <td>Unsigned 64-bit integer, little-endian</td>
+        </tr>
+        <tr>
+          <td><span style="display: inline-block"><code>i64</code></span></td>
+          <td>8 bytes</td>
+          <td>Signed 64-bit integer, little-endian</td>
+        </tr>
+      </tbody>
+    </table>
+    <h3 id="loc-8">4.2 Vu64 Encoding (FastVint)</h3>
+    <p>Variable-size unsigned 64-bit integers (Vu64) are encoded using FastVint, a prefix-based variable-length encoding where the number of leading zeros in the first byte determines the total byte count.</p>
+    <p><strong>Length Determination:</strong></p>
+    <p>The number of leading zero bits in the first byte, plus one, gives the total byte count:</p>
+    <div>
+      <pre><code>1xxx_xxxx  →  1 byte   (7 data bits)<br>01xx_xxxx  →  2 bytes  (14 data bits: 6 + 8)<br>001x_xxxx  →  3 bytes  (21 data bits: 5 + 16)<br>0001_xxxx  →  4 bytes  (28 data bits: 4 + 24)<br>0000_1xxx  →  5 bytes  (35 data bits: 3 + 32)<br>0000_01xx  →  6 bytes  (42 data bits: 2 + 40)<br>0000_001x  →  7 bytes  (49 data bits: 1 + 48)<br>0000_0001  →  8 bytes  (56 data bits: 0 + 56)<br>0000_0000  →  9 bytes  (64 data bits: 0 + 64)</code></pre>
+    </div>
+    <p><strong>Offset-Based Encoding:</strong></p>
+    <p>FastVint uses offset-based encoding for denser packing. Each length tier has a base offset:</p>
+    <table>
+      <thead>
+        <tr>
+          <th><strong>Bytes</strong></th>
+          <th><strong>Value Range</strong></th>
+          <th><strong>Offset</strong></th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>1</td>
+          <td>0 – 127</td>
+          <td>0</td>
+        </tr>
+        <tr>
+          <td>2</td>
+          <td>128 – 16,511</td>
+          <td>128</td>
+        </tr>
+        <tr>
+          <td>3</td>
+          <td>16,512 – 2,113,663</td>
+          <td>16,512</td>
+        </tr>
+        <tr>
+          <td>4</td>
+          <td>2,113,664 – 270,549,119</td>
+          <td>2,113,664</td>
+        </tr>
+        <tr>
+          <td>5+</td>
+          <td>…</td>
+          <td>(continues exponentially)</td>
+        </tr>
+        <tr>
+          <td>9</td>
+          <td>(full u64 range)</td>
+          <td>72,624,976,668,147,840</td>
+        </tr>
+      </tbody>
+    </table>
+    <p><strong>Data Byte Order:</strong></p>
+    <p>After the prefix byte, remaining data bytes are stored in <strong>big-endian</strong> order.</p>
+    <p><strong>Key Properties:</strong></p>
+    <ul>
+      <li>Length is known from the first byte alone (no continuation scanning required)</li>
+      <li>Maximum 9 bytes for <span style="display: inline-block"><code>u64</code></span> values</li>
+      <li>This encoding does NOT enforce minimal representations; the same value MAY have multiple valid encodings</li>
+      <li>Decoders MUST accept all valid encodings of a value, including non-minimal representations</li>
+    </ul>
+    <h3 id="loc-9">4.3 String</h3>
+    <p>Strings are encoded as:</p>
+    <div>
+      <pre><code>[Vu64: byte length]<br>[UTF-8 bytes]</code></pre>
+    </div>
+    <p>All strings MUST be valid UTF-8. Implementations MUST reject invalid UTF-8 sequences.</p>
+    <h3 id="loc-10">4.4 Vec&lt;T></h3>
+    <p>Vectors (arrays) are encoded as:</p>
+    <div>
+      <pre><code>[Vu64: element count]<br>[T encoding] * count</code></pre>
+    </div>
+    <p>The following vector types are used in the format:</p>
+    <table>
+      <thead>
+        <tr>
+          <th><strong>Type</strong></th>
+          <th><strong>Usage</strong></th>
+          <th><strong>Element Encoding</strong></th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><span style="display: inline-block"><code>Vec&lt;Record></code></span></td>
+          <td><span style="display: inline-block"><code>BoxMetadata.records</code></span></td>
+          <td>Record (see <span style="text-decoration: underline"><a href="#loc-31">Section 8</a></span>)</td>
+        </tr>
+        <tr>
+          <td><span style="display: inline-block"><code>Vec&lt;AttrKey></code></span></td>
+          <td><span style="display: inline-block"><code>attr_keys</code></span></td>
+          <td>Type tag + String (see <span style="text-decoration: underline"><a href="#loc-27">Section 7.2</a></span>)</td>
+        </tr>
+      </tbody>
+    </table>
+    <h3 id="loc-11">4.5 Vec&lt;u8> (Byte Array)</h3>
+    <p>Byte arrays are encoded identically to strings:</p>
+    <div>
+      <pre><code>[Vu64: byte length]<br>[raw bytes]</code></pre>
+    </div>
+    <h3 id="loc-12">4.6 RecordIndex</h3>
+    <p>A RecordIndex is a 1-based index into the records array, encoded as Vu64:</p>
+    <div>
+      <pre><code>[Vu64: index value]</code></pre>
+    </div>
+    <p>Index values MUST be non-zero. An index value of <span style="display: inline-block"><code>n</code></span> refers to <span style="display: inline-block"><code>records[n-1]</code></span>.</p>
+    <h3 id="loc-13">4.7 AttrMap</h3>
+    <p>Attribute maps are encoded as:</p>
+    <div>
+      <pre><code>[u64: byte count of remaining section (not including this field)]<br>[Vu64: entry count]<br>For each entry:<br>    [Vu64: key index into attr_keys]<br>    [Vec&lt;u8>: value]</code></pre>
+    </div>
+    <p>The leading byte count allows implementations to skip the entire attribute map without parsing individual entries.</p>
+    <h2 id="loc-14">5 Header</h2>
+    <p>The Header is located at byte offset 0 and is exactly 32 bytes.</p>
+    <h3 id="loc-15">5.1 Header Structure</h3>
+    <table>
+      <thead>
+        <tr>
+          <th><strong>Offset</strong></th>
+          <th><strong>Size</strong></th>
+          <th><strong>Field</strong></th>
+          <th><strong>Description</strong></th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><span style="display: inline-block"><code>0x00</code></span></td>
+          <td>4</td>
+          <td><span style="display: inline-block"><code>magic</code></span></td>
+          <td>Magic bytes: <span style="display: inline-block"><code>0xFF 0x42 0x4F 0x58</code></span> (<span style="display: inline-block"><code>\xFFBOX</code></span>)</td>
+        </tr>
+        <tr>
+          <td><span style="display: inline-block"><code>0x04</code></span></td>
+          <td>1</td>
+          <td><span style="display: inline-block"><code>version</code></span></td>
+          <td>Format version number</td>
+        </tr>
+        <tr>
+          <td><span style="display: inline-block"><code>0x05</code></span></td>
+          <td>1</td>
+          <td><span style="display: inline-block"><code>flags</code></span></td>
+          <td>Feature flags (see <span style="text-decoration: underline"><a href="#loc-18">Section 5.4</a></span>)</td>
+        </tr>
+        <tr>
+          <td><span style="display: inline-block"><code>0x06</code></span></td>
+          <td>2</td>
+          <td><span style="display: inline-block"><code>reserved1</code></span></td>
+          <td>Reserved bytes</td>
+        </tr>
+        <tr>
+          <td><span style="display: inline-block"><code>0x08</code></span></td>
+          <td>4</td>
+          <td><span style="display: inline-block"><code>alignment</code></span></td>
+          <td>Data alignment boundary (<span style="display: inline-block"><code>u32</code></span>)</td>
+        </tr>
+        <tr>
+          <td><span style="display: inline-block"><code>0x0C</code></span></td>
+          <td>4</td>
+          <td><span style="display: inline-block"><code>reserved2</code></span></td>
+          <td>Reserved bytes</td>
+        </tr>
+        <tr>
+          <td><span style="display: inline-block"><code>0x10</code></span></td>
+          <td>8</td>
+          <td><span style="display: inline-block"><code>trailer</code></span></td>
+          <td>Byte offset to trailer (<span style="display: inline-block"><code>u64</code></span>)</td>
+        </tr>
+        <tr>
+          <td><span style="display: inline-block"><code>0x18</code></span></td>
+          <td>8</td>
+          <td><span style="display: inline-block"><code>reserved3</code></span></td>
+          <td>Reserved bytes</td>
+        </tr>
+      </tbody>
+    </table>
+    <p><strong>Total Size:</strong> 32 bytes</p>
+    <h3 id="loc-16">5.2 Magic Bytes</h3>
+    <p>The magic bytes MUST be exactly <span style="display: inline-block"><code>0xFF 0x42 0x4F 0x58</code></span> (the byte <span style="display: inline-block"><code>0xFF</code></span> followed by ASCII <span style="display: inline-block"><code>BOX</code></span>).</p>
+    <p>The leading <span style="display: inline-block"><code>0xFF</code></span> byte is invalid UTF-8, causing any attempt to parse the file as a text string to fail immediately at byte 0.</p>
+    <h3 id="loc-17">5.3 Version</h3>
+    <p>The current format version is <span style="display: inline-block"><code>0x01</code></span> (1). Implementations SHOULD reject archives with unknown major versions.</p>
+    <h3 id="loc-18">5.4 Flags</h3>
+    <p>The flags byte is a bitfield:</p>
+    <table>
+      <thead>
+        <tr>
+          <th><strong>Bit</strong></th>
+          <th><strong>Name</strong></th>
+          <th><strong>Description</strong></th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>0</td>
+          <td><span style="display: inline-block"><code>EXTERNAL_SYMLINKS</code></span></td>
+          <td>Archive contains external symlinks (see <span style="text-decoration: underline"><a href="#loc-36">Section 8.5</a></span>)</td>
+        </tr>
+        <tr>
+          <td>1</td>
+          <td><span style="display: inline-block"><code>ALLOW_ESCAPES</code></span></td>
+          <td>Archive paths may contain <span style="display: inline-block"><code>..</code></span> components</td>
+        </tr>
+        <tr>
+          <td>2-7</td>
+          <td>Reserved</td>
+          <td>Must be 0</td>
+        </tr>
+      </tbody>
+    </table>
+    <h3 id="loc-19">5.5 Alignment</h3>
+    <p>The <span style="display: inline-block"><code>alignment</code></span> field specifies the byte boundary to which file data is aligned. Valid values are powers of 2 from 1 to 65536. A value of 0 indicates no alignment (equivalent to 1).</p>
+    <p>When alignment is specified, padding bytes (value <span style="display: inline-block"><code>0x00</code></span>) are inserted before file data to ensure each file’s data starts at an offset that is a multiple of the alignment value.</p>
+    <p>Common alignment values:</p>
+    <ul>
+      <li><span style="display: inline-block"><code>0</code></span> or <span style="display: inline-block"><code>1</code></span>: No alignment (most compact)</li>
+      <li><span style="display: inline-block"><code>4096</code></span>: Page alignment (optimal for memory mapping)</li>
+      <li><span style="display: inline-block"><code>512</code></span>: Sector alignment</li>
+    </ul>
+    <h3 id="loc-20">5.6 Reserved Fields</h3>
+    <p>All reserved fields (<span style="display: inline-block"><code>reserved1</code></span>, <span style="display: inline-block"><code>reserved2</code></span>, <span style="display: inline-block"><code>reserved3</code></span>) MUST be set to zero when writing and MUST be ignored when reading to allow for future format extensions.</p>
+    <h3 id="loc-21">5.7 Binary Layout</h3>
+    <figure>
+      <table>
+        <tr>
+          <td><strong>Off</strong></td>
+          <td><strong>00</strong></td>
+          <td><strong>01</strong></td>
+          <td><strong>02</strong></td>
+          <td><strong>03</strong></td>
+          <td><strong>04</strong></td>
+          <td><strong>05</strong></td>
+          <td><strong>06</strong></td>
+          <td><strong>07</strong></td>
+          <td><strong>08</strong></td>
+          <td><strong>09</strong></td>
+          <td><strong>0A</strong></td>
+          <td><strong>0B</strong></td>
+          <td><strong>0C</strong></td>
+          <td><strong>0D</strong></td>
+          <td><strong>0E</strong></td>
+          <td><strong>0F</strong></td>
+        </tr>
+        <tr>
+          <td>0x00</td>
+          <td>FF</td>
+          <td>42</td>
+          <td>4F</td>
+          <td>58</td>
+          <td>VV</td>
+          <td>XX</td>
+          <td>RR</td>
+          <td>RR</td>
+          <td>AA</td>
+          <td>AA</td>
+          <td>AA</td>
+          <td>AA</td>
+          <td>RR</td>
+          <td>RR</td>
+          <td>RR</td>
+          <td>RR</td>
+        </tr>
+        <tr>
+          <td>0x10</td>
+          <td>TT</td>
+          <td>TT</td>
+          <td>TT</td>
+          <td>TT</td>
+          <td>TT</td>
+          <td>TT</td>
+          <td>TT</td>
+          <td>TT</td>
+          <td>RR</td>
+          <td>RR</td>
+          <td>RR</td>
+          <td>RR</td>
+          <td>RR</td>
+          <td>RR</td>
+          <td>RR</td>
+          <td>RR</td>
+        </tr>
+      </table>
+      <figcaption>Table 2: Header binary layout</figcaption>
+    </figure>
+    <p><strong>Legend:</strong> <span style="display: inline-block"><code>FF 42 4F 58</code></span> = magic, <span style="display: inline-block"><code>VV</code></span> = version, <span style="display: inline-block"><code>XX</code></span> = flags, <span style="display: inline-block"><code>RR</code></span> = reserved, <span style="display: inline-block"><code>AA</code></span> = alignment, <span style="display: inline-block"><code>TT</code></span> = trailer offset</p>
+    <h2 id="loc-22">6 Data Section</h2>
+    <p>The Data Section immediately follows the Header and contains the actual file content.</p>
+    <h3 id="loc-23">6.1 Layout</h3>
+    <p>File data is stored contiguously, with optional padding between files when alignment is enabled. The Data Section starts immediately after the Header. When alignment is disabled, this is offset <span style="display: inline-block"><code>0x20</code></span> (32 bytes). When alignment is enabled, padding bytes (<span style="display: inline-block"><code>0x00</code></span>) are inserted so that the first file’s data begins at an aligned offset. The Data Section extends to the trailer offset.</p>
+    <figure>
+      <table>
+        <tr>
+          <td>Offset 0x20 →</td>
+          <td>[Padding] <em>(if alignment > 1)</em></td>
+        </tr>
+        <tr>
+          <td></td>
+          <td><strong>File 1 Data</strong></td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>[Padding] <em>(if alignment > 1)</em></td>
+        </tr>
+        <tr>
+          <td></td>
+          <td><strong>File 2 Data</strong></td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>[Padding]</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>…</td>
+        </tr>
+        <tr>
+          <td>header.trailer →</td>
+          <td></td>
+        </tr>
+      </table>
+      <figcaption>Table 3: Data section layout</figcaption>
+    </figure>
+    <h3 id="loc-24">6.2 Alignment Padding</h3>
+    <p>When <span style="display: inline-block"><code>header.alignment > 1</code></span>, padding bytes (<span style="display: inline-block"><code>0x00</code></span>) are inserted before file data such that:</p>
+    <div>
+      <pre><code>file_data_offset % alignment == 0</code></pre>
+    </div>
+    <p>The amount of padding before each file is:</p>
+    <div>
+      <pre><code>padding = (alignment - (current_offset % alignment)) % alignment</code></pre>
+    </div>
+    <h2 id="loc-25">7 Trailer (Metadata)</h2>
+    <p>The Trailer contains all archive metadata encoded as <span style="display: inline-block"><code>BoxMetadata</code></span>.</p>
+    <h3 id="loc-26">7.1 BoxMetadata Structure</h3>
+    <div>
+      <pre><code>[Vec&lt;AttrKey>: attr_keys]<br>[AttrMap: attrs]<br>[Vu64: dictionary_length]<br>[bytes: dictionary]<br>[Vec&lt;Record>: records]</code></pre>
+    </div>
+    <p>Fields are encoded in the order shown, using the data type encodings from <span style="text-decoration: underline"><a href="#loc-6">Section 4</a></span>. The dictionary field is encoded as a Vu64 length followed by raw bytes; length=0 means no dictionary is present.</p>
+    <h3 id="loc-27">7.2 Attribute Key Table (attr_keys)</h3>
+    <p>The attribute key table provides string interning for attribute keys. Each entry consists of:</p>
+    <div>
+      <pre><code>[u8: type tag]<br>[String: key name]</code></pre>
+    </div>
+    <p>The type tag indicates the expected value type for this attribute key. See <span style="text-decoration: underline"><a href="#loc-28">Section 7.3</a></span> for type tag values.</p>
+    <p>Keys are referenced by their 0-based index in this table.</p>
+    <h3 id="loc-28">7.3 Attribute Value Types</h3>
+    <p><strong>Type Tag Values:</strong></p>
+    <table>
+      <thead>
+        <tr>
+          <th><strong>Value</strong></th>
+          <th><strong>Type</strong></th>
+          <th><strong>Description</strong></th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>0</td>
+          <td>Bytes</td>
+          <td>Raw bytes, no interpretation</td>
+        </tr>
+        <tr>
+          <td>1</td>
+          <td>String</td>
+          <td>UTF-8 string</td>
+        </tr>
+        <tr>
+          <td>2</td>
+          <td>Json</td>
+          <td>UTF-8 JSON</td>
+        </tr>
+        <tr>
+          <td>3</td>
+          <td>U8</td>
+          <td>Single byte (u8)</td>
+        </tr>
+        <tr>
+          <td>4</td>
+          <td>Vi32</td>
+          <td>Zigzag-encoded i32</td>
+        </tr>
+        <tr>
+          <td>5</td>
+          <td>Vu32</td>
+          <td>FastVint-encoded u32</td>
+        </tr>
+        <tr>
+          <td>6</td>
+          <td>Vi64</td>
+          <td>Zigzag-encoded i64</td>
+        </tr>
+        <tr>
+          <td>7</td>
+          <td>Vu64</td>
+          <td>FastVint-encoded u64</td>
+        </tr>
+        <tr>
+          <td>8</td>
+          <td>U128</td>
+          <td>Fixed 16 bytes (128 bits)</td>
+        </tr>
+        <tr>
+          <td>9</td>
+          <td>U256</td>
+          <td>Fixed 32 bytes (256 bits)</td>
+        </tr>
+        <tr>
+          <td>10</td>
+          <td>DateTime</td>
+          <td>Minutes since Box epoch (2026-01-01 00:00:00 UTC), zigzag-encoded i64</td>
+        </tr>
+        <tr>
+          <td>11-255</td>
+          <td>Reserved</td>
+          <td>Reserved for future use</td>
+        </tr>
+      </tbody>
+    </table>
+    <p>When serializing: keys are written in symbol order (0, 1, 2, …).</p>
+    <p>When deserializing: strings are assigned symbols in the order read. The type tag determines how the attribute value is interpreted.</p>
+    <h3 id="loc-29">7.4 Archive Attributes (attrs)</h3>
+    <p>The <span style="display: inline-block"><code>attrs</code></span> field stores archive-level attributes as an <span style="display: inline-block"><code>AttrMap</code></span>. Common archive attributes include creation tools, comments, or custom metadata.</p>
+    <h3 id="loc-30">7.5 Dictionary</h3>
+    <p>The <span style="display: inline-block"><code>dictionary</code></span> field contains a Zstd dictionary used for compression. When present (non-empty), all records compressed with Zstd MUST use this dictionary for both compression and decompression. The dictionary is ignored for other compression methods (Stored, XZ).</p>
+    <p>Dictionary training is typically performed at archive creation time using <span style="display: inline-block"><code>ZDICT_trainFromBuffer()</code></span> or equivalent. A recommended dictionary size is 32KB-128KB, trained on representative samples from the archive contents totaling approximately 100× the dictionary size.</p>
+    <p>When <span style="display: inline-block"><code>dictionary</code></span> is empty, Zstd compression operates without a dictionary.</p>
+    <p>The dictionary provides two benefits:</p>
+    <ol>
+      <li value="1">Improved compression ratio, especially for small files with shared patterns</li>
+      <li value="2">More predictable compression ratios, which aids in estimating compressed block sizes for chunked files</li>
+    </ol>
+    <h2 id="loc-31">8 Record Types</h2>
+    <p>Records describe entries in the archive. Each record begins with a 1-byte type/compression identifier.</p>
+    <h3 id="loc-32">8.1 Type/Compression Byte</h3>
+    <p>The first byte of each record encodes both the record type and compression method:</p>
+    <div>
+      <pre><code>[type_compression: u8]</code></pre>
+    </div>
+    <p><strong>Layout:</strong></p>
+    <div>
+      <pre><code>Bits 0-3: Record type<br>Bits 4-7: Compression method</code></pre>
+    </div>
+    <p><strong>Record Type Values:</strong></p>
+    <table>
+      <thead>
+        <tr>
+          <th><strong>Value</strong></th>
+          <th><strong>Type</strong></th>
+          <th><strong>Description</strong></th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><span style="display: inline-block"><code>0x01</code></span></td>
+          <td>Directory</td>
+          <td>Directory entry</td>
+        </tr>
+        <tr>
+          <td><span style="display: inline-block"><code>0x02</code></span></td>
+          <td>File</td>
+          <td>Regular file</td>
+        </tr>
+        <tr>
+          <td><span style="display: inline-block"><code>0x03</code></span></td>
+          <td>Symlink</td>
+          <td>Internal symbolic link</td>
+        </tr>
+        <tr>
+          <td><span style="display: inline-block"><code>0x0A</code></span></td>
+          <td>Chunked File</td>
+          <td>File with block-level compression</td>
+        </tr>
+        <tr>
+          <td><span style="display: inline-block"><code>0x0B</code></span></td>
+          <td>External Symlink</td>
+          <td>Symbolic link to external target</td>
+        </tr>
+      </tbody>
+    </table>
+    <p><strong>Compression Values:</strong></p>
+    <table>
+      <thead>
+        <tr>
+          <th><strong>Value</strong></th>
+          <th><strong>Method</strong></th>
+          <th><strong>Description</strong></th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><span style="display: inline-block"><code>0x00</code></span></td>
+          <td>Stored</td>
+          <td>No compression</td>
+        </tr>
+        <tr>
+          <td><span style="display: inline-block"><code>0x10</code></span></td>
+          <td>Zstd</td>
+          <td>Zstandard compression</td>
+        </tr>
+        <tr>
+          <td><span style="display: inline-block"><code>0x20</code></span></td>
+          <td>XZ</td>
+          <td>XZ/LZMA2 compression</td>
+        </tr>
+      </tbody>
+    </table>
+    <p><strong>Combined Examples:</strong></p>
+    <table>
+      <thead>
+        <tr>
+          <th><strong>Byte</strong></th>
+          <th><strong>Meaning</strong></th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><span style="display: inline-block"><code>0x01</code></span></td>
+          <td>Directory (compression ignored)</td>
+        </tr>
+        <tr>
+          <td><span style="display: inline-block"><code>0x02</code></span></td>
+          <td>File, stored (uncompressed)</td>
+        </tr>
+        <tr>
+          <td><span style="display: inline-block"><code>0x12</code></span></td>
+          <td>File, Zstd compressed</td>
+        </tr>
+        <tr>
+          <td><span style="display: inline-block"><code>0x22</code></span></td>
+          <td>File, XZ compressed</td>
+        </tr>
+        <tr>
+          <td><span style="display: inline-block"><code>0x1A</code></span></td>
+          <td>Chunked file, Zstd compressed blocks</td>
+        </tr>
+      </tbody>
+    </table>
+    <h3 id="loc-33">8.2 Directory Record (Type 0x01)</h3>
+    <p>Directories have no associated data in the Data Section.</p>
+    <p><strong>Structure:</strong></p>
+    <div>
+      <pre><code>[type_compression: u8]  // Always 0x01<br>[String: name]<br>[AttrMap: attrs]</code></pre>
+    </div>
+    <p><strong>Binary Layout:</strong></p>
+    <div>
+      <table>
+        <tr>
+          <td><span style="display: inline-block"><code>00</code></span></td>
+          <td>type_compression (directory)</td>
+        </tr>
+        <tr>
+          <td>…</td>
+          <td>String: name</td>
+        </tr>
+        <tr>
+          <td>…</td>
+          <td>AttrMap: attrs</td>
+        </tr>
+      </table>
+    </div>
+    <h3 id="loc-34">8.3 File Record (Type 0x02)</h3>
+    <p>Files store their content in the Data Section.</p>
+    <p><strong>Structure:</strong></p>
+    <div>
+      <pre><code>[type_compression: u8]<br>[length: u64]              // Compressed length in data section<br>[decompressed_length: u64] // Original file size<br>[data: u64]                // Byte offset in archive<br>[String: name]<br>[AttrMap: attrs]</code></pre>
+    </div>
+    <p><strong>Binary Layout:</strong></p>
+    <div>
+      <table>
+        <tr>
+          <td><span style="display: inline-block"><code>TT</code></span></td>
+          <td>type_compression</td>
+        </tr>
+        <tr>
+          <td><span style="display: inline-block"><code>LL LL LL LL LL LL LL LL</code></span></td>
+          <td>length (u64)</td>
+        </tr>
+        <tr>
+          <td><span style="display: inline-block"><code>DD DD DD DD DD DD DD DD</code></span></td>
+          <td>decompressed_length (u64)</td>
+        </tr>
+        <tr>
+          <td><span style="display: inline-block"><code>OO OO OO OO OO OO OO OO</code></span></td>
+          <td>data offset (u64)</td>
+        </tr>
+        <tr>
+          <td>…</td>
+          <td>String: name</td>
+        </tr>
+        <tr>
+          <td>…</td>
+          <td>AttrMap: attrs</td>
+        </tr>
+      </table>
+    </div>
+    <p>When <span style="display: inline-block"><code>compression == Stored</code></span>, <span style="display: inline-block"><code>length == decompressed_length</code></span>.</p>
+    <h3 id="loc-35">8.4 Symlink Record (Type 0x03)</h3>
+    <p>Symbolic links point to other entries within the archive.</p>
+    <p><strong>Structure:</strong></p>
+    <div>
+      <pre><code>[type_compression: u8]  // Always 0x03<br>[String: name]<br>[Vu64: target (RecordIndex)]<br>[AttrMap: attrs]</code></pre>
+    </div>
+    <p><strong>Constraints:</strong></p>
+    <ul>
+      <li>Target MUST be a valid RecordIndex pointing to an existing record</li>
+      <li>Circular symlinks are not permitted</li>
+      <li>The target record MUST NOT be another symlink</li>
+    </ul>
+    <p><strong>Binary Layout:</strong></p>
+    <div>
+      <table>
+        <tr>
+          <td><span style="display: inline-block"><code>03</code></span></td>
+          <td>type_compression (symlink)</td>
+        </tr>
+        <tr>
+          <td>…</td>
+          <td>String: name</td>
+        </tr>
+        <tr>
+          <td>…</td>
+          <td>Vu64: target (RecordIndex)</td>
+        </tr>
+        <tr>
+          <td>…</td>
+          <td>AttrMap: attrs</td>
+        </tr>
+      </table>
+    </div>
+    <h3 id="loc-36">8.5 External Symlink Record (Type 0x0B)</h3>
+    <p>External symlinks point to paths outside the archive. This record type is only valid when the <span style="display: inline-block"><code>EXTERNAL_SYMLINKS</code></span> flag is set in the header.</p>
+    <p><strong>Structure:</strong></p>
+    <div>
+      <pre><code>[type_compression: u8]  // Always 0x0B<br>[String: name]<br>[String: target]<br>[AttrMap: attrs]</code></pre>
+    </div>
+    <p><strong>Target Path Format:</strong></p>
+    <p>The target path uses BoxPath encoding (see <span style="text-decoration: underline"><a href="#loc-38">Section 9</a></span>) with one relaxation: <span style="display: inline-block"><code>..</code></span> components are permitted to allow the symlink to escape the archive root. The path is stored with <span style="display: inline-block"><code>\x1F</code></span> (Unit Separator) as the component separator.</p>
+    <p><strong>Constraints:</strong></p>
+    <ul>
+      <li>The header MUST have the <span style="display: inline-block"><code>EXTERNAL_SYMLINKS</code></span> flag (bit 0) set</li>
+      <li>Target is a relative path from the symlink’s location</li>
+      <li>Implementations MUST validate <span style="display: inline-block"><code>..</code></span> does not escape the extraction directory without explicit user consent</li>
+    </ul>
+    <p><strong>Binary Layout:</strong></p>
+    <div>
+      <table>
+        <tr>
+          <td><span style="display: inline-block"><code>0B</code></span></td>
+          <td>type_compression (external symlink)</td>
+        </tr>
+        <tr>
+          <td>…</td>
+          <td>String: name</td>
+        </tr>
+        <tr>
+          <td>…</td>
+          <td>String: target</td>
+        </tr>
+        <tr>
+          <td>…</td>
+          <td>AttrMap: attrs</td>
+        </tr>
+      </table>
+    </div>
+    <p><strong>Extraction Behavior:</strong></p>
+    <p>When extracting an external symlink record, implementations:</p>
+    <ol>
+      <li value="1">Convert the stored target path from BoxPath format (<span style="display: inline-block"><code>\x1F</code></span> separators) to platform path format</li>
+      <li value="2">Create a symbolic link at the record’s location using the converted relative target path</li>
+    </ol>
+    <p><strong>Security Considerations:</strong></p>
+    <p>External symlinks can point to arbitrary locations outside the extraction directory. This presents security risks:</p>
+    <ul>
+      <li>Implementations MUST require explicit user consent before extracting archives containing external symlinks.</li>
+      <li>This feature is opt-in at both archive creation time (setting the header flag) and extraction time.</li>
+      <li>Extraction tools SHOULD warn users when processing archives with external symlinks.</li>
+    </ul>
+    <h3 id="loc-37">8.6 Chunked File Record (Type 0x0A)</h3>
+    <p>Chunked files store content in fixed-size blocks, each independently compressed. This enables random access to large compressed files without decompressing the entire file.</p>
+    <p><strong>Structure:</strong></p>
+    <div>
+      <pre><code>[type_compression: u8]     // 0x0A | compression_method<br>[block_size: u32]          // Size of each block before compression<br>[length: u64]              // Total compressed length<br>[decompressed_length: u64] // Total original file size<br>[data: u64]                // Byte offset to first block<br>[String: name]<br>[AttrMap: attrs]</code></pre>
+    </div>
+    <p><strong>Binary Layout:</strong></p>
+    <div>
+      <table>
+        <tr>
+          <td><span style="display: inline-block"><code>TT</code></span></td>
+          <td>type_compression</td>
+        </tr>
+        <tr>
+          <td><span style="display: inline-block"><code>BB BB BB BB</code></span></td>
+          <td>block_size (u32)</td>
+        </tr>
+        <tr>
+          <td><span style="display: inline-block"><code>LL LL LL LL LL LL LL LL</code></span></td>
+          <td>length (u64)</td>
+        </tr>
+        <tr>
+          <td><span style="display: inline-block"><code>DD DD DD DD DD DD DD DD</code></span></td>
+          <td>decompressed_length (u64)</td>
+        </tr>
+        <tr>
+          <td><span style="display: inline-block"><code>OO OO OO OO OO OO OO OO</code></span></td>
+          <td>data offset (u64)</td>
+        </tr>
+        <tr>
+          <td>…</td>
+          <td>String: name</td>
+        </tr>
+        <tr>
+          <td>…</td>
+          <td>AttrMap: attrs</td>
+        </tr>
+      </table>
+    </div>
+    <p><strong>Decompression:</strong></p>
+    <p>To read bytes at logical offset <span style="display: inline-block"><code>O</code></span> within a chunked file, use the Block FST lookup procedure described in <span style="text-decoration: underline"><a href="#loc-79">Section 15.5</a></span>.</p>
+    <p><strong>Recommended Block Size:</strong></p>
+    <p>A block size of 2MB (2,097,152 bytes) is RECOMMENDED. This aligns with common hugepage sizes and provides a good balance between compression ratio and random access granularity.</p>
+    <h2 id="loc-38">9 Path Encoding</h2>
+    <p>Paths in Box archives use a platform-independent encoding called BoxPath.</p>
+    <h3 id="loc-39">9.1 BoxPath Format</h3>
+    <p>BoxPath paths are sequences of components separated by <span style="display: inline-block"><code>U+001F</code></span> UNIT SEPARATOR (hex <span style="display: inline-block"><code>\x1F</code></span>).</p>
+    <p><strong>Properties:</strong></p>
+    <ul>
+      <li>Paths are always relative (no leading separator)</li>
+      <li>No trailing separator</li>
+      <li>Empty components are not permitted</li>
+      <li>Components <span style="display: inline-block"><code>.</code></span> and <span style="display: inline-block"><code>..</code></span> are not permitted</li>
+      <li>Components cannot contain platform path separators (<span style="display: inline-block"><code>/</code></span> or <span style="display: inline-block"><code>\</code></span>)</li>
+      <li>Components cannot contain null bytes</li>
+    </ul>
+    <h3 id="loc-40">9.2 Separator Choice</h3>
+    <p>The <span style="display: inline-block"><code>U+001F</code></span> separator was chosen because:</p>
+    <ol>
+      <li value="1">It forces explicit handling - developers cannot be lazy and treat paths as platform-native strings</li>
+      <li value="2">It avoids confusion with URL scheme prefixes (<span style="display: inline-block"><code>file://</code></span>, <span style="display: inline-block"><code>http://</code></span>) that would occur with <span style="display: inline-block"><code>/</code></span></li>
+      <li value="3">It is truly platform-agnostic - neither Unix nor Windows “owns” this separator</li>
+      <li value="4">It is illegal in filenames on all major platforms, preventing ambiguity</li>
+    </ol>
+    <h3 id="loc-41">9.3 Platform Conversion</h3>
+    <p>When extracting archives, implementations MUST convert BoxPath paths to platform-native paths:</p>
+    <table>
+      <thead>
+        <tr>
+          <th><strong>Platform</strong></th>
+          <th><strong>Separator</strong></th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>Unix/Linux/macOS</td>
+          <td><span style="display: inline-block"><code>/</code></span></td>
+        </tr>
+        <tr>
+          <td>Windows</td>
+          <td><span style="display: inline-block"><code>\</code></span></td>
+        </tr>
+      </tbody>
+    </table>
+    <p><strong>Example:</strong></p>
+    <div>
+      <pre><code>BoxPath:  foo\x1Fbar\x1Fbaz.txt<br>Unix:     foo/bar/baz.txt<br>Windows:  foo\bar\baz.txt</code></pre>
+    </div>
+    <h3 id="loc-42">9.4 Unicode Normalization</h3>
+    <p>All paths MUST be stored in NFC (Canonical Decomposition, followed by Canonical Composition) normalized form. Implementations MUST normalize paths before storage and comparison.</p>
+    <h2 id="loc-43">10 Compression</h2>
+    <p>Box supports multiple compression methods, selectable per-file.</p>
+    <h3 id="loc-44">10.1 Supported Methods</h3>
+    <table>
+      <thead>
+        <tr>
+          <th><strong>Value</strong></th>
+          <th><strong>Name</strong></th>
+          <th><strong>Library</strong></th>
+          <th><strong>Notes</strong></th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><span style="display: inline-block"><code>0x00</code></span></td>
+          <td>Stored</td>
+          <td>None</td>
+          <td>No compression</td>
+        </tr>
+        <tr>
+          <td><span style="display: inline-block"><code>0x10</code></span></td>
+          <td>Zstd</td>
+          <td>zstd</td>
+          <td>Recommended default</td>
+        </tr>
+        <tr>
+          <td><span style="display: inline-block"><code>0x20</code></span></td>
+          <td>XZ</td>
+          <td>liblzma</td>
+          <td>High compression ratio</td>
+        </tr>
+      </tbody>
+    </table>
+    <h3 id="loc-45">10.2 Zstd Configuration</h3>
+    <p>When using Zstd:</p>
+    <ul>
+      <li>Compression level: Implementations SHOULD allow user-configurable levels (1-22)</li>
+      <li>Default level: 3 (good balance of speed and ratio)</li>
+      <li>Dictionary: If <span style="display: inline-block"><code>BoxMetadata.dictionary</code></span> is non-empty, it MUST be used</li>
+    </ul>
+    <h3 id="loc-46">10.3 XZ Configuration</h3>
+    <p>When using XZ:</p>
+    <ul>
+      <li>Preset: Implementations SHOULD use preset 6 by default</li>
+      <li>Integrity check: CRC64 is RECOMMENDED</li>
+    </ul>
+    <h3 id="loc-47">10.4 Stored (Uncompressed)</h3>
+    <p>When compression is <span style="display: inline-block"><code>Stored</code></span> (<span style="display: inline-block"><code>0x00</code></span>):</p>
+    <ul>
+      <li><span style="display: inline-block"><code>length</code></span> equals <span style="display: inline-block"><code>decompressed_length</code></span></li>
+      <li>Data is stored verbatim</li>
+      <li>Useful for already-compressed files (images, videos) or when memory mapping is desired</li>
+    </ul>
+    <h3 id="loc-48">10.5 Dictionary Usage</h3>
+    <p>When a dictionary is present in <span style="display: inline-block"><code>BoxMetadata.dictionary</code></span> (<span style="text-decoration: underline"><a href="#loc-30">Section 7.5</a></span>), it MUST be used for all Zstd-compressed content in the archive, including:</p>
+    <ul>
+      <li>Whole-file compressed files</li>
+      <li>Individual blocks in chunked files</li>
+    </ul>
+    <p>The dictionary is loaded once when opening the archive and reused for all Zstd decompression operations. The dictionary has no effect on Stored or XZ-compressed content.</p>
+    <h2 id="loc-49">11 Checksums</h2>
+    <p>Box archives support content checksums for integrity verification.</p>
+    <h3 id="loc-50">11.1 Supported Algorithms</h3>
+    <table>
+      <thead>
+        <tr>
+          <th><strong>Name</strong></th>
+          <th><strong>Attribute</strong></th>
+          <th><strong>Output Size</strong></th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>Blake3</td>
+          <td><span style="display: inline-block"><code>blake3</code></span></td>
+          <td>32 bytes</td>
+        </tr>
+      </tbody>
+    </table>
+    <h3 id="loc-51">11.2 Checksum Storage</h3>
+    <p>Checksums are stored as record attributes:</p>
+    <div>
+      <pre><code>attrs["blake3"] = &lt;32-byte hash></code></pre>
+    </div>
+    <p>The checksum is computed over the <strong>decompressed</strong> content.</p>
+    <h3 id="loc-52">11.3 Verification</h3>
+    <p>Implementations SHOULD verify checksums when:</p>
+    <ol>
+      <li value="1">Extracting files (if checksums are present)</li>
+      <li value="2">Explicitly requested by the user</li>
+    </ol>
+    <p>Verification failures MUST be reported to the user. Implementations MAY offer options to proceed despite failures.</p>
+    <h2 id="loc-53">12 Standard Attributes</h2>
+    <p>This section defines standard attribute keys that implementations SHOULD recognize.</p>
+    <h3 id="loc-54">12.1 Timestamps</h3>
+    <table>
+      <thead>
+        <tr>
+          <th><strong>Attribute</strong></th>
+          <th><strong>Type</strong></th>
+          <th><strong>Description</strong></th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><span style="display: inline-block"><code>created</code></span></td>
+          <td>Vi64</td>
+          <td>Creation time (minutes since Box epoch)</td>
+        </tr>
+        <tr>
+          <td><span style="display: inline-block"><code>modified</code></span></td>
+          <td>Vi64</td>
+          <td>Modification time (minutes since Box epoch)</td>
+        </tr>
+        <tr>
+          <td><span style="display: inline-block"><code>accessed</code></span></td>
+          <td>Vi64</td>
+          <td>Access time (minutes since Box epoch)</td>
+        </tr>
+      </tbody>
+    </table>
+    <p><strong>Box Epoch:</strong> 2026-01-01 00:00:00 UTC</p>
+    <p>Timestamps are OPTIONAL and stored as signed variable-length integers (Vi64, zigzag encoded) representing minutes since the Box epoch. The signed format supports dates before 2026. Minute precision is sufficient for typical archive use cases.</p>
+    <h3 id="loc-55">12.2 Sub-Minute Precision</h3>
+    <p>For applications requiring higher precision:</p>
+    <table>
+      <thead>
+        <tr>
+          <th><strong>Attribute</strong></th>
+          <th><strong>Type</strong></th>
+          <th><strong>Description</strong></th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><span style="display: inline-block"><code>created.seconds</code></span></td>
+          <td>U8</td>
+          <td>Additional seconds (0-59)</td>
+        </tr>
+        <tr>
+          <td><span style="display: inline-block"><code>modified.seconds</code></span></td>
+          <td>U8</td>
+          <td>Additional seconds (0-59)</td>
+        </tr>
+        <tr>
+          <td><span style="display: inline-block"><code>accessed.seconds</code></span></td>
+          <td>U8</td>
+          <td>Additional seconds (0-59)</td>
+        </tr>
+        <tr>
+          <td><span style="display: inline-block"><code>created.nanoseconds</code></span></td>
+          <td>Vu64</td>
+          <td>Sub-minute precision in nanoseconds (0-59,999,999,999)</td>
+        </tr>
+        <tr>
+          <td><span style="display: inline-block"><code>modified.nanoseconds</code></span></td>
+          <td>Vu64</td>
+          <td>Sub-minute precision in nanoseconds (0-59,999,999,999)</td>
+        </tr>
+        <tr>
+          <td><span style="display: inline-block"><code>accessed.nanoseconds</code></span></td>
+          <td>Vu64</td>
+          <td>Sub-minute precision in nanoseconds (0-59,999,999,999)</td>
+        </tr>
+      </tbody>
+    </table>
+    <p>Seconds and nanoseconds attributes are OPTIONAL. If present, they provide additional precision beyond the minute-level timestamp. If <span style="display: inline-block"><code>nanoseconds</code></span> is present, these take precedence over the <span style="display: inline-block"><code>seconds</code></span> attribute.</p>
+    <h3 id="loc-56">12.3 Unix Permissions</h3>
+    <table>
+      <thead>
+        <tr>
+          <th><strong>Attribute</strong></th>
+          <th><strong>Type</strong></th>
+          <th><strong>Extraction Default</strong></th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><span style="display: inline-block"><code>unix.mode</code></span></td>
+          <td>Vu32</td>
+          <td>0o100644 (files), 0o40755 (dirs)</td>
+        </tr>
+        <tr>
+          <td><span style="display: inline-block"><code>unix.uid</code></span></td>
+          <td>Vu32</td>
+          <td>Archive attr, then current user</td>
+        </tr>
+        <tr>
+          <td><span style="display: inline-block"><code>unix.gid</code></span></td>
+          <td>Vu32</td>
+          <td>Archive attr, then current user</td>
+        </tr>
+      </tbody>
+    </table>
+    <p><strong>unix.mode Storage:</strong></p>
+    <p>The mode value includes the file type bits in the standard Unix format:</p>
+    <ul>
+      <li>Regular file: <span style="display: inline-block"><code>0o100000</code></span> + permissions</li>
+      <li>Directory: <span style="display: inline-block"><code>0o040000</code></span> + permissions</li>
+      <li>Symlink: <span style="display: inline-block"><code>0o120000</code></span> + permissions</li>
+    </ul>
+    <p><strong>Extraction Behavior:</strong></p>
+    <p>If <span style="display: inline-block"><code>unix.mode</code></span> is not present:</p>
+    <ul>
+      <li>Files: <span style="display: inline-block"><code>0o100644</code></span> (rw-r–r–)</li>
+      <li>Directories: <span style="display: inline-block"><code>0o040755</code></span> (rwxr-xr-x)</li>
+      <li>Symlinks: <span style="display: inline-block"><code>0o120777</code></span> (rwxrwxrwx)</li>
+    </ul>
+    <p>If <span style="display: inline-block"><code>unix.uid</code></span>/<span style="display: inline-block"><code>unix.gid</code></span> are not present, implementations SHOULD:</p>
+    <ol>
+      <li value="1">Check archive-level <span style="display: inline-block"><code>unix.uid</code></span>/<span style="display: inline-block"><code>unix.gid</code></span> attributes</li>
+      <li value="2">Fall back to current user’s UID/GID</li>
+    </ol>
+    <h3 id="loc-57">12.4 Attribute Encoding</h3>
+    <p>Attribute values are stored as raw bytes (<span style="display: inline-block"><code>Vec&lt;u8></code></span>). The type tag stored with the attribute key (see <span style="text-decoration: underline"><a href="#loc-27">Section 7.2</a></span>) determines how to interpret the value.</p>
+    <p><strong>Standard Attribute Types:</strong></p>
+    <table>
+      <thead>
+        <tr>
+          <th><strong>Attribute</strong></th>
+          <th><strong>Type Tag</strong></th>
+          <th><strong>Encoding</strong></th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><span style="display: inline-block"><code>created</code></span>, <span style="display: inline-block"><code>modified</code></span>, <span style="display: inline-block"><code>accessed</code></span></td>
+          <td>DateTime (10)</td>
+          <td>Zigzag-encoded i64 (minutes since Box epoch)</td>
+        </tr>
+        <tr>
+          <td><span style="display: inline-block"><code>created.seconds</code></span>, <span style="display: inline-block"><code>modified.seconds</code></span>, <span style="display: inline-block"><code>accessed.seconds</code></span></td>
+          <td>U8 (3)</td>
+          <td>Single byte (0-59)</td>
+        </tr>
+        <tr>
+          <td><span style="display: inline-block"><code>created.nanoseconds</code></span>, <span style="display: inline-block"><code>modified.nanoseconds</code></span>, <span style="display: inline-block"><code>accessed.nanoseconds</code></span></td>
+          <td>Vu64 (7)</td>
+          <td>FastVint-encoded u64</td>
+        </tr>
+        <tr>
+          <td><span style="display: inline-block"><code>unix.mode</code></span>, <span style="display: inline-block"><code>unix.uid</code></span>, <span style="display: inline-block"><code>unix.gid</code></span></td>
+          <td>Vu32 (5)</td>
+          <td>FastVint-encoded u32</td>
+        </tr>
+        <tr>
+          <td><span style="display: inline-block"><code>blake3</code></span></td>
+          <td>U256 (9)</td>
+          <td>Fixed 32 bytes</td>
+        </tr>
+      </tbody>
+    </table>
+    <p>Applications MAY define custom attributes with any type tag.</p>
+    <h2 id="loc-58">13 Implementation Guidance</h2>
+    <p>This section provides non-normative guidance for implementers.</p>
+    <h3 id="loc-59">13.1 Memory Mapping</h3>
+    <p>Box archives are designed to support memory-mapped access:</p>
+    <ol>
+      <li value="1">Use appropriate <span style="display: inline-block"><code>alignment</code></span> (e.g., 4096 for page alignment)</li>
+      <li value="2">Store files with <span style="display: inline-block"><code>compression = Stored</code></span> for direct access</li>
+      <li value="3">The FST structure enables O(m) path lookups where m is path length</li>
+    </ol>
+    <h3 id="loc-60">13.2 Streaming Creation</h3>
+    <p>Archives can be created in a streaming fashion:</p>
+    <ol>
+      <li value="1">Write header with placeholder trailer offset</li>
+      <li value="2">Write file data sequentially, recording offsets</li>
+      <li value="3">Write trailer with all records</li>
+      <li value="4">Build and write Path FST (and Block FST if needed)</li>
+      <li value="5">Seek back and update header with trailer offset</li>
+    </ol>
+    <h3 id="loc-61">13.3 Large File Handling</h3>
+    <p>For files larger than available memory:</p>
+    <ol>
+      <li value="1">Use chunked file records for random access</li>
+      <li value="2">Stream decompression for sequential access</li>
+      <li value="3">Consider block size trade-offs (smaller = more overhead, larger = more memory)</li>
+    </ol>
+    <h3 id="loc-62">13.4 Error Recovery</h3>
+    <p>The trailer-at-end design means truncated archives lose metadata. Implementations MAY:</p>
+    <ol>
+      <li value="1">Store periodic checkpoints during creation</li>
+      <li value="2">Implement recovery tools that scan for record boundaries</li>
+      <li value="3">Use file system features (copy-on-write, journaling) for durability</li>
+    </ol>
+    <h2 id="loc-63">14 Path FST</h2>
+    <p>The Path FST (Finite State Transducer) provides efficient path-to-record mapping.</p>
+    <h3 id="loc-64">14.1 Overview</h3>
+    <p>The FST maps BoxPath strings to RecordIndex values. It supports:</p>
+    <ul>
+      <li>O(m) exact lookups where m is path length</li>
+      <li>Prefix queries (enumerate all paths under a directory)</li>
+      <li>Memory-efficient storage through prefix sharing</li>
+    </ul>
+    <h3 id="loc-65">14.2 FST Layout</h3>
+    <p>The Path FST is located immediately after the Trailer:</p>
+    <figure>
+      <table>
+        <tr>
+          <td>trailer_end →</td>
+          <td><strong>Length (u64)</strong></td>
+          <td>8 bytes</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td><strong>Header</strong></td>
+          <td>24 bytes</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td><strong>Node Index</strong></td>
+          <td>node_count × 8 bytes</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td><strong>Hot Section</strong></td>
+          <td>Variable size (compact node headers)</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td><strong>Cold Section</strong></td>
+          <td>Variable size (edge data)</td>
+        </tr>
+      </table>
+      <figcaption>Table 4: FST section layout</figcaption>
+    </figure>
+    <p>The length prefix encodes the total size of the FST data (Header through Cold Section, not including the length prefix itself).</p>
+    <p>The Block FST (if present) uses the same structure (length prefix followed by FST data) and follows immediately after the Path FST.</p>
+    <h3 id="loc-66">14.3 FST Header</h3>
+    <p>The FST Header is 24 bytes and located at the start of the FST section.</p>
+    <table>
+      <thead>
+        <tr>
+          <th><strong>Offset</strong></th>
+          <th><strong>Size</strong></th>
+          <th><strong>Field</strong></th>
+          <th><strong>Description</strong></th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><span style="display: inline-block"><code>0x00</code></span></td>
+          <td>4</td>
+          <td><span style="display: inline-block"><code>magic</code></span></td>
+          <td>Magic bytes: <span style="display: inline-block"><code>BFST</code></span> (0x42 0x46 0x53 0x54)</td>
+        </tr>
+        <tr>
+          <td><span style="display: inline-block"><code>0x04</code></span></td>
+          <td>1</td>
+          <td><span style="display: inline-block"><code>version</code></span></td>
+          <td>Format version (currently 1)</td>
+        </tr>
+        <tr>
+          <td><span style="display: inline-block"><code>0x05</code></span></td>
+          <td>1</td>
+          <td><span style="display: inline-block"><code>flags</code></span></td>
+          <td>Reserved flags (must be 0)</td>
+        </tr>
+        <tr>
+          <td><span style="display: inline-block"><code>0x06</code></span></td>
+          <td>2</td>
+          <td><span style="display: inline-block"><code>reserved</code></span></td>
+          <td>Reserved bytes (must be 0)</td>
+        </tr>
+        <tr>
+          <td><span style="display: inline-block"><code>0x08</code></span></td>
+          <td>4</td>
+          <td><span style="display: inline-block"><code>node_count</code></span></td>
+          <td>Total number of nodes (<span style="display: inline-block"><code>u32</code></span>)</td>
+        </tr>
+        <tr>
+          <td><span style="display: inline-block"><code>0x0C</code></span></td>
+          <td>8</td>
+          <td><span style="display: inline-block"><code>entry_count</code></span></td>
+          <td>Number of entries indexed (<span style="display: inline-block"><code>u64</code></span>)</td>
+        </tr>
+        <tr>
+          <td><span style="display: inline-block"><code>0x14</code></span></td>
+          <td>4</td>
+          <td><span style="display: inline-block"><code>cold_offset</code></span></td>
+          <td>Cold section start offset (<span style="display: inline-block"><code>u32</code></span>)</td>
+        </tr>
+      </tbody>
+    </table>
+    <p>The Hot Section starts at offset <span style="display: inline-block"><code>24 + node_count × 8</code></span> (immediately after the Node Index). The root node is always node 0.</p>
+    <p>Implementations MUST reject FST data where magic bytes do not match or version is unsupported.</p>
+    <h3 id="loc-67">14.4 Node Index</h3>
+    <p>The Node Index is an array of <span style="display: inline-block"><code>node_count</code></span> entries, with each entry being 8 bytes.</p>
+    <p><strong>Entry Format:</strong></p>
+    <table>
+      <thead>
+        <tr>
+          <th><strong>Offset</strong></th>
+          <th><strong>Size</strong></th>
+          <th><strong>Field</strong></th>
+          <th><strong>Description</strong></th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><span style="display: inline-block"><code>0x00</code></span></td>
+          <td>4</td>
+          <td><span style="display: inline-block"><code>hot_offset</code></span></td>
+          <td>Offset within Hot Section (<span style="display: inline-block"><code>u32</code></span>)</td>
+        </tr>
+        <tr>
+          <td><span style="display: inline-block"><code>0x04</code></span></td>
+          <td>4</td>
+          <td><span style="display: inline-block"><code>cold_offset</code></span></td>
+          <td>Offset within Cold Section (<span style="display: inline-block"><code>u32</code></span>)</td>
+        </tr>
+      </tbody>
+    </table>
+    <p>Offsets are relative to the start of their respective sections. Node IDs are indices into this array (node 0 = first entry, node 1 = second entry, etc.).</p>
+    <h3 id="loc-68">14.5 Hot Section</h3>
+    <p>The Hot Section contains compact node headers optimized for cache efficiency. Each node’s hot data has the following structure:</p>
+    <div>
+      <table>
+        <tr>
+          <td>…</td>
+          <td>flags: u8</td>
+        </tr>
+        <tr>
+          <td>…</td>
+          <td>edge_count: Vu64</td>
+        </tr>
+        <tr>
+          <td>…</td>
+          <td>lookup_data: variable</td>
+        </tr>
+        <tr>
+          <td>…</td>
+          <td>offsets: edge_count × u16</td>
+        </tr>
+      </table>
+    </div>
+    <p><strong>Flags Byte:</strong></p>
+    <table>
+      <thead>
+        <tr>
+          <th><strong>Bit</strong></th>
+          <th><strong>Name</strong></th>
+          <th><strong>Description</strong></th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>0</td>
+          <td><span style="display: inline-block"><code>IS_FINAL</code></span></td>
+          <td>Node is an accepting state (has an output value)</td>
+        </tr>
+        <tr>
+          <td>1</td>
+          <td><span style="display: inline-block"><code>INDEXED</code></span></td>
+          <td>Node uses 256-byte lookup table (17+ edges)</td>
+        </tr>
+        <tr>
+          <td>2-7</td>
+          <td>Reserved</td>
+          <td>Must be 0</td>
+        </tr>
+      </tbody>
+    </table>
+    <p><strong>Lookup Data:</strong></p>
+    <p>The lookup data format depends on the <span style="display: inline-block"><code>INDEXED</code></span> flag:</p>
+    <ul>
+      <li>
+        <p><strong>If INDEXED (>16 edges):</strong> 256-byte lookup table where <span style="display: inline-block"><code>table[byte]</code></span> returns the edge index for that byte value, or <span style="display: inline-block"><code>0xFF</code></span> if no edge exists for that byte.</p>
+      </li>
+      <li>
+        <p><strong>If not INDEXED (&lt;=16 edges):</strong> Array of <span style="display: inline-block"><code>edge_count</code></span> bytes containing the first byte of each edge label, sorted in ascending order. Used for binary search or SIMD-accelerated lookups.</p>
+      </li>
+    </ul>
+    <p><strong>Offsets Array:</strong></p>
+    <p>Array of <span style="display: inline-block"><code>edge_count</code></span> entries, each a <span style="display: inline-block"><code>u16</code></span>. Each offset points to the corresponding edge’s data within this node’s cold section data block.</p>
+    <h3 id="loc-69">14.6 Cold Section</h3>
+    <p>The Cold Section contains edge data and final output values. Each node’s cold data has the following structure:</p>
+    <div>
+      <p><strong>For each edge (0 to edge_count-1):</strong></p>
+      <div>
+        <table>
+          <tr>
+            <td>…</td>
+            <td>label_len: Vu64</td>
+          </tr>
+          <tr>
+            <td>…</td>
+            <td>label: label_len bytes</td>
+          </tr>
+          <tr>
+            <td>…</td>
+            <td>output: Vu64</td>
+          </tr>
+          <tr>
+            <td>…</td>
+            <td>target_node: u32</td>
+          </tr>
+        </table>
+      </div>
+      <p><strong>If IS_FINAL flag is set:</strong></p>
+      <div>[…] final_output: Vu64</div>
+    </div>
+    <p><strong>Edge Fields:</strong></p>
+    <table>
+      <thead>
+        <tr>
+          <th><strong>Field</strong></th>
+          <th><strong>Type</strong></th>
+          <th><strong>Description</strong></th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><span style="display: inline-block"><code>label_len</code></span></td>
+          <td>Vu64</td>
+          <td>Length of edge label in bytes</td>
+        </tr>
+        <tr>
+          <td><span style="display: inline-block"><code>label</code></span></td>
+          <td>bytes</td>
+          <td>Edge label (arbitrary byte sequence)</td>
+        </tr>
+        <tr>
+          <td><span style="display: inline-block"><code>output</code></span></td>
+          <td>Vu64</td>
+          <td>Output value to accumulate (<span style="display: inline-block"><code>u64</code></span>)</td>
+        </tr>
+        <tr>
+          <td><span style="display: inline-block"><code>target_node</code></span></td>
+          <td><span style="display: inline-block"><code>u32</code></span></td>
+          <td>Target node ID</td>
+        </tr>
+      </tbody>
+    </table>
+    <p><strong>Final Output:</strong></p>
+    <p>If the <span style="display: inline-block"><code>IS_FINAL</code></span> flag is set, the final output value is stored at the end of the node’s cold data block. This value is added to the accumulated output when the traversal terminates at this node.</p>
+    <h3 id="loc-70">14.7 Path Encoding in FST</h3>
+    <p>Paths stored in the FST use the same encoding as BoxPath (<span style="text-decoration: underline"><a href="#loc-38">Section 9</a></span>):</p>
+    <ul>
+      <li>Components are separated by <span style="display: inline-block"><code>U+001F</code></span> UNIT SEPARATOR (<span style="display: inline-block"><code>\x1F</code></span>)</li>
+      <li>Paths are stored without leading separators</li>
+      <li>Example: <span style="display: inline-block"><code>foo/bar/baz.txt</code></span> → <span style="display: inline-block"><code>foo\x1Fbar\x1Fbaz.txt</code></span></li>
+    </ul>
+    <p><strong>Build Requirements:</strong></p>
+    <ul>
+      <li>Keys MUST be inserted in strict lexicographic byte order</li>
+      <li>Duplicate keys are not permitted</li>
+      <li>Values are non-zero <span style="display: inline-block"><code>u64</code></span> record indices</li>
+    </ul>
+    <h3 id="loc-71">14.8 Output Value Accumulation</h3>
+    <p>The FST stores output values along edges and at final nodes. The final lookup value is computed by:</p>
+    <ol>
+      <li value="1">Starting with accumulated value = 0</li>
+      <li value="2">For each edge traversed: <span style="display: inline-block"><code>accumulated = accumulated.wrapping_add(edge.output)</code></span></li>
+      <li value="3">If the final node has <span style="display: inline-block"><code>IS_FINAL</code></span> set: <span style="display: inline-block"><code>accumulated = accumulated.wrapping_add(final_output)</code></span></li>
+    </ol>
+    <p>For the Path FST, the result is a <span style="display: inline-block"><code>RecordIndex</code></span> value. For the Block FST, the result is a physical byte offset.</p>
+    <h3 id="loc-72">14.9 FST Implementation Notes</h3>
+    <p><strong>Adaptive Node Format:</strong></p>
+    <p>The FST uses an adaptive node format inspired by Adaptive Radix Trees (ART):</p>
+    <ul>
+      <li>Nodes with more than 16 edges use indexed format (256-byte lookup table)</li>
+      <li>Nodes with 16 or fewer edges use compact format (sorted first-bytes array)</li>
+    </ul>
+    <p>The threshold of >16 balances memory usage against lookup performance.</p>
+    <p><strong>Hot/Cold Separation:</strong></p>
+    <p>Data is separated into “hot” (frequently accessed during traversal) and “cold” (accessed only when needed) sections. This improves cache utilization during lookups.</p>
+    <p><strong>SIMD Optimization:</strong></p>
+    <p>Implementations MAY use SIMD instructions for compact node lookups:</p>
+    <ul>
+      <li>x86_64: SSE2 <span style="display: inline-block"><code>_mm_cmpeq_epi8</code></span> for 16-byte parallel comparison</li>
+      <li>aarch64: NEON <span style="display: inline-block"><code>vceqq_u8</code></span> for similar parallel comparison</li>
+    </ul>
+    <h3 id="loc-73">14.10 FST Constants</h3>
+    <p>These constants apply to both Path FST and Block FST:</p>
+    <table>
+      <thead>
+        <tr>
+          <th><strong>Constant</strong></th>
+          <th><strong>Value</strong></th>
+          <th><strong>Description</strong></th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>Magic</td>
+          <td><span style="display: inline-block"><code>BFST</code></span></td>
+          <td>FST section identifier</td>
+        </tr>
+        <tr>
+          <td>Version</td>
+          <td>1</td>
+          <td>Current format version</td>
+        </tr>
+        <tr>
+          <td>Header size</td>
+          <td>24 bytes</td>
+          <td>Fixed header size</td>
+        </tr>
+        <tr>
+          <td>Index entry size</td>
+          <td>8 bytes</td>
+          <td>Per-node index entry</td>
+        </tr>
+        <tr>
+          <td>Indexed threshold</td>
+          <td>17</td>
+          <td>Minimum edges for indexed format</td>
+        </tr>
+      </tbody>
+    </table>
+    <h2 id="loc-74">15 Block FST</h2>
+    <p>The Block FST provides logical-to-physical offset mapping for chunked files. It is located immediately after the Path FST.</p>
+    <p><strong>Presence Detection:</strong></p>
+    <p>Read the Path FST length prefix, then compute <span style="display: inline-block"><code>path_fst_end = trailer_end + sizeof(length_prefix) + path_fst_length</code></span>. If <span style="display: inline-block"><code>path_fst_end</code></span> &lt; <span style="display: inline-block"><code>EOF</code></span>, the Block FST begins at that position (starting with its own length prefix). If <span style="display: inline-block"><code>path_fst_end</code></span> = <span style="display: inline-block"><code>EOF</code></span>, no Block FST is present.</p>
+    <h3 id="loc-75">15.1 Block FST Overview</h3>
+    <p>The Block FST maps (record_index, logical_offset) pairs to physical offsets within the archive’s data section. Block lookups use predecessor queries to find the block containing any arbitrary byte offset.</p>
+    <h3 id="loc-76">15.2 Block FST Format</h3>
+    <p>The Block FST uses the same structure as the Path FST: a Vu64 length prefix followed by the FST data (<span style="text-decoration: underline"><a href="#loc-66">Section 14.3</a></span> – <span style="text-decoration: underline"><a href="#loc-69">Section 14.6</a></span>, <span style="text-decoration: underline"><a href="#loc-71">Section 14.8</a></span> – <span style="text-decoration: underline"><a href="#loc-73">Section 14.10</a></span>). <span style="text-decoration: underline"><a href="#loc-70">Section 14.7</a></span> (Path Encoding) does not apply; Block FST uses fixed-width keys as described below.</p>
+    <h3 id="loc-77">15.3 Block FST Key Format</h3>
+    <p>Keys are 16-byte fixed-width values:</p>
+    <div>
+      <table>
+        <tr>
+          <td>Bytes 0–7:</td>
+          <td>record_index</td>
+          <td>(u64, big-endian)</td>
+        </tr>
+        <tr>
+          <td>Bytes 8–15:</td>
+          <td>logical_offset</td>
+          <td>(u64, big-endian)</td>
+        </tr>
+      </table>
+    </div>
+    <ul>
+      <li><span style="display: inline-block"><code>record_index</code></span>: 1-based index of the chunked file record</li>
+      <li><span style="display: inline-block"><code>logical_offset</code></span>: Logical byte offset of the block start (always a multiple of <span style="display: inline-block"><code>block_size</code></span>)</li>
+    </ul>
+    <p>Big-endian encoding ensures lexicographic byte order matches numeric order.</p>
+    <p><strong>Example keys for record 5 with 2MB blocks:</strong></p>
+    <table>
+      <thead>
+        <tr>
+          <th><strong>Key (hex)</strong></th>
+          <th><strong>Meaning</strong></th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><span style="display: inline-block"><code>0000000000000005 0000000000000000</code></span></td>
+          <td>Record 5, block at offset 0</td>
+        </tr>
+        <tr>
+          <td><span style="display: inline-block"><code>0000000000000005 0000000000200000</code></span></td>
+          <td>Record 5, block at offset 2MB</td>
+        </tr>
+        <tr>
+          <td><span style="display: inline-block"><code>0000000000000005 0000000000400000</code></span></td>
+          <td>Record 5, block at offset 4MB</td>
+        </tr>
+      </tbody>
+    </table>
+    <h3 id="loc-78">15.4 Block FST Value Format</h3>
+    <p>Values are physical byte offsets (<span style="display: inline-block"><code>u64</code></span>) pointing to the start of the compressed block data within the archive.</p>
+    <h3 id="loc-79">15.5 Block Lookup</h3>
+    <p>To find the compressed data for a logical offset <span style="display: inline-block"><code>O</code></span> in a chunked file with record index <span style="display: inline-block"><code>R</code></span>:</p>
+    <ol>
+      <li value="1">Construct key: <span style="display: inline-block"><code>[R as u64, big-endian][O as u64, big-endian]</code></span></li>
+      <li value="2">Query Block FST for predecessor (largest key ≤ query key)</li>
+      <li value="3">Verify the result key has matching record index <span style="display: inline-block"><code>R</code></span></li>
+      <li value="4">Result value is the physical offset of the compressed block</li>
+      <li value="5">Read and decompress the frame (compression frames are self-delimiting)</li>
+      <li value="6">The offset within the decompressed block is <span style="display: inline-block"><code>O - block_logical_offset</code></span> where <span style="display: inline-block"><code>block_logical_offset</code></span> is from the result key</li>
+    </ol>
+    <p><strong>Example:</strong> Record 5 with 2MB (2,097,152 byte) block size. Block FST contains:</p>
+    <div>
+      <table>
+        <tr>
+          <td>[5][0]</td>
+          <td>→</td>
+          <td>physical_offset_a</td>
+        </tr>
+        <tr>
+          <td>[5][2097152]</td>
+          <td>→</td>
+          <td>physical_offset_b</td>
+        </tr>
+        <tr>
+          <td>[5][4194304]</td>
+          <td>→</td>
+          <td>physical_offset_c</td>
+        </tr>
+      </table>
+    </div>
+    <p><strong>Query: 17KB (17,408 bytes)</strong></p>
+    <ol>
+      <li value="1">Construct key: <span style="display: inline-block"><code>[5][17408]</code></span></li>
+      <li value="2">Predecessor result: <span style="display: inline-block"><code>[5][0]</code></span> (since 0 ≤ 17408 &lt; 2097152)</li>
+      <li value="3">Read from <span style="display: inline-block"><code>physical_offset_a</code></span>, decompress</li>
+      <li value="4">Offset within block: 17408 - 0 = 17408</li>
+    </ol>
+    <p><strong>Query: 2MB exactly (2,097,152 bytes)</strong></p>
+    <ol>
+      <li value="1">Construct key: <span style="display: inline-block"><code>[5][2097152]</code></span></li>
+      <li value="2">Predecessor result: <span style="display: inline-block"><code>[5][2097152]</code></span> (exact match)</li>
+      <li value="3">Read from <span style="display: inline-block"><code>physical_offset_b</code></span>, decompress</li>
+      <li value="4">Offset within block: 2097152 - 2097152 = 0</li>
+    </ol>
+    <p><strong>Query: 2MB + 17KB (2,114,560 bytes)</strong></p>
+    <ol>
+      <li value="1">Construct key: <span style="display: inline-block"><code>[5][2114560]</code></span></li>
+      <li value="2">Predecessor result: <span style="display: inline-block"><code>[5][2097152]</code></span> (since 2097152 ≤ 2114560 &lt; 4194304)</li>
+      <li value="3">Read from <span style="display: inline-block"><code>physical_offset_b</code></span>, decompress</li>
+      <li value="4">Offset within block: 2114560 - 2097152 = 17408</li>
+    </ol>
+    <h3 id="loc-80">15.6 Block FST Build Requirements</h3>
+    <ul>
+      <li>Keys MUST be inserted in strict lexicographic byte order</li>
+      <li>For a single chunked file, this means blocks are inserted in logical offset order</li>
+      <li>Across multiple files, files are ordered by record index</li>
+    </ul>
+    <h3 id="loc-81">15.7 Streaming Decompression</h3>
+    <p>Compression frames are self-delimiting, so implementations can decompress blocks without knowing their compressed size in advance. The Block FST provides the starting offset; the decompressor determines where the frame ends.</p>
+    <h3 id="loc-82">15.8 Block FST Constants</h3>
+    <p>In addition to the shared constants in <span style="text-decoration: underline"><a href="#loc-73">Section 14.10</a></span>:</p>
+    <table>
+      <thead>
+        <tr>
+          <th><strong>Constant</strong></th>
+          <th><strong>Value</strong></th>
+          <th><strong>Description</strong></th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>Key size</td>
+          <td>16 bytes</td>
+          <td>Fixed: 8 bytes record index + 8 bytes logical offset</td>
+        </tr>
+      </tbody>
+    </table>
+  </body>
+</html>
