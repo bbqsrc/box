@@ -1119,6 +1119,37 @@ impl BoxFileReader {
                 if let Some(ref p) = progress {
                     let _ = p.send(ExtractProgress::LinkCreated { path });
                 }
+            } else if let Record::ExternalLink(link) = &record {
+                // An external link points outside the archive — a package that
+                // references another package's file. It is created with its
+                // target as written, even when that target does not exist yet:
+                // a dangling symlink is a valid filesystem object, and it
+                // resolves once the package it points at is installed. Skipping
+                // it here is how a package silently loses files it declared it
+                // owned.
+                let link_path = output_path.join(path.to_path_buf());
+
+                if let Some(parent) = link_path.parent() {
+                    fs::create_dir_all(parent)
+                        .await
+                        .map_err(|e| ExtractError::CreateDirFailed(e, parent.to_path_buf()))?;
+                }
+
+                let target = PathBuf::from(link.target.as_ref());
+                #[cfg(unix)]
+                tokio::fs::symlink(&target, &link_path)
+                    .await
+                    .map_err(|e| ExtractError::CreateLinkFailed(e, link_path.clone(), target))?;
+                #[cfg(windows)]
+                tokio::fs::symlink_file(&target, &link_path)
+                    .await
+                    .map_err(|e| ExtractError::CreateLinkFailed(e, link_path.clone(), target))?;
+
+                stats.links_created += 1;
+
+                if let Some(ref p) = progress {
+                    let _ = p.send(ExtractProgress::LinkCreated { path });
+                }
             }
         }
         timing.symlinks = symlinks_start.elapsed();
