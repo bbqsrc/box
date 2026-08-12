@@ -28,6 +28,52 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn parallel_small_file_zstd_roundtrip() {
+        let temp = tempfile::tempdir().unwrap();
+        let archive = temp.path().join("small-files.box");
+        let mut expected = Vec::new();
+        let mut jobs = Vec::new();
+
+        for index in 0..64 {
+            let name = format!("file-{index}.txt");
+            let contents = format!(
+                "small package file {index}: repeated repeated repeated repeated repeated\n"
+            )
+            .repeat(4)
+            .into_bytes();
+            let fs_path = temp.path().join(&name);
+            std::fs::write(&fs_path, &contents).unwrap();
+            expected.push((name.clone(), contents));
+            jobs.push(FileJob {
+                fs_path,
+                box_path: BoxPath::new(name).unwrap(),
+                config: CompressionConfig::new(Compression::Zstd),
+                attrs: HashMap::new(),
+            });
+        }
+
+        let mut writer = BoxFileWriter::create(&archive).await.unwrap();
+        let stats = writer
+            .add_paths_parallel(jobs, true, false, false, 4)
+            .await
+            .unwrap();
+        assert_eq!(stats.files_added, expected.len() as u64);
+        writer.finish().await.unwrap();
+
+        let reader = BoxFileReader::open(&archive).await.unwrap();
+        for (name, contents) in expected {
+            let index = reader
+                .metadata()
+                .index(&BoxPath::new(name).unwrap())
+                .unwrap();
+            let record = reader.metadata().record(index).unwrap().as_file().unwrap();
+            let mut actual = Vec::new();
+            reader.decompress(record, &mut actual).await.unwrap();
+            assert_eq!(actual, contents);
+        }
+    }
+
+    #[tokio::test]
     async fn read_garbage() {
         let filename = "./read_garbage.box";
         create_test_box(filename).await;

@@ -76,6 +76,40 @@ pub struct CompressedFile {
     pub checksum: Option<(&'static str, Vec<u8>)>,
 }
 
+/// Reuses zstd contexts across files compressed by one parallel archive job.
+///
+/// Initializing a context is noticeable for package trees made up of many small
+/// files. Dictionaries are deliberately excluded: callers may mix dictionary
+/// contents, while the overwhelmingly common package path uses dictionary-free
+/// zstd with a small set of compression levels.
+#[cfg(feature = "zstd")]
+#[derive(Default)]
+struct ZstdCompressorPool {
+    compressors: std::sync::Mutex<HashMap<i32, Vec<ZstdCompressor<'static>>>>,
+}
+
+#[cfg(feature = "zstd")]
+impl ZstdCompressorPool {
+    fn take(&self, level: i32) -> std::io::Result<ZstdCompressor<'static>> {
+        let cached = self
+            .compressors
+            .lock()
+            .map_err(|_| std::io::Error::other("zstd compressor pool poisoned"))?
+            .get_mut(&level)
+            .and_then(Vec::pop);
+
+        cached.map_or_else(|| ZstdCompressor::new(level), Ok)
+    }
+
+    fn put(&self, level: i32, mut compressor: ZstdCompressor<'static>) {
+        if compressor.reset().is_ok()
+            && let Ok(mut compressors) = self.compressors.lock()
+        {
+            compressors.entry(level).or_default().push(compressor);
+        }
+    }
+}
+
 /// 8MB buffer for efficient sequential writes
 const WRITE_BUFFER_SIZE: usize = 8 * 1024 * 1024;
 
@@ -1381,6 +1415,7 @@ impl BoxFileWriter {
         use std::sync::Arc;
         use tokio::sync::{Semaphore, mpsc};
 
+        let concurrency = concurrency.max(1);
         let memory_threshold = calculate_memory_threshold(concurrency);
 
         // Unbounded channel to avoid deadlock - tasks can always send without blocking
@@ -1388,6 +1423,8 @@ impl BoxFileWriter {
 
         // Semaphore to limit concurrent compression tasks
         let semaphore = Arc::new(Semaphore::new(concurrency));
+        #[cfg(feature = "zstd")]
+        let zstd_pool = Arc::new(ZstdCompressorPool::default());
 
         // Spawn compression tasks
         let files: Vec<_> = files.into_iter().collect();
@@ -1416,6 +1453,8 @@ impl BoxFileWriter {
             let tx = tx.clone();
             let progress = progress.clone();
             let semaphore = semaphore.clone();
+            #[cfg(feature = "zstd")]
+            let zstd_pool = zstd_pool.clone();
 
             tokio::spawn(async move {
                 // Acquire semaphore inside the task to avoid blocking the spawn loop
@@ -1432,7 +1471,7 @@ impl BoxFileWriter {
                 }
 
                 let result = if checksum {
-                    compress_file::<blake3::Hasher>(
+                    compress_file_inner::<blake3::Hasher>(
                         &job.fs_path,
                         job.box_path,
                         &job.config,
@@ -1440,10 +1479,12 @@ impl BoxFileWriter {
                         timestamps,
                         ownership,
                         job.attrs,
+                        #[cfg(feature = "zstd")]
+                        Some(&zstd_pool),
                     )
                     .await
                 } else {
-                    compress_file::<crate::checksum::NullChecksum>(
+                    compress_file_inner::<crate::checksum::NullChecksum>(
                         &job.fs_path,
                         job.box_path,
                         &job.config,
@@ -1451,6 +1492,8 @@ impl BoxFileWriter {
                         timestamps,
                         ownership,
                         job.attrs,
+                        #[cfg(feature = "zstd")]
+                        Some(&zstd_pool),
                     )
                     .await
                 };
@@ -1601,11 +1644,30 @@ impl AddAssign for AddStats {
 /// Each task could have both compressed and uncompressed data in flight.
 pub fn calculate_memory_threshold(concurrency: usize) -> u64 {
     use sysinfo::System;
-    let sys = System::new_all();
+    // Reading process, CPU, disk, and network state is surprisingly costly and
+    // none of it contributes to this calculation.
+    let mut sys = System::new();
+    sys.refresh_memory();
     let available = sys.available_memory();
     // Use at most 50% of available RAM, divided by concurrent tasks
     // Factor of 4 accounts for: compressed + uncompressed buffers per task
     available / (concurrency as u64 * 4).max(1)
+}
+
+/// Size the per-file streaming buffers to the file being processed.
+///
+/// Package trees commonly contain thousands of files that are much smaller than
+/// [`DEFAULT_BLOCK_SIZE`]. Allocating two full-size blocks for every one of those
+/// files causes far more allocator and page-fault work than the compression
+/// itself. Keep a modest floor so files that grow while being read still make
+/// useful progress, while retaining the full block size for large files.
+fn file_buffer_size(file_size: u64) -> usize {
+    const MIN_FILE_BUFFER_SIZE: u64 = 8 * 1024;
+
+    file_size
+        .clamp(MIN_FILE_BUFFER_SIZE, DEFAULT_BLOCK_SIZE as u64)
+        .try_into()
+        .expect("DEFAULT_BLOCK_SIZE fits in usize")
 }
 
 /// Compress a file to memory or temp file based on size threshold.
@@ -1624,6 +1686,31 @@ pub async fn compress_file<C: Checksum>(
     ownership: bool,
     extra_attrs: HashMap<String, Vec<u8>>,
 ) -> std::io::Result<CompressedFile> {
+    compress_file_inner::<C>(
+        fs_path,
+        box_path,
+        config,
+        memory_threshold,
+        timestamps,
+        ownership,
+        extra_attrs,
+        #[cfg(feature = "zstd")]
+        None,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn compress_file_inner<C: Checksum>(
+    fs_path: &Path,
+    box_path: BoxPath<'static>,
+    config: &CompressionConfig,
+    memory_threshold: u64,
+    timestamps: bool,
+    ownership: bool,
+    extra_attrs: HashMap<String, Vec<u8>>,
+    #[cfg(feature = "zstd")] zstd_pool: Option<&ZstdCompressorPool>,
+) -> std::io::Result<CompressedFile> {
     let file = tokio::fs::File::open(fs_path).await?;
     let meta = file.metadata().await?;
     let file_size = meta.len();
@@ -1635,18 +1722,18 @@ pub async fn compress_file<C: Checksum>(
     let config = config.for_size(file_size);
 
     // Wrap in HashingReader to compute checksum while reading
-    let hashing_reader = HashingReader::<_, C>::new(file);
-    let mut buf_reader = BufReader::new(hashing_reader);
+    let mut hashing_reader = HashingReader::<_, C>::new(file);
+    let buffer_size = file_buffer_size(file_size);
 
     let (data, compressed_length, decompressed_length) = if file_size <= memory_threshold {
         // Small file: compress to memory
         let mut buffer = Vec::new();
         let byte_count = match config.compression {
             Compression::Stored => {
-                let mut read_buf = vec![0u8; DEFAULT_BLOCK_SIZE as usize];
+                let mut read_buf = vec![0u8; buffer_size];
                 let mut total = 0u64;
                 loop {
-                    let n = buf_reader.read(&mut read_buf).await?;
+                    let n = hashing_reader.read(&mut read_buf).await?;
                     if n == 0 {
                         break;
                     }
@@ -1664,17 +1751,21 @@ pub async fn compress_file<C: Checksum>(
                 let level = config
                     .get_i32("level")
                     .unwrap_or(zstd::DEFAULT_COMPRESSION_LEVEL);
+                let pooled = config.dictionary.is_none() && zstd_pool.is_some();
                 let mut compressor = match &config.dictionary {
                     Some(dict) => ZstdCompressor::with_dictionary(level, dict)?,
-                    None => ZstdCompressor::new(level)?,
+                    None => match zstd_pool {
+                        Some(pool) => pool.take(level)?,
+                        None => ZstdCompressor::new(level)?,
+                    },
                 };
-                let mut read_buf = vec![0u8; DEFAULT_BLOCK_SIZE as usize];
-                let mut out_buf = vec![0u8; DEFAULT_BLOCK_SIZE as usize];
+                let mut read_buf = vec![0u8; buffer_size];
+                let mut out_buf = vec![0u8; buffer_size];
                 let mut total_read = 0u64;
 
                 // Compress loop
                 loop {
-                    let n = buf_reader.read(&mut read_buf).await?;
+                    let n = hashing_reader.read(&mut read_buf).await?;
                     if n == 0 {
                         break;
                     }
@@ -1704,6 +1795,12 @@ pub async fn compress_file<C: Checksum>(
                     }
                 }
 
+                if pooled {
+                    zstd_pool
+                        .expect("pooled compressor has a pool")
+                        .put(level, compressor);
+                }
+
                 ByteCount {
                     read: total_read,
                     write: buffer.len() as u64,
@@ -1714,13 +1811,13 @@ pub async fn compress_file<C: Checksum>(
                 use crate::compression::xz::XzCompressor;
                 let level = config.get_i32("level").unwrap_or(6) as u32;
                 let mut compressor = XzCompressor::new(level)?;
-                let mut read_buf = vec![0u8; DEFAULT_BLOCK_SIZE as usize];
-                let mut out_buf = vec![0u8; DEFAULT_BLOCK_SIZE as usize];
+                let mut read_buf = vec![0u8; buffer_size];
+                let mut out_buf = vec![0u8; buffer_size];
                 let mut total_read = 0u64;
 
                 // Compress loop
                 loop {
-                    let n = buf_reader.read(&mut read_buf).await?;
+                    let n = hashing_reader.read(&mut read_buf).await?;
                     if n == 0 {
                         break;
                     }
@@ -1773,10 +1870,10 @@ pub async fn compress_file<C: Checksum>(
         let mut temp_file = tokio::fs::File::create(temp.path()).await?;
         let byte_count = match config.compression {
             Compression::Stored => {
-                let mut read_buf = vec![0u8; DEFAULT_BLOCK_SIZE as usize];
+                let mut read_buf = vec![0u8; buffer_size];
                 let mut total = 0u64;
                 loop {
-                    let n = buf_reader.read(&mut read_buf).await?;
+                    let n = hashing_reader.read(&mut read_buf).await?;
                     if n == 0 {
                         break;
                     }
@@ -1794,18 +1891,22 @@ pub async fn compress_file<C: Checksum>(
                 let level = config
                     .get_i32("level")
                     .unwrap_or(zstd::DEFAULT_COMPRESSION_LEVEL);
+                let pooled = config.dictionary.is_none() && zstd_pool.is_some();
                 let mut compressor = match &config.dictionary {
                     Some(dict) => ZstdCompressor::with_dictionary(level, dict)?,
-                    None => ZstdCompressor::new(level)?,
+                    None => match zstd_pool {
+                        Some(pool) => pool.take(level)?,
+                        None => ZstdCompressor::new(level)?,
+                    },
                 };
-                let mut read_buf = vec![0u8; DEFAULT_BLOCK_SIZE as usize];
-                let mut out_buf = vec![0u8; DEFAULT_BLOCK_SIZE as usize];
+                let mut read_buf = vec![0u8; buffer_size];
+                let mut out_buf = vec![0u8; buffer_size];
                 let mut total_read = 0u64;
                 let mut total_write = 0u64;
 
                 // Compress loop
                 loop {
-                    let n = buf_reader.read(&mut read_buf).await?;
+                    let n = hashing_reader.read(&mut read_buf).await?;
                     if n == 0 {
                         break;
                     }
@@ -1837,6 +1938,12 @@ pub async fn compress_file<C: Checksum>(
                     }
                 }
 
+                if pooled {
+                    zstd_pool
+                        .expect("pooled compressor has a pool")
+                        .put(level, compressor);
+                }
+
                 ByteCount {
                     read: total_read,
                     write: total_write,
@@ -1847,14 +1954,14 @@ pub async fn compress_file<C: Checksum>(
                 use crate::compression::xz::XzCompressor;
                 let level = config.get_i32("level").unwrap_or(6) as u32;
                 let mut compressor = XzCompressor::new(level)?;
-                let mut read_buf = vec![0u8; DEFAULT_BLOCK_SIZE as usize];
-                let mut out_buf = vec![0u8; DEFAULT_BLOCK_SIZE as usize];
+                let mut read_buf = vec![0u8; buffer_size];
+                let mut out_buf = vec![0u8; buffer_size];
                 let mut total_read = 0u64;
                 let mut total_write = 0u64;
 
                 // Compress loop
                 loop {
-                    let n = buf_reader.read(&mut read_buf).await?;
+                    let n = hashing_reader.read(&mut read_buf).await?;
                     if n == 0 {
                         break;
                     }
@@ -1907,7 +2014,7 @@ pub async fn compress_file<C: Checksum>(
     };
 
     // Finalize the hash
-    let hash_bytes = buf_reader.into_inner().finalize_bytes();
+    let hash_bytes = hashing_reader.finalize_bytes();
 
     let checksum = if C::NAME.is_empty() {
         None

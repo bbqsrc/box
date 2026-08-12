@@ -17,7 +17,6 @@ fn zstd_error(code: usize) -> Error {
 /// Uses zstd-safe's CCtx for buffer-to-buffer compression without I/O traits.
 pub struct ZstdCompressor<'a> {
     ctx: CCtx<'a>,
-    level: i32,
 }
 
 impl ZstdCompressor<'_> {
@@ -25,7 +24,7 @@ impl ZstdCompressor<'_> {
     pub fn new(level: i32) -> Result<Self> {
         let mut ctx = CCtx::create();
         ctx.init(level).map_err(zstd_error)?;
-        Ok(Self { ctx, level })
+        Ok(Self { ctx })
     }
 
     /// Create a compressor with a dictionary.
@@ -33,7 +32,7 @@ impl ZstdCompressor<'_> {
         let mut ctx = CCtx::create();
         ctx.init(level).map_err(zstd_error)?;
         ctx.load_dictionary(dictionary).map_err(zstd_error)?;
-        Ok(Self { ctx, level })
+        Ok(Self { ctx })
     }
 
     /// Process input data into output buffer.
@@ -79,9 +78,8 @@ impl ZstdCompressor<'_> {
     pub fn reset(&mut self) -> Result<()> {
         self.ctx
             .reset(ResetDirective::SessionOnly)
-            .map_err(zstd_error)?;
-        self.ctx.init(self.level).map_err(zstd_error)?;
-        Ok(())
+            .map(|_| ())
+            .map_err(zstd_error)
     }
 }
 
@@ -248,6 +246,31 @@ pub fn decompress_buffer(input: &[u8], dictionary: Option<&[u8]>) -> Result<Vec<
 mod tests {
     use super::*;
 
+    fn compress_with(compressor: &mut ZstdCompressor<'_>, data: &[u8]) -> Vec<u8> {
+        let mut output = vec![0u8; zstd_safe::compress_bound(data.len())];
+        let mut in_pos = 0;
+        let mut out_pos = 0;
+
+        while in_pos < data.len() {
+            let status = compressor
+                .compress(&data[in_pos..], &mut output[out_pos..])
+                .unwrap();
+            in_pos += status.bytes_consumed();
+            out_pos += status.bytes_produced();
+        }
+
+        loop {
+            let status = compressor.finish(&mut output[out_pos..]).unwrap();
+            out_pos += status.bytes_produced();
+            if status.is_done() {
+                break;
+            }
+        }
+
+        output.truncate(out_pos);
+        output
+    }
+
     #[test]
     fn test_compress_decompress_roundtrip() {
         let data = b"hello world hello world hello world hello world";
@@ -305,5 +328,23 @@ mod tests {
         let compressed = compress_buffer(data, 3, Some(&dict)).unwrap();
         let decompressed = decompress_buffer(&compressed, Some(&dict)).unwrap();
         assert_eq!(decompressed, data);
+    }
+
+    #[test]
+    fn test_reset_reuses_context_and_dictionary() {
+        let samples: Vec<&[u8]> = vec![b"small package file with repeated words"; 100];
+        let dict = zstd::dict::from_samples(&samples, 1024).unwrap();
+        let mut compressor = ZstdCompressor::with_dictionary(3, &dict).unwrap();
+
+        for data in [
+            b"small package file with repeated words: first".as_slice(),
+            b"small package file with repeated words: second".as_slice(),
+            b"small package file with repeated words: third".as_slice(),
+        ] {
+            let compressed = compress_with(&mut compressor, data);
+            let decompressed = decompress_buffer(&compressed, Some(&dict)).unwrap();
+            assert_eq!(decompressed, data);
+            compressor.reset().unwrap();
+        }
     }
 }
