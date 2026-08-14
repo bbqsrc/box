@@ -12,7 +12,7 @@ name = "box"
 path = "src/main.rs"
 
 [dependencies]
-mimalloc.workspace = true
+mimalloc = { workspace = true, optional = true }
 box-format.workspace = true
 fastvint.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "fs"] }
@@ -36,5 +36,9 @@ textwrap.workspace = true
 num_cpus.workspace = true
 
 [features]
-default = []
+default = ["mimalloc"]
+# The bundled allocator. Off where the platform's malloc already is
+# mimalloc — a musl distribution linking it twice gets duplicate mi_*
+# symbols at static link.
+mimalloc = ["dep:mimalloc"]
 selfextract = []
