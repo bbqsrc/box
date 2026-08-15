@@ -128,6 +128,7 @@ pub(crate) fn deserialize_record_borrowed<'a>(
 }
 
 /// Deserialize BoxMetadata in v0 format (with root).
+// [spec:box:def:versioning.root.v0]
 pub(crate) fn deserialize_metadata_borrowed<'a>(
     data: &'a [u8],
     pos: &mut usize,
