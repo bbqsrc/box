@@ -226,10 +226,43 @@ children (
                 title "Automatic large-file chunked creation"
                 priority 0
                 kind @feat
-                implements {
-                    rust ([spec:box:req:chunked-io.root.automatic-creation])
-                }
                 deps (io.chunked integration.cli)
+                sealed true
+                log (
+                    {
+                        at 2026-08-15T22:38:32.98999Z
+                        author "brendan@bbqsrc.net"
+                        kind @errata
+                        text "Automatic size-based chunk selection was the wrong policy. Chunked writing must be explicitly selected by the caller; ordinary File records remain the default regardless of source size. The follow-up io.explicit-chunked-selection replaces the automatic behavior and aligns the CLI with its existing position-sensitive selector grammar."
+                        after_done true
+                    }
+
+                    {
+                        at 2026-08-15T22:38:56.193165Z
+                        author "brendan@bbqsrc.net"
+                        kind @status
+                        text "Todo → Done (nplan complete)"
+                    }
+                )
+            }
+
+            {
+                id io.explicit-chunked-selection
+                title "Explicit chunked-file selection"
+                priority 0
+                kind @fix
+                implements {
+                    rust ([spec:box:req:chunked-io.root.explicit-creation] [spec:box:sem:cli-selection.root.representation])
+                }
+                deps (io.automatic-chunked-creation)
+                log (
+                    {
+                        at 2026-08-15T22:39:02.420268Z
+                        author "brendan@bbqsrc.net"
+                        kind @status
+                        text "Todo → Doing (nplan start)"
+                    }
+                )
             }
         )
     }

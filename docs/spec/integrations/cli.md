@@ -52,6 +52,15 @@
 > operand when present. Each other operand captures the configuration active at
 > its position and is classified as a glob when it contains `*`, `?`, or `[`.
 
+> [spec:box:sem:cli-selection.root.representation]
+> The initial `--zstd` compression mode encodes ordinary file records.
+> `--zstd-chunked` selects Zstandard-compressed chunked-file records for all
+> subsequent operands. Selecting `--zstd`/`--zstandard`, `--stored`, or `--xz`
+> selects the named compression algorithm and returns subsequent operands to
+> ordinary file records. Each operand captures the mode active at its position,
+> and a directory or glob propagates that mode to every regular source collected
+> from it. Source size MUST NOT change the selected mode.
+
 > [spec:box:sem:cli-selection.root.collection]
 > An explicit regular-file operand contributes that `BoxPath` at most once. A
 > directory operand is walked asynchronously; candidates are filtered by hidden

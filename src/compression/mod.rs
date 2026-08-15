@@ -180,6 +180,7 @@ pub struct CompressionConfig {
     pub options: HashMap<String, String>,
     /// Zstd dictionary for compression.
     pub dictionary: Option<Vec<u8>>,
+    chunked: bool,
 }
 
 #[cfg(feature = "std")]
@@ -189,6 +190,7 @@ impl CompressionConfig {
             compression,
             options: HashMap::new(),
             dictionary: None,
+            chunked: false,
         }
     }
 
@@ -198,7 +200,20 @@ impl CompressionConfig {
             compression,
             options: HashMap::new(),
             dictionary: Some(dictionary),
+            chunked: false,
         }
+    }
+
+    /// Select independently compressed chunked-file records.
+    // [spec:box:req:chunked-io.root.explicit-creation]
+    pub fn chunked(mut self) -> Self {
+        self.chunked = true;
+        self
+    }
+
+    /// Whether this configuration explicitly selects chunked-file records.
+    pub fn is_chunked(&self) -> bool {
+        self.chunked
     }
 
     /// Set the dictionary.
@@ -229,7 +244,7 @@ impl CompressionConfig {
     /// Returns the effective config for a given file size.
     // [spec:box:req:compression.root.stored]
     pub fn for_size(&self, size: u64) -> Self {
-        if size < MIN_COMPRESSIBLE_SIZE {
+        if size < MIN_COMPRESSIBLE_SIZE && !self.chunked {
             Self::new(Compression::Stored)
         } else {
             self.clone()
@@ -327,6 +342,22 @@ mod tests {
 
         let decompressed = decompress_bytes_sync(&compressed, Compression::Zstd, None).unwrap();
         assert_eq!(decompressed, data);
+    }
+
+    // [spec:box:req:chunked-io.root.explicit-creation/test/unit]
+    #[cfg(feature = "zstd")]
+    #[test]
+    fn chunked_config_survives_small_size_selection() {
+        let chunked = CompressionConfig::new(Compression::Zstd).chunked();
+        assert!(chunked.is_chunked());
+
+        let effective_chunked = chunked.for_size(0);
+        assert!(effective_chunked.is_chunked());
+        assert_eq!(effective_chunked.compression, Compression::Zstd);
+
+        let effective_ordinary = CompressionConfig::new(Compression::Zstd).for_size(0);
+        assert!(!effective_ordinary.is_chunked());
+        assert_eq!(effective_ordinary.compression, Compression::Stored);
     }
 
     // [spec:box:req:compression.root/test]

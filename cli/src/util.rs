@@ -15,6 +15,7 @@ pub struct PathWithCompression {
 /// Compression flags are position-sensitive: they apply to all subsequent paths.
 /// Use -O key=value to set compression options.
 // [spec:box:sem:cli-selection.root]
+// [spec:box:sem:cli-selection.root.representation]
 pub fn parse_paths_with_compression(args: &[String]) -> Vec<PathWithCompression> {
     let mut result = Vec::new();
     let mut current_config = CompressionConfig::new(Compression::Zstd); // Default
@@ -23,6 +24,9 @@ pub fn parse_paths_with_compression(args: &[String]) -> Vec<PathWithCompression>
     while let Some(arg) = iter.next() {
         match arg.as_str() {
             "--zstd" | "--zstandard" => current_config = CompressionConfig::new(Compression::Zstd),
+            "--zstd-chunked" => {
+                current_config = CompressionConfig::new(Compression::Zstd).chunked()
+            }
             "--stored" => current_config = CompressionConfig::new(Compression::Stored),
             "--xz" => current_config = CompressionConfig::new(Compression::Xz),
             "-O" => {

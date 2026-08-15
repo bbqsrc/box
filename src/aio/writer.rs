@@ -1304,7 +1304,7 @@ impl BoxFileWriter {
     }
 
     /// Publish prepared chunk data as one record after all block work succeeds.
-    // [spec:box:req:chunked-io.root.automatic-creation]
+    // [spec:box:req:chunked-io.root.explicit-creation]
     async fn write_precompressed_chunked_with_parent(
         &mut self,
         mut file: CompressedChunkedFile,
@@ -1506,8 +1506,8 @@ impl BoxFileWriter {
     ///
     /// Parent directories are automatically created if they don't exist.
     /// Files smaller than 72 bytes are stored uncompressed regardless of the
-    /// compression setting. Use [`Self::add_path`] or [`Self::add_paths_parallel`]
-    /// for high-level path creation with automatic chunk selection.
+    /// compression setting. High-level path creation also uses ordinary records
+    /// unless its compression configuration explicitly selects chunked records.
     pub async fn insert_file<P: AsRef<Path>>(
         &mut self,
         fs_path: P,
@@ -1544,7 +1544,7 @@ impl BoxFileWriter {
     ///
     /// If the path is a directory and `options.recursive` is true, all contents
     /// are added recursively.
-    // [spec:box:req:chunked-io.root.automatic-creation]
+    // [spec:box:req:chunked-io.root.explicit-creation]
     pub async fn add_path<P: AsRef<Path>>(
         &mut self,
         path: P,
@@ -1659,9 +1659,9 @@ impl BoxFileWriter {
 
     /// Add multiple files in parallel, writing sequentially to the archive.
     ///
-    /// This method compresses ordinary files and large-file blocks with one
-    /// shared concurrency bound, then writes prepared files sequentially in
-    /// input order to maintain archive consistency.
+    /// This method compresses ordinary files and explicitly selected chunk
+    /// blocks with one shared concurrency bound, then writes prepared files
+    /// sequentially in input order to maintain archive consistency.
     ///
     /// # Arguments
     /// * `files` - Iterator of `FileJob` items, each specifying a file and its compression
@@ -1699,7 +1699,7 @@ impl BoxFileWriter {
     /// Same as `add_paths_parallel` but accepts an optional progress sender
     /// that receives `ParallelProgress` updates.
     // [spec:box:sem:async-io.root.parallel-compression+1]
-    // [spec:box:req:chunked-io.root.automatic-creation]
+    // [spec:box:req:chunked-io.root.explicit-creation]
     pub async fn add_paths_parallel_with_progress<I>(
         &mut self,
         files: I,
@@ -2092,7 +2092,7 @@ async fn write_next_compressed_block(
 }
 
 #[allow(clippy::too_many_arguments)]
-// [spec:box:req:chunked-io.root.automatic-creation]
+// [spec:box:req:chunked-io.root.explicit-creation]
 async fn compress_chunked_file_inner<C: Checksum>(
     fs_path: &Path,
     box_path: BoxPath<'static>,
@@ -2105,12 +2105,6 @@ async fn compress_chunked_file_inner<C: Checksum>(
     max_in_flight: usize,
     #[cfg(test)] compression_test_probe: Option<Arc<CompressionTestProbe>>,
 ) -> std::io::Result<CompressedChunkedFile> {
-    if initial_size <= u64::from(DEFAULT_BLOCK_SIZE) {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "automatic chunk preparation requires an initially large source",
-        ));
-    }
     let mut source = File::open(fs_path).await?;
     let meta = source.metadata().await?;
 
@@ -2199,7 +2193,7 @@ async fn compress_chunked_file_inner<C: Checksum>(
     if decompressed_length == 0 {
         return Err(std::io::Error::new(
             std::io::ErrorKind::UnexpectedEof,
-            "source became empty after automatic chunk selection",
+            "an explicitly chunked source must be non-empty",
         ));
     }
     output.flush().await?;
@@ -2237,7 +2231,7 @@ async fn prepare_file_inner<C: Checksum>(
     #[cfg(test)] compression_test_probe: Option<Arc<CompressionTestProbe>>,
 ) -> std::io::Result<PreparedFile> {
     let initial_size = tokio::fs::metadata(&job.fs_path).await?.len();
-    if initial_size > u64::from(DEFAULT_BLOCK_SIZE) {
+    if job.config.is_chunked() {
         let compressed = compress_chunked_file_inner::<C>(
             &job.fs_path,
             job.box_path,

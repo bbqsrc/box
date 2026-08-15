@@ -40,7 +40,7 @@ enum EntryKind {
 // [spec:box:req:cli-commands.root.create+1]
 // [spec:box:req:cli-safety.root]
 // [spec:box:req:cli-safety.root.output-integrity]
-// [spec:box:req:chunked-io.root.automatic-creation]
+// [spec:box:req:chunked-io.root.explicit-creation]
 pub async fn run(args: CreateArgs) -> Result<()> {
     let archive_path = &args.archive;
 
@@ -526,6 +526,7 @@ fn reject_existing_archive(archive_path: &Path, force: bool) -> Result<()> {
 
 #[allow(clippy::too_many_arguments)]
 // [spec:box:sem:cli-selection.root.collection]
+// [spec:box:sem:cli-selection.root.representation]
 async fn collect_path(
     path: &Path,
     config: &CompressionConfig,

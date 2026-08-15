@@ -102,6 +102,7 @@ pub enum Commands {
 #[command(after_help = "\
 \x1b[1m\x1b[4mCompression Flags:\x1b[0m
   \x1b[1m--zstd\x1b[0m      Zstandard compression (default)
+  \x1b[1m--zstd-chunked\x1b[0m  Zstandard compression in independent chunks
   \x1b[1m--stored\x1b[0m    No compression
   \x1b[1m--brotli\x1b[0m    Brotli compression
   \x1b[1m--deflate\x1b[0m   Deflate compression
@@ -122,6 +123,7 @@ Use \x1b[1m-O key=value\x1b[0m to set compression options for the current algori
   box create archive.box src/
   box create archive.box --zstd -O level=19 src/
   box create archive.box --brotli -O level=6 assets/ --zstd src/
+  box create archive.box --zstd-chunked images/ --zstd manifests/
   box create --exclude '*.log' archive.box .")]
 pub struct CreateArgs {
     /// Output archive path

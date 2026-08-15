@@ -85,13 +85,26 @@ fn command_surface_requires_one_command_and_retains_aliases() {
 // [spec:box:req:checksums.root/test/integration]
 // [spec:box:req:checksums.root.attachment/test/integration]
 // [spec:box:req:checksums.root.disabled/test/integration]
-// [spec:box:req:chunked-io.root.automatic-creation/test/integration]
+// [spec:box:req:chunked-io.root.explicit-creation/test/integration]
+// [spec:box:sem:cli-selection.root.representation/test/integration]
 #[test]
 fn create_builds_a_finished_checksummed_archive_with_hierarchy() {
     let temp = tempfile::tempdir().unwrap();
     create_input_tree(temp.path());
     let large_payload = vec![b'B'; DEFAULT_BLOCK_SIZE as usize * 2 + 257];
     std::fs::write(temp.path().join("input/large.bin"), &large_payload).unwrap();
+    let default_large_payload = vec![b'R'; DEFAULT_BLOCK_SIZE as usize + 91];
+    std::fs::write(
+        temp.path().join("input/default-large.bin"),
+        &default_large_payload,
+    )
+    .unwrap();
+    let selected_small_payload = vec![b'C'; 4096];
+    std::fs::write(
+        temp.path().join("input/selected-small.bin"),
+        &selected_small_payload,
+    )
+    .unwrap();
     std::fs::write(
         temp.path().join("input/exact-block.bin"),
         vec![b'E'; DEFAULT_BLOCK_SIZE as usize],
@@ -109,7 +122,22 @@ fn create_builds_a_finished_checksummed_archive_with_hierarchy() {
         "create must require at least one input operand"
     );
 
-    let archive = create_cli_archive(temp.path());
+    let archive = temp.path().join("archive.box");
+    let output = box_command()
+        .current_dir(temp.path())
+        .args([
+            "create",
+            "--quiet",
+            "archive.box",
+            "--zstd-chunked",
+            "input/large.bin",
+            "input/selected-small.bin",
+            "--zstd",
+            "input",
+        ])
+        .output()
+        .unwrap();
+    assert_success(&output);
 
     let reader = box_format::sync::BoxReader::open(&archive).unwrap();
     assert!(reader.file_attrs().contains_key("created"));
@@ -155,7 +183,7 @@ fn create_builds_a_finished_checksummed_archive_with_hierarchy() {
         .record(large_index)
         .unwrap()
         .as_chunked_file()
-        .expect("sources larger than 2 MiB must be chunked");
+        .expect("--zstd-chunked must explicitly select chunked representation");
     assert_eq!(large_record.block_size, DEFAULT_BLOCK_SIZE);
     assert_eq!(large_record.block_count(), 3);
     assert_eq!(large_record.decompressed_length, large_payload.len() as u64);
@@ -190,6 +218,44 @@ fn create_builds_a_finished_checksummed_archive_with_hierarchy() {
         .unwrap();
     assert_eq!(large_roundtrip, large_payload);
 
+    let selected_small_path = BoxPath::new("input/selected-small.bin").unwrap();
+    let selected_small_index = reader.metadata().index(&selected_small_path).unwrap();
+    let selected_small_record = reader
+        .metadata()
+        .record(selected_small_index)
+        .unwrap()
+        .as_chunked_file()
+        .expect("explicit chunk selection must not depend on source size");
+    assert_eq!(selected_small_record.compression, Compression::Zstd);
+    assert_eq!(selected_small_record.block_count(), 1);
+    let mut selected_small_roundtrip = Vec::new();
+    reader
+        .decompress_chunked(
+            selected_small_record,
+            selected_small_index,
+            &mut selected_small_roundtrip,
+        )
+        .unwrap();
+    assert_eq!(selected_small_roundtrip, selected_small_payload);
+
+    let default_large_path = BoxPath::new("input/default-large.bin").unwrap();
+    let default_large_record = reader
+        .metadata()
+        .record(reader.metadata().index(&default_large_path).unwrap())
+        .unwrap();
+    assert!(
+        matches!(default_large_record, Record::File(_)),
+        "source size must not implicitly select chunked representation"
+    );
+    let mut default_large_roundtrip = Vec::new();
+    reader
+        .decompress(
+            default_large_record.as_file().unwrap(),
+            &mut default_large_roundtrip,
+        )
+        .unwrap();
+    assert_eq!(default_large_roundtrip, default_large_payload);
+
     let empty_index = reader
         .metadata()
         .index(&BoxPath::new("input/empty.bin").unwrap())
@@ -213,6 +279,8 @@ fn create_builds_a_finished_checksummed_archive_with_hierarchy() {
             "--quiet",
             "--no-checksum",
             "unchecked.box",
+            "--zstd-chunked",
+            "input/large.bin",
             "--stored",
             "input",
         ])
@@ -224,6 +292,7 @@ fn create_builds_a_finished_checksummed_archive_with_hierarchy() {
         .metadata()
         .record(unchecked.metadata().index(&file_path).unwrap())
         .unwrap();
+    assert!(matches!(unchecked_record, Record::File(_)));
     assert!(
         unchecked_record
             .attr_value(unchecked.metadata(), attrs::BLAKE3)
@@ -257,6 +326,8 @@ fn create_builds_a_finished_checksummed_archive_with_hierarchy() {
             "--allow-external-symlinks",
             "--serial",
             "aligned.box",
+            "--zstd-chunked",
+            "input/large.bin",
             "--stored",
             "input",
         ])
@@ -277,8 +348,8 @@ fn create_builds_a_finished_checksummed_archive_with_hierarchy() {
         .record(aligned.metadata().index(&large_path).unwrap())
         .unwrap();
     assert!(
-        matches!(aligned_large, Record::ChunkedFile(file) if file.compression == Compression::Stored),
-        "serial CLI creation must use the same automatic chunking rule"
+        matches!(aligned_large, Record::ChunkedFile(file) if file.compression == Compression::Zstd),
+        "serial CLI creation must honor explicit chunk selection"
     );
     assert!(
         aligned

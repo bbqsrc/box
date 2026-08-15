@@ -107,25 +107,26 @@ async fn invalid_parent_chunk_insert_recovers_for_retry() {
     assert_eq!(restored, valid_payload);
 }
 
-// [spec:box:req:chunked-io.root.automatic-creation/test/unit]
+// [spec:box:req:chunked-io.root.explicit-creation/test/unit]
 #[tokio::test]
-async fn add_path_chunks_only_large_sources() {
+async fn add_path_uses_explicit_chunked_config() {
     let temp = tempfile::tempdir().unwrap();
-    let source_dir = temp.path().join("automatic");
+    let source_dir = temp.path().join("selection");
     std::fs::create_dir(&source_dir).unwrap();
-    let large_path = source_dir.join("large.bin");
-    let exact_path = source_dir.join("exact.bin");
-    let empty_path = source_dir.join("empty.bin");
+    let large_path = source_dir.join("regular-large.bin");
+    let small_path = source_dir.join("chunked-small.bin");
+    let empty_path = source_dir.join("chunked-empty.bin");
     let large_payload = vec![b'L'; DEFAULT_BLOCK_SIZE as usize * 2 + 37];
+    let small_payload = vec![b'S'; 1024];
     std::fs::write(&large_path, &large_payload).unwrap();
-    std::fs::write(&exact_path, vec![b'E'; DEFAULT_BLOCK_SIZE as usize]).unwrap();
+    std::fs::write(&small_path, &small_payload).unwrap();
     std::fs::write(&empty_path, []).unwrap();
 
-    let archive = temp.path().join("automatic.box");
+    let archive = temp.path().join("selection.box");
     let mut writer = BoxFileWriter::create(&archive).await.unwrap();
-    let stats = writer
+    let regular_stats = writer
         .add_path(
-            &source_dir,
+            &large_path,
             AddOptions {
                 config: CompressionConfig::new(Compression::Zstd),
                 ..AddOptions::default()
@@ -133,77 +134,93 @@ async fn add_path_chunks_only_large_sources() {
         )
         .await
         .unwrap();
-    assert_eq!(stats.files_added, 3);
-    assert_eq!(
-        stats.bytes_original,
-        large_payload.len() as u64 + DEFAULT_BLOCK_SIZE as u64
+    assert_eq!(regular_stats.files_added, 1);
+    assert_eq!(regular_stats.bytes_original, large_payload.len() as u64);
+
+    let chunked_options = AddOptions {
+        config: CompressionConfig::new(Compression::Zstd).chunked(),
+        ..AddOptions::default()
+    };
+    let chunked_stats = writer
+        .add_path(&small_path, chunked_options.clone())
+        .await
+        .unwrap();
+    assert_eq!(chunked_stats.files_added, 1);
+    assert_eq!(chunked_stats.bytes_original, small_payload.len() as u64);
+
+    let record_count = writer.core.record_count();
+    let error = writer
+        .add_path(&empty_path, chunked_options)
+        .await
+        .unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::UnexpectedEof);
+    assert_eq!(writer.core.record_count(), record_count);
+    assert!(
+        writer
+            .metadata()
+            .index(&BoxPath::new(&empty_path).unwrap())
+            .is_none()
     );
     writer.finish().await.unwrap();
 
     let reader = BoxFileReader::open(&archive).await.unwrap();
     let large_box_path = BoxPath::new(&large_path).unwrap();
     let large_index = reader.metadata().index(&large_box_path).unwrap();
-    let large_record = reader
+    assert!(
+        reader
+            .metadata()
+            .record(large_index)
+            .unwrap()
+            .as_file()
+            .is_some(),
+        "a large source must remain regular without explicit chunk selection"
+    );
+
+    let small_box_path = BoxPath::new(&small_path).unwrap();
+    let small_index = reader.metadata().index(&small_box_path).unwrap();
+    let small_record = reader
         .metadata()
-        .record(large_index)
+        .record(small_index)
         .unwrap()
         .as_chunked_file()
         .unwrap();
-    assert_eq!(large_record.block_size, DEFAULT_BLOCK_SIZE);
-    assert_eq!(large_record.block_count(), 3);
-    let blocks = reader.metadata().blocks_for_record(large_index);
+    assert_eq!(small_record.block_size, DEFAULT_BLOCK_SIZE);
+    assert_eq!(small_record.compression, Compression::Zstd);
+    assert_eq!(small_record.block_count(), 1);
     assert_eq!(
-        blocks
-            .iter()
-            .map(|(logical, _)| *logical)
-            .collect::<Vec<_>>(),
-        vec![
-            0,
-            u64::from(DEFAULT_BLOCK_SIZE),
-            u64::from(DEFAULT_BLOCK_SIZE) * 2,
-        ]
+        reader.metadata().blocks_for_record(small_index),
+        vec![(0, small_record.data.get())]
     );
-    assert_eq!(blocks[0].1, large_record.data.get());
-    assert!(blocks.windows(2).all(|pair| pair[0].1 < pair[1].1));
-    assert!(blocks.last().unwrap().1 < large_record.data.get() + large_record.length);
     let checksum = reader
         .metadata()
-        .record(large_index)
+        .record(small_index)
         .unwrap()
         .attr(reader.metadata(), crate::attrs::BLAKE3)
         .unwrap();
-    assert_eq!(checksum, blake3::hash(&large_payload).as_bytes());
+    assert_eq!(checksum, blake3::hash(&small_payload).as_bytes());
     let mut restored = Vec::new();
     reader
-        .decompress_chunked(large_record, large_index, &mut restored)
+        .decompress_chunked(small_record, small_index, &mut restored)
         .await
         .unwrap();
-    assert_eq!(restored, large_payload);
-
-    for path in [&exact_path, &empty_path] {
-        let index = reader
-            .metadata()
-            .index(&BoxPath::new(path).unwrap())
-            .unwrap();
-        assert!(reader.metadata().record(index).unwrap().as_file().is_some());
-    }
+    assert_eq!(restored, small_payload);
 }
 
-// [spec:box:req:chunked-io.root.automatic-creation/test/unit]
+// [spec:box:req:chunked-io.root.explicit-creation/test/unit]
 // [spec:box:sem:async-io.root.parallel-compression+1/test/unit]
 #[tokio::test]
 async fn parallel_chunk_preparation_is_transactional() {
     let temp = tempfile::tempdir().unwrap();
     let large_path = temp.path().join("large-dictionary.bin");
     let ordinary_path = temp.path().join("ordinary.bin");
-    let dictionary = b"automatic chunk dictionary with repeated payload tokens".to_vec();
+    let dictionary = b"selected chunk dictionary with repeated payload tokens".to_vec();
     let large_payload = dictionary.repeat(DEFAULT_BLOCK_SIZE as usize / dictionary.len() * 2 + 3);
     let ordinary_payload = vec![b'x'; 512];
     std::fs::write(&large_path, &large_payload).unwrap();
     std::fs::write(&ordinary_path, &ordinary_payload).unwrap();
 
     let mut chunk_config =
-        CompressionConfig::with_dictionary(Compression::Zstd, dictionary.clone());
+        CompressionConfig::with_dictionary(Compression::Zstd, dictionary.clone()).chunked();
     chunk_config.set_option("level", "1");
     let large_box_path = BoxPath::new("large-dictionary.bin").unwrap();
     let ordinary_box_path = BoxPath::new("ordinary.bin").unwrap();

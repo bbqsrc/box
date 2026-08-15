@@ -8,7 +8,7 @@ const REGULAR_PATH: &str = "existing.txt";
 const CHUNKED_PATH: &str = "existing-chunked.bin";
 const EXISTING_DIR: &str = "existing-dir";
 const APPENDED_PATH: &str = "appended.txt";
-const AUTO_CHUNKED_PATH: &str = "automatic-appended-chunked.bin";
+const SELECTED_CHUNKED_PATH: &str = "selected-appended-chunked.bin";
 const APPENDED_DIR: &str = "existing-dir/appended-dir";
 const NESTED_APPENDED_PATH: &str = "existing-dir/appended-dir/appended-child.txt";
 const REGULAR_BYTES: &[u8] = b"regular data written before append";
@@ -72,7 +72,7 @@ fn sync_regular_bytes(reader: &BoxReader, path: &str) -> Vec<u8> {
 // [spec:box:sem:async-io.root.parallel-compression+1/test/integration]
 // [spec:box:sem:sans-io.root.finalization/test/integration]
 // [spec:box:syn:chunked-io.root.block-index-entry/test/integration]
-// [spec:box:req:chunked-io.root.automatic-creation/test/integration]
+// [spec:box:req:chunked-io.root.explicit-creation/test/integration]
 // [spec:box:sem:chunked-io.root.block-queries/test/integration]
 // [spec:box:sem:chunked-io.root.async-range/test/integration]
 // [spec:box:req:checksums.root.attachment/test/integration]
@@ -92,20 +92,20 @@ async fn async_reopen_preserves_paths_payloads_and_chunks() {
 
     let mut writer = BoxFileWriter::open(&archive).await.unwrap();
     let appended_source = temp.path().join("parallel-appended-source.txt");
-    let automatic_source = temp.path().join("automatic-appended-source.bin");
+    let selected_source = temp.path().join("selected-appended-source.bin");
     let dictionary = b"append integration dictionary for repeated chunk payloads".to_vec();
-    let automatic_len = DEFAULT_BLOCK_SIZE as usize * 3 + 73;
-    let mut automatic_bytes = dictionary.repeat(automatic_len / dictionary.len() + 1);
-    automatic_bytes.truncate(automatic_len);
+    let selected_len = DEFAULT_BLOCK_SIZE as usize * 3 + 73;
+    let mut selected_bytes = dictionary.repeat(selected_len / dictionary.len() + 1);
+    selected_bytes.truncate(selected_len);
     tokio::fs::write(&appended_source, APPENDED_BYTES)
         .await
         .unwrap();
-    tokio::fs::write(&automatic_source, &automatic_bytes)
+    tokio::fs::write(&selected_source, &selected_bytes)
         .await
         .unwrap();
-    let mut automatic_config =
-        CompressionConfig::with_dictionary(Compression::Zstd, dictionary.clone());
-    automatic_config.set_option("level", "1");
+    let mut selected_config =
+        CompressionConfig::with_dictionary(Compression::Zstd, dictionary.clone()).chunked();
+    selected_config.set_option("level", "1");
     writer
         .add_paths_parallel(
             [
@@ -116,9 +116,9 @@ async fn async_reopen_preserves_paths_payloads_and_chunks() {
                     attrs: HashMap::new(),
                 },
                 FileJob {
-                    fs_path: automatic_source,
-                    box_path: box_path(AUTO_CHUNKED_PATH),
-                    config: automatic_config,
+                    fs_path: selected_source,
+                    box_path: box_path(SELECTED_CHUNKED_PATH),
+                    config: selected_config,
                     attrs: HashMap::new(),
                 },
             ],
@@ -184,20 +184,20 @@ async fn async_reopen_preserves_paths_payloads_and_chunks() {
     );
 
     assert_eq!(reader.metadata().dictionary(), Some(dictionary.as_slice()));
-    let automatic_path = box_path(AUTO_CHUNKED_PATH);
-    let automatic_index = reader.metadata().index(&automatic_path).unwrap();
-    assert_ne!(automatic_index, chunk_index);
-    let automatic_record = reader
+    let selected_path = box_path(SELECTED_CHUNKED_PATH);
+    let selected_index = reader.metadata().index(&selected_path).unwrap();
+    assert_ne!(selected_index, chunk_index);
+    let selected_record = reader
         .metadata()
-        .record(automatic_index)
+        .record(selected_index)
         .unwrap()
         .as_chunked_file()
         .unwrap();
-    assert_eq!(automatic_record.block_size, DEFAULT_BLOCK_SIZE);
-    assert_eq!(automatic_record.block_count(), 4);
-    let automatic_blocks = reader.metadata().blocks_for_record(automatic_index);
+    assert_eq!(selected_record.block_size, DEFAULT_BLOCK_SIZE);
+    assert_eq!(selected_record.block_count(), 4);
+    let selected_blocks = reader.metadata().blocks_for_record(selected_index);
     assert_eq!(
-        automatic_blocks
+        selected_blocks
             .iter()
             .map(|(logical, _)| *logical)
             .collect::<Vec<_>>(),
@@ -208,40 +208,40 @@ async fn async_reopen_preserves_paths_payloads_and_chunks() {
             u64::from(DEFAULT_BLOCK_SIZE) * 3,
         ]
     );
-    assert_eq!(automatic_blocks[0].1, automatic_record.data.get());
+    assert_eq!(selected_blocks[0].1, selected_record.data.get());
     assert!(
-        automatic_blocks
+        selected_blocks
             .windows(2)
             .all(|blocks| blocks[0].1 < blocks[1].1)
     );
     assert!(
-        automatic_blocks.last().unwrap().1 < automatic_record.data.get() + automatic_record.length
+        selected_blocks.last().unwrap().1 < selected_record.data.get() + selected_record.length
     );
-    assert!(original_blocks.last().unwrap().1 < automatic_blocks[0].1);
+    assert!(original_blocks.last().unwrap().1 < selected_blocks[0].1);
     let checksum = match reader
         .metadata()
-        .record(automatic_index)
+        .record(selected_index)
         .unwrap()
         .attr_value(reader.metadata(), attrs::BLAKE3)
     {
         Some(AttrValue::U256(checksum)) => checksum,
         other => panic!("expected appended chunked-file Blake3 checksum, got {other:?}"),
     };
-    assert_eq!(checksum, blake3::hash(&automatic_bytes).as_bytes());
+    assert_eq!(checksum, blake3::hash(&selected_bytes).as_bytes());
 
-    let mut automatic_restored = Vec::new();
+    let mut selected_restored = Vec::new();
     reader
-        .decompress_chunked(automatic_record, automatic_index, &mut automatic_restored)
+        .decompress_chunked(selected_record, selected_index, &mut selected_restored)
         .await
         .unwrap();
-    assert_eq!(automatic_restored, automatic_bytes);
+    assert_eq!(selected_restored, selected_bytes);
     let range_start = u64::from(DEFAULT_BLOCK_SIZE) - 23;
     assert_eq!(
         reader
-            .read_chunked_range(automatic_record, automatic_index, range_start, 80)
+            .read_chunked_range(selected_record, selected_index, range_start, 80)
             .await
             .unwrap(),
-        automatic_bytes[range_start as usize..range_start as usize + 80]
+        selected_bytes[range_start as usize..range_start as usize + 80]
     );
 }
 

@@ -143,6 +143,10 @@ rule_versions (
     {id wire.root.primitives, version 0}
 )
 
+assertions (
+    {id io.automatic-chunked-creation, kind @complete, author "brendan@bbqsrc.net", at 2026-08-15T22:38:56.193165Z}
+)
+
 impl_evidence (
     {id format.compression, covered_rules (
         compression.root
@@ -626,6 +630,13 @@ impl_evidence (
         {id sync-io.root.read, version 0}
         {id sync-io.root.write, version 0}
     )}
+    {id io.explicit-chunked-selection, covered_rules (
+        chunked-io.root.explicit-creation
+        cli-selection.root.representation
+    ), covered_claims (
+        {impl_name rust, rule chunked-io.root.explicit-creation}
+        {impl_name rust, rule cli-selection.root.representation}
+    )}
 )
 
-onboarding {kind @adopt, phase 6}
+onboarding {kind @adopt, phase 11}

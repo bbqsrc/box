@@ -16,18 +16,19 @@
 > lengths before inserting a `ChunkedFile` record. This low-level operation is
 > caller-selected; it does not choose files for chunking automatically.
 
-> [spec:box:req:chunked-io.root.automatic-creation]
-> High-level async path creation and the CLI `create` command MUST encode every
-> non-empty regular source whose initial metadata length exceeds the 2,097,152
-> byte default block size as a `ChunkedFile`, using that same logical block
-> size; smaller and empty sources remain ordinary `File` records. Each block is
-> compressed independently with the file's selected compression configuration
-> and emitted in logical order, while an enabled Blake3 checksum covers the
-> complete uncompressed file as one stream. Parallel creation MUST share its
-> effective `jobs` bound across file and block compression work so that blocks
-> of one large file can run concurrently without exceeding that bound; metadata
-> insertion and archive writes remain sequential, and one file contributes one
-> unit to file-level progress and statistics.
+> [spec:box:req:chunked-io.root.explicit-creation]
+> High-level async path creation MUST encode a regular source as an ordinary
+> `File` record unless its caller explicitly selects the chunked representation.
+> An explicitly selected chunked source MUST be non-empty and use the 2,097,152
+> byte default logical block size regardless of the source's total size. Each
+> block is compressed independently with the source's selected compression
+> configuration and emitted in logical order, while an enabled Blake3 checksum
+> covers the complete uncompressed file as one stream. Parallel creation MUST
+> share its effective `jobs` bound across ordinary-file and chunk-block
+> compression work so that blocks of one selected file can run concurrently
+> without exceeding that bound; metadata insertion and archive writes remain
+> sequential, and one source contributes one unit to file-level progress and
+> statistics.
 
 > [spec:box:syn:chunked-io.root.block-index-entry]
 > A pending block-index entry is a 16-byte key containing the non-zero record
