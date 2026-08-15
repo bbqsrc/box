@@ -59,6 +59,7 @@ use self::constants::*;
 // ============================================================================
 
 /// Status returned by streaming compression/decompression operations.
+// [spec:box:req:compression.root.stream-state]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StreamStatus {
     /// Made progress, call again with updated buffers.
@@ -110,6 +111,7 @@ pub struct ByteCount {
 }
 
 /// Compression algorithm identifier.
+// [spec:box:req:compression.root]
 #[derive(Clone, Copy, Eq, PartialEq, Default)]
 pub enum Compression {
     #[cfg_attr(not(feature = "zstd"), default)]
@@ -169,6 +171,8 @@ impl fmt::Debug for Compression {
 }
 
 /// Configuration for compression algorithms with optional parameters.
+// [spec:box:def:compression.root.codecs]
+// [spec:box:sem:dictionaries.root]
 #[cfg(feature = "std")]
 #[derive(Clone, Debug, Default)]
 pub struct CompressionConfig {
@@ -223,6 +227,7 @@ impl CompressionConfig {
     }
 
     /// Returns the effective config for a given file size.
+    // [spec:box:req:compression.root.stored]
     pub fn for_size(&self, size: u64) -> Self {
         if size < MIN_COMPRESSIBLE_SIZE {
             Self::new(Compression::Stored)
@@ -237,6 +242,7 @@ impl CompressionConfig {
 // ============================================================================
 
 /// Compress a byte slice synchronously.
+// [spec:box:req:compression.root]
 #[cfg(feature = "std")]
 pub fn compress_bytes_sync(data: &[u8], config: &CompressionConfig) -> Result<Vec<u8>> {
     match config.compression {
@@ -266,6 +272,9 @@ pub fn compress_bytes_sync(data: &[u8], config: &CompressionConfig) -> Result<Ve
 }
 
 /// Decompress a byte slice synchronously.
+// [spec:box:req:compression.root]
+// [spec:box:req:compression.root.stored]
+// [spec:box:sem:dictionaries.root]
 #[cfg(feature = "std")]
 pub fn decompress_bytes_sync(
     data: &[u8],
@@ -294,6 +303,8 @@ pub fn decompress_bytes_sync(
 mod tests {
     use super::*;
 
+    // [spec:box:req:compression.root/test]
+    // [spec:box:req:compression.root.stored/test]
     #[test]
     fn test_compress_stored_sync() {
         let data = b"hello world";
@@ -305,6 +316,7 @@ mod tests {
         assert_eq!(decompressed, data);
     }
 
+    // [spec:box:req:compression.root/test]
     #[cfg(feature = "zstd")]
     #[test]
     fn test_compress_zstd_sync() {
@@ -317,6 +329,7 @@ mod tests {
         assert_eq!(decompressed, data);
     }
 
+    // [spec:box:req:compression.root/test]
     #[cfg(feature = "xz")]
     #[test]
     fn test_compress_xz_sync() {
@@ -328,6 +341,7 @@ mod tests {
         assert_eq!(decompressed, data);
     }
 
+    // [spec:box:sem:dictionaries.root/test]
     #[cfg(feature = "zstd")]
     #[test]
     fn test_compress_zstd_with_dict_sync() {
@@ -342,6 +356,7 @@ mod tests {
         assert_eq!(decompressed, data);
     }
 
+    // [spec:box:req:compression.root.stream-state/test]
     #[test]
     fn test_stream_status() {
         let progress = StreamStatus::Progress {

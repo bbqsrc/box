@@ -39,6 +39,7 @@ impl ZstdCompressor<'_> {
     ///
     /// Call repeatedly until all input is consumed.
     /// Returns how many bytes were consumed from input and produced to output.
+    // [spec:box:req:compression.root.stream-state]
     pub fn compress(&mut self, input: &[u8], output: &mut [u8]) -> Result<StreamStatus> {
         let mut in_buf = InBuffer::around(input);
         let mut out_buf = OutBuffer::around(output);
@@ -56,6 +57,7 @@ impl ZstdCompressor<'_> {
     /// Finish compression and flush remaining data.
     ///
     /// Call repeatedly until `StreamStatus::Done` is returned.
+    // [spec:box:req:compression.root.stream-state]
     pub fn finish(&mut self, output: &mut [u8]) -> Result<StreamStatus> {
         let mut out_buf = OutBuffer::around(output);
 
@@ -75,6 +77,7 @@ impl ZstdCompressor<'_> {
     }
 
     /// Reset the compressor for reuse.
+    // [spec:box:req:compression.root.stream-state]
     pub fn reset(&mut self) -> Result<()> {
         self.ctx
             .reset(ResetDirective::SessionOnly)
@@ -110,6 +113,7 @@ impl ZstdDecompressor<'_> {
     ///
     /// Call repeatedly until all input is consumed and `StreamStatus::Done` is returned.
     /// Returns how many bytes were consumed from input and produced to output.
+    // [spec:box:req:compression.root.stream-state]
     pub fn decompress(&mut self, input: &[u8], output: &mut [u8]) -> Result<StreamStatus> {
         let mut in_buf = InBuffer::around(input);
         let mut out_buf = OutBuffer::around(output);
@@ -134,6 +138,7 @@ impl ZstdDecompressor<'_> {
     }
 
     /// Reset the decompressor for reuse.
+    // [spec:box:req:compression.root.stream-state]
     pub fn reset(&mut self) -> Result<()> {
         self.ctx
             .reset(ResetDirective::SessionOnly)
@@ -279,6 +284,7 @@ mod tests {
         assert_eq!(decompressed, data);
     }
 
+    // [spec:box:req:compression.root.stream-state/test]
     #[test]
     fn test_streaming_compress() {
         let data = b"hello world hello world hello world hello world";
@@ -319,6 +325,7 @@ mod tests {
         assert_eq!(decompressed, data);
     }
 
+    // [spec:box:sem:dictionaries.root/test]
     #[test]
     fn test_with_dictionary() {
         let samples: Vec<&[u8]> = vec![b"hello world"; 100];
@@ -330,6 +337,7 @@ mod tests {
         assert_eq!(decompressed, data);
     }
 
+    // [spec:box:req:compression.root.stream-state/test]
     #[test]
     fn test_reset_reuses_context_and_dictionary() {
         let samples: Vec<&[u8]> = vec![b"small package file with repeated words"; 100];

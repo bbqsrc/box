@@ -16,6 +16,7 @@ pub struct XzCompressor {
 
 impl XzCompressor {
     /// Create a new compressor with the specified compression level (0-9).
+    // [spec:box:def:compression.root.codecs]
     pub fn new(level: u32) -> Result<Self> {
         let stream = Stream::new_easy_encoder(level, Check::Crc64)
             .map_err(|e| Error::new(ErrorKind::Other, e))?;
@@ -26,6 +27,7 @@ impl XzCompressor {
     ///
     /// Call repeatedly until all input is consumed.
     /// Returns how many bytes were consumed from input and produced to output.
+    // [spec:box:req:compression.root.stream-state]
     pub fn compress(&mut self, input: &[u8], output: &mut [u8]) -> Result<StreamStatus> {
         let before_in = self.stream.total_in();
         let before_out = self.stream.total_out();
@@ -43,6 +45,7 @@ impl XzCompressor {
     /// Finish compression and flush remaining data.
     ///
     /// Call repeatedly until `StreamStatus::Done` is returned.
+    // [spec:box:req:compression.root.stream-state]
     pub fn finish(&mut self, output: &mut [u8]) -> Result<StreamStatus> {
         let before_out = self.stream.total_out();
 
@@ -86,6 +89,7 @@ impl XzDecompressor {
     ///
     /// Call repeatedly until all input is consumed and `StreamStatus::Done` is returned.
     /// Returns how many bytes were consumed from input and produced to output.
+    // [spec:box:req:compression.root.stream-state]
     pub fn decompress(&mut self, input: &[u8], output: &mut [u8]) -> Result<StreamStatus> {
         let before_in = self.stream.total_in();
         let before_out = self.stream.total_out();
@@ -221,6 +225,7 @@ mod tests {
         assert_eq!(decompressed, data);
     }
 
+    // [spec:box:req:compression.root.stream-state/test]
     #[test]
     fn test_streaming_compress() {
         let data = b"hello world hello world hello world hello world";
