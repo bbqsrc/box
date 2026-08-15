@@ -12,6 +12,7 @@ use crate::path::BoxPath;
 use crate::record::DirectoryRecord;
 
 /// Record index within an archive.
+// [spec:box:sem:archive-state.root.record-index]
 #[repr(transparent)]
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub struct RecordIndex(NonZeroU64);
@@ -49,9 +50,11 @@ impl From<NonZeroU64> for RecordIndex {
 }
 
 /// Map of attribute key indices to raw byte values.
+// [spec:box:def:attributes.root]
 pub type AttrMap = HashMap<usize, Box<[u8]>>;
 
 /// Attribute type tag stored in the archive
+// [spec:box:def:attributes.root.types]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum AttrType {
@@ -106,6 +109,7 @@ pub struct AttrKey {
     pub attr_type: AttrType,
 }
 
+// [spec:box:def:fst-queries.root.archive-indexes]
 #[derive(Default)]
 pub struct BoxMetadata<'a> {
     /// Root "directory" keyed by record indices
@@ -335,7 +339,7 @@ impl<'a, 'b> Iterator for FindRecord<'a, 'b> {
         let result = self
             .entries
             .iter()
-            .map(|index| (*index, self.meta.record(*index).unwrap()))
+            .filter_map(|index| self.meta.record(*index).map(|record| (*index, record)))
             .find(|x| x.1.name() == candidate_name);
 
         match result {
@@ -365,6 +369,7 @@ impl<'a> BoxMetadata<'a> {
     ///
     /// For new archives with FST, this iterates FST entries lazily.
     /// For old archives without FST, this uses tree traversal.
+    // [spec:box:sem:sans-io.root.lookup+1]
     pub fn iter(&self) -> MetadataIter<'_, 'a> {
         if !self.root.is_empty() {
             MetadataIter::Tree(Records::new(self, &self.root, None))
@@ -463,6 +468,7 @@ impl<'a> BoxMetadata<'a> {
             .collect()
     }
 
+    // [spec:box:sem:sans-io.root.lookup+1]
     #[inline(always)]
     pub fn index(&self, path: &BoxPath<'_>) -> Option<RecordIndex> {
         // Try FST first (O(key_length))
@@ -471,21 +477,53 @@ impl<'a> BoxMetadata<'a> {
             if let Some(value) = fst.get(path_bytes) {
                 return crate::compat::NonZeroU64::new(value).map(RecordIndex);
             }
+
+            // A reopened v1 writer keeps its pre-existing hierarchy in the FST,
+            // while newly appended descendants live in Directory.entries until
+            // finalization rebuilds the index. Anchor the lookup at the deepest
+            // indexed ancestor, then traverse that pending in-memory subtree.
+            let mut prefix = String::new();
+            let mut depth = 0usize;
+            let mut indexed_ancestor = None;
+            let mut components = path.iter().peekable();
+            while let Some(component) = components.next() {
+                if components.peek().is_none() {
+                    break;
+                }
+                if !prefix.is_empty() {
+                    prefix.push_str(crate::path::PATH_BOX_SEP);
+                }
+                prefix.push_str(component);
+                depth += 1;
+                if let Some(value) = fst.get(prefix.as_bytes()) {
+                    indexed_ancestor = Some((depth, value));
+                }
+            }
+
+            if let Some((depth, value)) = indexed_ancestor {
+                let index = RecordIndex::try_new(value)?;
+                let entries = &self.record(index)?.as_directory()?.entries;
+                return FindRecord::new(self, path.iter().skip(depth).collect(), entries).next();
+            }
         }
         // Fall back to directory traversal (O(depth × entries))
         FindRecord::new(self, path.iter().collect(), &self.root).next()
     }
 
+    // [spec:box:sem:archive-state.root.record-index]
     #[inline(always)]
     pub fn record(&self, index: RecordIndex) -> Option<&Record<'a>> {
-        self.records.get(index.get() as usize - 1)
+        let position = usize::try_from(index.get()).ok()?.checked_sub(1)?;
+        self.records.get(position)
     }
 
     #[inline(always)]
     pub fn record_mut(&mut self, index: RecordIndex) -> Option<&mut Record<'a>> {
-        self.records.get_mut(index.get() as usize - 1)
+        let position = usize::try_from(index.get()).ok()?.checked_sub(1)?;
+        self.records.get_mut(position)
     }
 
+    // [spec:box:sem:archive-state.root.record-index]
     #[inline(always)]
     pub fn insert_record(&mut self, record: Record<'a>) -> RecordIndex {
         self.records.push(record);
@@ -519,6 +557,7 @@ impl<'a> BoxMetadata<'a> {
     }
 
     /// Parse raw bytes into AttrValue based on the stored type
+    // [spec:box:req:attributes.root.integrity]
     #[cfg(feature = "std")]
     pub fn parse_attr_value<'b>(&self, v: &'b [u8], attr_type: AttrType) -> AttrValue<'b> {
         match attr_type {
@@ -541,19 +580,38 @@ impl<'a> BoxMetadata<'a> {
                 }
             }
             AttrType::Vi32 => {
-                let (val, _) = fastvint::decode_vi32_slice(v);
-                AttrValue::Vi32(val)
+                let mut cursor = std::io::Cursor::new(v);
+                fastvint::ReadVintExt::read_vi32(&mut cursor)
+                    .ok()
+                    .filter(|_| cursor.position() == v.len() as u64)
+                    .map(AttrValue::Vi32)
+                    .unwrap_or(AttrValue::Bytes(v))
             }
-            AttrType::Vu32 => fastvint::ReadVintExt::read_vu64(&mut std::io::Cursor::new(v))
-                .map(|val| AttrValue::Vu32(val as u32))
-                .unwrap_or(AttrValue::Bytes(v)),
+            AttrType::Vu32 => {
+                let mut cursor = std::io::Cursor::new(v);
+                fastvint::ReadVintExt::read_vu64(&mut cursor)
+                    .ok()
+                    .and_then(|value| u32::try_from(value).ok())
+                    .filter(|_| cursor.position() == v.len() as u64)
+                    .map(AttrValue::Vu32)
+                    .unwrap_or(AttrValue::Bytes(v))
+            }
             AttrType::Vi64 => {
-                let (val, _) = fastvint::decode_vi64_slice(v);
-                AttrValue::Vi64(val)
+                let mut cursor = std::io::Cursor::new(v);
+                fastvint::ReadVintExt::read_vi64(&mut cursor)
+                    .ok()
+                    .filter(|_| cursor.position() == v.len() as u64)
+                    .map(AttrValue::Vi64)
+                    .unwrap_or(AttrValue::Bytes(v))
             }
-            AttrType::Vu64 => fastvint::ReadVintExt::read_vu64(&mut std::io::Cursor::new(v))
-                .map(AttrValue::Vu64)
-                .unwrap_or(AttrValue::Bytes(v)),
+            AttrType::Vu64 => {
+                let mut cursor = std::io::Cursor::new(v);
+                fastvint::ReadVintExt::read_vu64(&mut cursor)
+                    .ok()
+                    .filter(|_| cursor.position() == v.len() as u64)
+                    .map(AttrValue::Vu64)
+                    .unwrap_or(AttrValue::Bytes(v))
+            }
             AttrType::U128 => {
                 if v.len() == 16 {
                     v.as_chunks()
@@ -577,8 +635,12 @@ impl<'a> BoxMetadata<'a> {
                 }
             }
             AttrType::DateTime => {
-                let (val, _) = fastvint::decode_vi64_slice(v);
-                AttrValue::DateTime(val)
+                let mut cursor = std::io::Cursor::new(v);
+                fastvint::ReadVintExt::read_vi64(&mut cursor)
+                    .ok()
+                    .filter(|_| cursor.position() == v.len() as u64)
+                    .map(AttrValue::DateTime)
+                    .unwrap_or(AttrValue::Bytes(v))
             }
         }
     }
@@ -617,6 +679,7 @@ impl<'a> BoxMetadata<'a> {
 
     /// O(n) lookup or insert of attribute key index with type.
     /// Returns an error if the key exists with a different type.
+    // [spec:box:req:attributes.root.integrity]
     #[cfg(feature = "std")]
     #[inline(always)]
     pub fn attr_key_or_create(&mut self, key: &str, attr_type: AttrType) -> std::io::Result<usize> {
@@ -658,6 +721,10 @@ impl<'a> BoxMetadata<'a> {
     /// This is O(n) for tree traversal, O(n) for FST iteration.
     /// Used primarily for resolving symlink targets during extraction.
     pub fn path_for_index(&self, target: RecordIndex) -> Option<BoxPath<'static>> {
+        // An FST value is untrusted archive metadata. A matching path is only
+        // meaningful when the referenced record also exists.
+        self.record(target)?;
+
         // Try FST first if available
         if let Some(fst) = &self.fst {
             for (path_bytes, idx) in fst.prefix_iter(&[]) {
@@ -696,6 +763,7 @@ impl<'a> BoxMetadata<'a> {
     ///
     /// This uses a predecessor query on the block FST to find the largest key
     /// <= (record_index, logical_offset).
+    // [spec:box:req:fst-queries.root.predecessor]
     pub fn find_block(&self, record_index: RecordIndex, logical_offset: u64) -> Option<(u64, u64)> {
         let block_fst = self.block_fst.as_ref()?;
 
@@ -727,6 +795,7 @@ impl<'a> BoxMetadata<'a> {
     ///
     /// Returns (logical_offset, physical_offset) pairs in order.
     /// Returns an empty Vec if no block FST exists.
+    // [spec:box:req:fst-queries.root.predecessor]
     pub fn blocks_for_record(&self, record_index: RecordIndex) -> Vec<(u64, u64)> {
         let Some(block_fst) = &self.block_fst else {
             return Vec::new();
@@ -750,6 +819,7 @@ impl<'a> BoxMetadata<'a> {
     ///
     /// Returns the (logical_offset, physical_offset) of the next block, or None if
     /// there are no more blocks after the given offset.
+    // [spec:box:req:fst-queries.root.predecessor]
     pub fn next_block(
         &self,
         record_index: RecordIndex,
@@ -941,3 +1011,7 @@ impl Display for AttrValue<'_> {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "meta_tests.rs"]
+mod tests;

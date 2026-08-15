@@ -7,8 +7,9 @@
 // This module requires std for encoding and complex operations
 #![cfg(feature = "std")]
 
-use crate::compat::HashMap;
+use crate::compat::{BTreeMap, HashMap};
 use std::borrow::Cow;
+use std::collections::HashSet;
 use std::num::NonZeroU64;
 
 use crate::compression::Compression;
@@ -90,6 +91,9 @@ impl WriterOptions {
 /// // Frontend writes metadata_bytes at trailer_offset...
 /// // Frontend updates header with trailer_offset...
 /// ```
+// [spec:box:def:archive-state.root]
+// [spec:box:def:archive-state.root.writer]
+// [spec:box:sem:sans-io.root]
 pub struct ArchiveWriter {
     /// Archive header configuration
     pub header: BoxHeader,
@@ -156,13 +160,92 @@ impl ArchiveWriter {
         header: BoxHeader,
         meta: BoxMetadata<'static>,
         next_write_pos: u64,
-    ) -> Self {
-        Self {
+    ) -> std::io::Result<Self> {
+        let writer = Self {
             header,
             meta,
             next_write_pos,
             block_entries: Vec::new(),
+        };
+        writer.checked_next_write_addr()?;
+        writer.build_fst()?;
+        writer.build_block_fst()?;
+        Ok(writer)
+    }
+
+    /// Find the first byte after all regular and chunked payloads in existing
+    /// metadata. Malformed record ranges are rejected instead of wrapping.
+    pub fn existing_data_end(meta: &BoxMetadata<'_>) -> std::io::Result<u64> {
+        let mut data_end = BoxHeader::SIZE as u64;
+        for record in &meta.records {
+            let range = match record {
+                Record::File(file) => Some((file.data.get(), file.length)),
+                Record::ChunkedFile(file) => Some((file.data.get(), file.length)),
+                _ => None,
+            };
+            let Some((data_offset, length)) = range else {
+                continue;
+            };
+            let record_end = data_offset.checked_add(length).ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "record data range overflows u64",
+                )
+            })?;
+            data_end = data_end.max(record_end);
         }
+        Ok(data_end)
+    }
+
+    /// Validate existing payloads against the trailer that precedes an append.
+    pub fn existing_data_end_for_append(
+        header: &BoxHeader,
+        meta: &BoxMetadata<'_>,
+        file_len: u64,
+    ) -> std::io::Result<u64> {
+        let trailer = header
+            .trailer
+            .ok_or_else(|| invalid_metadata("archive has no trailer"))?
+            .get();
+        if trailer > file_len {
+            return Err(invalid_metadata(format!(
+                "trailer offset {trailer} exceeds archive length {file_len}"
+            )));
+        }
+
+        for record in &meta.records {
+            let range = match record {
+                Record::File(file) => Some((file.data.get(), file.length)),
+                Record::ChunkedFile(file) => Some((file.data.get(), file.length)),
+                _ => None,
+            };
+            let Some((data_offset, length)) = range else {
+                continue;
+            };
+            if data_offset < BoxHeader::SIZE as u64 || data_offset > trailer {
+                return Err(invalid_metadata(format!(
+                    "record data offset {data_offset} is outside the pre-trailer payload envelope [{}, {trailer}]",
+                    BoxHeader::SIZE
+                )));
+            }
+            let record_end = data_offset
+                .checked_add(length)
+                .ok_or_else(|| invalid_metadata("record data range overflows u64"))?;
+            if record_end > trailer {
+                return Err(invalid_metadata(format!(
+                    "record data end {record_end} exceeds trailer offset {trailer}"
+                )));
+            }
+        }
+
+        let data_end = Self::existing_data_end(meta)?;
+        let aligned_end = checked_aligned_write_address(data_end, header.alignment)?.get();
+        if aligned_end > trailer {
+            return Err(invalid_metadata(format!(
+                "aligned append position {aligned_end} exceeds trailer offset {trailer}"
+            )));
+        }
+        Ok(data_end)
     }
 
     // ========================================================================
@@ -219,36 +302,43 @@ impl ArchiveWriter {
     /// Get the next aligned write address.
     ///
     /// This is where the frontend should write the next file's data.
+    // [spec:box:sem:sans-io.root.alignment]
     pub fn next_write_addr(&self) -> NonZeroU64 {
-        let offset = self.next_write_pos;
-
-        let v = match self.header.alignment as u64 {
-            0 => offset,
-            alignment => {
-                let diff = offset % alignment;
-                if diff == 0 {
-                    offset
-                } else {
-                    offset + (alignment - diff)
-                }
-            }
-        };
-
-        NonZeroU64::new(v).unwrap()
+        self.checked_next_write_addr()
+            .expect("ArchiveWriter position invariant violated")
     }
 
     /// Advance the write position after data has been written.
     ///
     /// Called by the frontend after writing file data.
-    pub fn advance_position(&mut self, bytes_written: u64) {
-        self.next_write_pos = self.next_write_addr().get() + bytes_written;
+    // [spec:box:sem:sans-io.root.alignment]
+    pub fn advance_position(&mut self, bytes_written: u64) -> std::io::Result<()> {
+        let position = self.position_after_advance(bytes_written)?;
+        self.next_write_pos = position;
+        Ok(())
+    }
+
+    pub(crate) fn position_after_advance(&self, bytes_written: u64) -> std::io::Result<u64> {
+        let position = self
+            .checked_next_write_addr()?
+            .get()
+            .checked_add(bytes_written)
+            .ok_or_else(|| invalid_metadata("writer position overflows u64"))?;
+        checked_aligned_write_address(position, self.header.alignment)?;
+        Ok(position)
     }
 
     /// Set the write position explicitly.
     ///
     /// Use this when resuming from an existing archive.
-    pub fn set_position(&mut self, pos: u64) {
+    pub fn set_position(&mut self, pos: u64) -> std::io::Result<()> {
+        checked_aligned_write_address(pos, self.header.alignment)?;
         self.next_write_pos = pos;
+        Ok(())
+    }
+
+    fn checked_next_write_addr(&self) -> std::io::Result<NonZeroU64> {
+        checked_aligned_write_address(self.next_write_pos, self.header.alignment)
     }
 
     // ========================================================================
@@ -273,6 +363,7 @@ impl ArchiveWriter {
     }
 
     /// Create a directory and all its parent directories if they don't exist.
+    // [spec:box:req:sans-io.root.hierarchy]
     pub fn mkdir_all(
         &mut self,
         path: BoxPath<'_>,
@@ -285,9 +376,21 @@ impl ArchiveWriter {
             }
         }
 
-        // Now create this directory if it doesn't exist, otherwise return existing
+        // Now create this directory if it doesn't exist, otherwise return it only
+        // when the existing record is itself a directory.
         if let Some(idx) = self.meta.index(&path) {
-            Ok(idx)
+            if self
+                .meta
+                .record(idx)
+                .is_some_and(|record| record.as_directory().is_some())
+            {
+                Ok(idx)
+            } else {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!("Path {:?} exists and is not a directory", path),
+                ))
+            }
         } else {
             self.mkdir(path, attrs)
         }
@@ -364,6 +467,12 @@ impl ArchiveWriter {
         mut block_entries: Vec<([u8; 16], u64)>,
         attrs: HashMap<String, Vec<u8>>,
     ) -> std::io::Result<RecordIndex> {
+        if block_size == 0 || decompressed_len == 0 || block_entries.is_empty() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "chunked files require a positive block size and at least one non-empty block",
+            ));
+        }
         let attrs = self.convert_attrs(attrs)?;
 
         let record = ChunkedFileRecord {
@@ -390,6 +499,7 @@ impl ArchiveWriter {
     /// `record_index` is the record index (call after insert_chunked_file_record).
     /// `logical_offset` is the decompressed byte offset.
     /// `physical_offset` is the compressed byte offset in the file.
+    // [spec:box:syn:chunked-io.root.block-index-entry]
     pub fn add_block_entry(
         &mut self,
         record_index: RecordIndex,
@@ -407,6 +517,8 @@ impl ArchiveWriter {
     // ========================================================================
 
     /// Add a symlink pointing to another record in the archive.
+    // [spec:box:req:sans-io.root.hierarchy]
+    // [spec:box:req:records.root.references.insertion-target]
     pub fn link(
         &mut self,
         path: BoxPath<'_>,
@@ -437,6 +549,7 @@ impl ArchiveWriter {
     ///
     /// The target path should be a relative path (e.g., "../../../etc/environment").
     /// This will set the `allow_external_symlinks` flag in the header.
+    // [spec:box:req:records.root.references.external-header-flag]
     pub fn external_link(
         &mut self,
         path: BoxPath<'_>,
@@ -578,21 +691,26 @@ impl ArchiveWriter {
     /// After calling this, the frontend should:
     /// 1. Write metadata_bytes at trailer_offset
     /// 2. Re-encode and write the header (which now has the trailer offset)
+    // [spec:box:sem:sans-io.root.finalization]
     pub fn finish(&mut self) -> std::io::Result<(u64, Vec<u8>)> {
-        // Build FST from existing metadata
+        // Build both indexes before mutating metadata so a malformed existing
+        // index leaves the writer retryable after the caller fixes its input.
         let fst_bytes = self.build_fst()?;
+        let block_fst_bytes = self.build_block_fst()?;
+
         self.meta.fst = fst_bytes
             .as_ref()
             .and_then(|bytes| box_fst::Fst::new(Cow::Owned(bytes.clone())).ok());
-
-        // Build block FST for chunked files
-        let block_fst_bytes = self.build_block_fst()?;
         self.meta.block_fst = block_fst_bytes
             .as_ref()
             .and_then(|bytes| box_fst::Fst::new(Cow::Owned(bytes.clone())).ok());
 
+        // Writers always encode v1 metadata. Opening a legacy archive for
+        // append therefore upgrades its header together with its trailer.
+        self.header.version = crate::header::VERSION;
+
         // Set trailer offset
-        let trailer_offset = self.next_write_addr().get();
+        let trailer_offset = self.checked_next_write_addr()?.get();
         self.header.trailer = NonZeroU64::new(trailer_offset);
 
         // Encode metadata
@@ -624,6 +742,7 @@ impl ArchiveWriter {
         self.insert_inner_with_parent(path, record, None)
     }
 
+    // [spec:box:req:sans-io.root.hierarchy]
     fn insert_inner_with_parent(
         &mut self,
         path: BoxPath<'_>,
@@ -652,14 +771,37 @@ impl ArchiveWriter {
                     &parent_index,
                     &record
                 );
+
+                let parent_record = self.meta.record(parent_index).ok_or_else(|| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        format!(
+                            "Parent record index {} for path {:?} does not exist",
+                            parent_index.get(),
+                            parent_path
+                        ),
+                    )
+                })?;
+                if parent_record.as_directory().is_none() {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        format!("Parent path {:?} is not a directory", parent_path),
+                    ));
+                }
+
                 let new_index = self.meta.insert_record(record);
                 tracing::trace!("Inserted with index: {:?}", &new_index);
-                let parent = self
+                let Some(parent) = self
                     .meta
                     .record_mut(parent_index)
-                    .unwrap()
-                    .as_directory_mut()
-                    .unwrap();
+                    .and_then(Record::as_directory_mut)
+                else {
+                    self.meta.records.pop();
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "validated parent record changed during insertion",
+                    ));
+                };
                 parent.entries.push(new_index);
                 Ok(new_index)
             }
@@ -673,154 +815,432 @@ impl ArchiveWriter {
     }
 
     fn build_fst(&self) -> std::io::Result<Option<Vec<u8>>> {
-        // Collect all paths by traversing metadata
-        let mut paths: Vec<(Vec<u8>, u64)> = Vec::new();
-        self.collect_paths(&self.meta.root, &mut Vec::new(), &mut paths);
+        let mut paths = BTreeMap::<Vec<u8>, u64>::new();
+        let mut record_paths = HashMap::<RecordIndex, Vec<u8>>::new();
+        let mut existing_directories = Vec::new();
+
+        // A decoded v1 archive has no root vector: its FST is the authoritative
+        // source for every pre-existing path. Preserve all of those entries and
+        // remember directory paths so children appended beneath an existing
+        // directory can be collected without reconstructing a v1 root tree.
+        if let Some(fst) = &self.meta.fst {
+            for (path, value) in fst.prefix_iter(&[]) {
+                let index = RecordIndex::try_new(value)
+                    .ok_or_else(|| invalid_metadata("path FST contains the zero record index"))?;
+                self.merge_path_entry(&mut paths, &mut record_paths, path.clone(), index)?;
+
+                let record = self.meta.record(index).ok_or_else(|| {
+                    invalid_metadata(format!(
+                        "path FST references missing record index {}",
+                        index.get()
+                    ))
+                })?;
+                if let Record::Directory(directory) = record
+                    && !directory.entries.is_empty()
+                {
+                    existing_directories.push((index, path, directory.entries.clone()));
+                }
+            }
+        }
+
+        let mut hierarchy_paths = HashMap::<RecordIndex, Vec<u8>>::new();
+        let mut expanded_directories = HashSet::<RecordIndex>::new();
+
+        // Existing v1 directories may acquire children while the writer is
+        // open. Seed traversal from their FST paths rather than relying on the
+        // intentionally empty v1 root vector.
+        for (index, _, _) in &existing_directories {
+            expanded_directories.insert(*index);
+        }
+        for (_, prefix, entries) in existing_directories {
+            self.collect_paths(
+                &entries,
+                &prefix,
+                &mut paths,
+                &mut record_paths,
+                &mut hierarchy_paths,
+                &mut expanded_directories,
+            )?;
+        }
+
+        // New root records and legacy v0 trees are represented by root/child
+        // indices. This traversal is iterative and rejects invalid graphs.
+        self.collect_paths(
+            &self.meta.root,
+            &[],
+            &mut paths,
+            &mut record_paths,
+            &mut hierarchy_paths,
+            &mut expanded_directories,
+        )?;
 
         // Empty archives have no FST
         if paths.is_empty() {
             return Ok(None);
         }
 
-        // FST requires sorted input
-        paths.sort_unstable_by(|a, b| a.0.cmp(&b.0));
-
-        // Build FST
         let mut builder = box_fst::FstBuilder::new();
         for (path, index) in paths {
             builder
                 .insert(&path, index)
-                .map_err(|e| std::io::Error::other(e.to_string()))?;
+                .map_err(|error| invalid_metadata(format!("cannot build path FST: {error}")))?;
         }
         builder
             .finish()
             .map(Some)
-            .map_err(|e| std::io::Error::other(e.to_string()))
+            .map_err(|error| invalid_metadata(format!("cannot finish path FST: {error}")))
     }
 
+    // [spec:box:syn:chunked-io.root.block-index-entry]
     fn build_block_fst(&self) -> std::io::Result<Option<Vec<u8>>> {
-        if self.block_entries.is_empty() {
-            return Ok(None);
+        let mut blocks = BTreeMap::<[u8; 16], u64>::new();
+
+        // Reopened writers must retain block entries for chunked records that
+        // were already present before this append session.
+        if let Some(fst) = &self.meta.block_fst {
+            for (key, offset) in fst.prefix_iter(&[]) {
+                let key: [u8; 16] = key.try_into().map_err(|key: Vec<u8>| {
+                    invalid_metadata(format!(
+                        "block FST key has length {}, expected 16",
+                        key.len()
+                    ))
+                })?;
+                self.merge_block_entry(&mut blocks, key, offset)?;
+            }
         }
 
-        // Clone and sort (entries may not be in order if multiple chunked files)
-        let mut blocks = self.block_entries.clone();
-        blocks.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+        for &(key, offset) in &self.block_entries {
+            self.merge_block_entry(&mut blocks, key, offset)?;
+        }
+
+        self.validate_block_sequences(&blocks)?;
+
+        if blocks.is_empty() {
+            return Ok(None);
+        }
 
         let mut builder = box_fst::FstBuilder::new();
         for (key, offset) in blocks {
             builder
                 .insert(&key, offset)
-                .map_err(|e| std::io::Error::other(e.to_string()))?;
+                .map_err(|error| invalid_metadata(format!("cannot build block FST: {error}")))?;
         }
         builder
             .finish()
             .map(Some)
-            .map_err(|e| std::io::Error::other(e.to_string()))
+            .map_err(|error| invalid_metadata(format!("cannot finish block FST: {error}")))
+    }
+
+    fn merge_path_entry(
+        &self,
+        paths: &mut BTreeMap<Vec<u8>, u64>,
+        record_paths: &mut HashMap<RecordIndex, Vec<u8>>,
+        path: Vec<u8>,
+        index: RecordIndex,
+    ) -> std::io::Result<()> {
+        let record = self.meta.record(index).ok_or_else(|| {
+            invalid_metadata(format!(
+                "path index references missing record index {}",
+                index.get()
+            ))
+        })?;
+        validate_indexed_path_structure(&path, record.name())?;
+
+        if let Some(existing_index) = paths.get(&path) {
+            if *existing_index != index.get() {
+                return Err(invalid_metadata(format!(
+                    "path FST conflict for {:?}: record indices {} and {}",
+                    String::from_utf8_lossy(&path),
+                    existing_index,
+                    index.get()
+                )));
+            }
+        } else {
+            paths.insert(path.clone(), index.get());
+        }
+
+        if let Some(existing_path) = record_paths.get(&index) {
+            if existing_path != &path {
+                return Err(invalid_metadata(format!(
+                    "record index {} is mapped to both {:?} and {:?}",
+                    index.get(),
+                    String::from_utf8_lossy(existing_path),
+                    String::from_utf8_lossy(&path)
+                )));
+            }
+        } else {
+            record_paths.insert(index, path);
+        }
+
+        Ok(())
+    }
+
+    fn merge_block_entry(
+        &self,
+        blocks: &mut BTreeMap<[u8; 16], u64>,
+        key: [u8; 16],
+        physical_offset: u64,
+    ) -> std::io::Result<()> {
+        let record_index_value = u64::from_be_bytes(key[..8].try_into().unwrap());
+        let logical_offset = u64::from_be_bytes(key[8..].try_into().unwrap());
+        let record_index = RecordIndex::try_new(record_index_value)
+            .ok_or_else(|| invalid_metadata("block FST contains the zero record index"))?;
+        let record = self
+            .meta
+            .record(record_index)
+            .and_then(Record::as_chunked_file)
+            .ok_or_else(|| {
+                invalid_metadata(format!(
+                    "block FST references non-chunked or missing record index {}",
+                    record_index.get()
+                ))
+            })?;
+
+        if logical_offset >= record.decompressed_length {
+            return Err(invalid_metadata(format!(
+                "block FST logical offset {logical_offset} is outside record {} with logical length {}",
+                record_index.get(),
+                record.decompressed_length
+            )));
+        }
+        let data_end = record
+            .data
+            .get()
+            .checked_add(record.length)
+            .ok_or_else(|| {
+                invalid_metadata(format!(
+                    "chunked record {} data range overflows u64",
+                    record_index.get()
+                ))
+            })?;
+        if physical_offset < record.data.get() || physical_offset >= data_end {
+            return Err(invalid_metadata(format!(
+                "block FST physical offset {physical_offset} is outside record {} data range [{}, {data_end})",
+                record_index.get(),
+                record.data.get()
+            )));
+        }
+
+        if let Some(existing_offset) = blocks.get(&key) {
+            if *existing_offset != physical_offset {
+                return Err(invalid_metadata(format!(
+                    "block FST conflict for record {} logical offset {logical_offset}: physical offsets {existing_offset} and {physical_offset}",
+                    record_index.get()
+                )));
+            }
+        } else {
+            blocks.insert(key, physical_offset);
+        }
+
+        Ok(())
+    }
+
+    fn validate_block_sequences(&self, blocks: &BTreeMap<[u8; 16], u64>) -> std::io::Result<()> {
+        for (position, record) in self.meta.records.iter().enumerate() {
+            let Record::ChunkedFile(record) = record else {
+                continue;
+            };
+            let record_index_value = u64::try_from(position)
+                .ok()
+                .and_then(|position| position.checked_add(1))
+                .ok_or_else(|| invalid_metadata("record index overflows u64"))?;
+            let record_index = RecordIndex::new(record_index_value)?;
+            if record.block_size == 0 || record.length == 0 || record.decompressed_length == 0 {
+                return Err(invalid_metadata(format!(
+                    "chunked record {} has an empty data or logical block envelope",
+                    record_index.get()
+                )));
+            }
+
+            let mut first_key = [0u8; 16];
+            first_key[..8].copy_from_slice(&record_index.get().to_be_bytes());
+            let mut last_key = first_key;
+            last_key[8..].fill(u8::MAX);
+            let entries: Vec<_> = blocks
+                .range(first_key..=last_key)
+                .map(|(key, physical_offset)| {
+                    (
+                        u64::from_be_bytes(key[8..].try_into().unwrap()),
+                        *physical_offset,
+                    )
+                })
+                .collect();
+            if entries.is_empty() {
+                return Err(invalid_metadata(format!(
+                    "chunked record {} has no block FST entries",
+                    record_index.get()
+                )));
+            }
+
+            let block_size = u64::from(record.block_size);
+            let expected_last = (record.decompressed_length - 1) / block_size * block_size;
+            let mut expected_logical = 0u64;
+            let mut previous_physical = None;
+            for (logical_offset, physical_offset) in entries.iter().copied() {
+                if logical_offset != expected_logical {
+                    return Err(invalid_metadata(format!(
+                        "chunked record {} block starts at logical offset {logical_offset}, expected {expected_logical}",
+                        record_index.get()
+                    )));
+                }
+                if let Some(previous) = previous_physical
+                    && physical_offset <= previous
+                {
+                    return Err(invalid_metadata(format!(
+                        "chunked record {} block offsets are not strictly increasing: {previous} then {physical_offset}",
+                        record_index.get()
+                    )));
+                }
+                previous_physical = Some(physical_offset);
+                expected_logical = expected_logical.checked_add(block_size).ok_or_else(|| {
+                    invalid_metadata("chunked logical block offset overflows u64")
+                })?;
+            }
+
+            if entries[0].1 != record.data.get() {
+                return Err(invalid_metadata(format!(
+                    "chunked record {} first physical block starts at {}, expected {}",
+                    record_index.get(),
+                    entries[0].1,
+                    record.data.get()
+                )));
+            }
+            if entries.last().unwrap().0 != expected_last {
+                return Err(invalid_metadata(format!(
+                    "chunked record {} last block starts at logical offset {}, expected {expected_last}",
+                    record_index.get(),
+                    entries.last().unwrap().0
+                )));
+            }
+        }
+
+        Ok(())
     }
 
     fn collect_paths(
         &self,
         entries: &[RecordIndex],
-        prefix: &mut Vec<u8>,
-        paths: &mut Vec<(Vec<u8>, u64)>,
-    ) {
-        for &index in entries {
-            let record = self.meta.record(index).unwrap();
+        prefix: &[u8],
+        paths: &mut BTreeMap<Vec<u8>, u64>,
+        record_paths: &mut HashMap<RecordIndex, Vec<u8>>,
+        hierarchy_paths: &mut HashMap<RecordIndex, Vec<u8>>,
+        expanded_directories: &mut HashSet<RecordIndex>,
+    ) -> std::io::Result<()> {
+        let mut pending = Vec::new();
+        for &index in entries.iter().rev() {
+            pending.push((index, prefix.to_vec()));
+        }
+
+        while let Some((index, prefix)) = pending.pop() {
+            let record = self.meta.record(index).ok_or_else(|| {
+                invalid_metadata(format!(
+                    "directory hierarchy references missing record index {}",
+                    index.get()
+                ))
+            })?;
             let name = record.name().as_bytes();
 
-            // Build full path with \x1f separator (BoxPath separator)
-            let path_start = prefix.len();
+            let separator_len = usize::from(!prefix.is_empty());
+            let path_len = prefix
+                .len()
+                .checked_add(separator_len)
+                .and_then(|length| length.checked_add(name.len()))
+                .ok_or_else(|| invalid_metadata("archive path length overflows usize"))?;
+            let mut path = Vec::new();
+            path.try_reserve_exact(path_len).map_err(|error| {
+                std::io::Error::new(
+                    std::io::ErrorKind::OutOfMemory,
+                    format!("cannot allocate archive path: {error}"),
+                )
+            })?;
+            path.extend_from_slice(&prefix);
             if !prefix.is_empty() {
-                prefix.push(0x1f);
+                path.push(0x1f);
             }
-            prefix.extend_from_slice(name);
+            path.extend_from_slice(name);
 
-            paths.push((prefix.clone(), index.get()));
-
-            // Recurse into directories
-            if let Record::Directory(dir) = record {
-                self.collect_paths(&dir.entries, prefix, paths);
+            if let Some(previous_path) = hierarchy_paths.insert(index, path.clone()) {
+                return Err(invalid_metadata(format!(
+                    "record index {} appears more than once in the directory hierarchy at {:?} and {:?}",
+                    index.get(),
+                    String::from_utf8_lossy(&previous_path),
+                    String::from_utf8_lossy(&path)
+                )));
             }
+            self.merge_path_entry(paths, record_paths, path.clone(), index)?;
 
-            prefix.truncate(path_start);
+            if let Record::Directory(directory) = record
+                && expanded_directories.insert(index)
+            {
+                for &child in directory.entries.iter().rev() {
+                    pending.push((child, path.clone()));
+                }
+            }
         }
+
+        Ok(())
     }
+}
+
+fn invalid_metadata(message: impl Into<String>) -> std::io::Error {
+    std::io::Error::new(std::io::ErrorKind::InvalidData, message.into())
+}
+
+fn checked_aligned_write_address(offset: u64, alignment: u32) -> std::io::Result<NonZeroU64> {
+    if offset < BoxHeader::SIZE as u64 {
+        return Err(invalid_metadata(format!(
+            "writer position {offset} overlaps the {}-byte header",
+            BoxHeader::SIZE
+        )));
+    }
+
+    let aligned = match u64::from(alignment) {
+        0 => offset,
+        alignment => {
+            let remainder = offset % alignment;
+            if remainder == 0 {
+                offset
+            } else {
+                offset
+                    .checked_add(alignment - remainder)
+                    .ok_or_else(|| invalid_metadata("aligned writer position overflows u64"))?
+            }
+        }
+    };
+    if aligned == u64::MAX {
+        return Err(invalid_metadata(
+            "writer position leaves no address space for archive metadata",
+        ));
+    }
+    NonZeroU64::new(aligned).ok_or_else(|| invalid_metadata("writer position must be non-zero"))
+}
+
+fn validate_indexed_path_structure(path: &[u8], record_name: &str) -> std::io::Result<()> {
+    let path_str = std::str::from_utf8(path)
+        .map_err(|_| invalid_metadata("path FST contains a non-UTF-8 path"))?;
+    let mut components = path_str.split('\x1f');
+    let mut final_component = None;
+    for component in components.by_ref() {
+        if component.is_empty() {
+            return Err(invalid_metadata(format!(
+                "path FST contains an empty path component in {:?}",
+                String::from_utf8_lossy(path)
+            )));
+        }
+        final_component = Some(component);
+    }
+
+    if final_component != Some(record_name) {
+        return Err(invalid_metadata(format!(
+            "path FST entry {:?} does not match record name {:?}",
+            String::from_utf8_lossy(path),
+            record_name
+        )));
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn path(s: &str) -> BoxPath<'static> {
-        BoxPath::new(s).unwrap()
-    }
-
-    #[test]
-    fn test_new_writer() {
-        let writer = ArchiveWriter::new(WriterOptions::default());
-        assert_eq!(writer.version(), 1);
-        assert_eq!(writer.alignment(), 0);
-        assert!(!writer.allow_escapes());
-        assert!(!writer.allow_external_symlinks());
-    }
-
-    #[test]
-    fn test_with_alignment() {
-        let writer = ArchiveWriter::with_alignment(4096);
-        assert_eq!(writer.alignment(), 4096);
-    }
-
-    #[test]
-    fn test_next_write_addr_no_alignment() {
-        let mut writer = ArchiveWriter::new(WriterOptions::default());
-        // Initial position is after header (32 bytes)
-        assert_eq!(writer.next_write_addr().get(), 32);
-
-        writer.advance_position(100);
-        assert_eq!(writer.next_write_addr().get(), 132);
-    }
-
-    #[test]
-    fn test_next_write_addr_with_alignment() {
-        let mut writer = ArchiveWriter::with_alignment(64);
-        // Header is 32 bytes, next aligned position is 64
-        assert_eq!(writer.next_write_addr().get(), 64);
-
-        writer.advance_position(10);
-        // 64 + 10 = 74, next aligned position is 128
-        assert_eq!(writer.next_write_addr().get(), 128);
-    }
-
-    #[test]
-    fn test_mkdir() {
-        let mut writer = ArchiveWriter::new(WriterOptions::default());
-        let idx = writer.mkdir(path("test"), HashMap::new()).unwrap();
-        assert_eq!(idx.get(), 1);
-
-        let record = writer.meta.record(idx).unwrap();
-        assert!(record.as_directory().is_some());
-        assert_eq!(record.name(), "test");
-    }
-
-    #[test]
-    fn test_mkdir_all() {
-        let mut writer = ArchiveWriter::new(WriterOptions::default());
-        writer.mkdir_all(path("a/b/c"), HashMap::new()).unwrap();
-
-        // Should have created a, a/b, and a/b/c
-        assert!(writer.meta.index(&path("a")).is_some());
-        assert!(writer.meta.index(&path("a/b")).is_some());
-        assert!(writer.meta.index(&path("a/b/c")).is_some());
-    }
-
-    #[test]
-    fn test_encode_header() {
-        let writer = ArchiveWriter::with_options(4096, true, true);
-        let header = writer.encode_header();
-
-        assert_eq!(&header[0..4], b"\xffBOX");
-        assert_eq!(header[4], 1); // version
-        assert_eq!(header[5], 0x03); // flags: both bits set
-    }
-}
+#[path = "writer_tests.rs"]
+mod tests;

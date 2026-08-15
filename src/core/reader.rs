@@ -37,11 +37,14 @@ use super::meta::{AttrKey, AttrValue, BoxMetadata, MetadataIter, RecordIndex};
 ///
 /// // Use reader for lookups and decompression
 /// if let Some(record) = reader.find(&path) {
-///     let (offset, len) = reader.file_location(record.as_file().unwrap());
+///     let (offset, len) = reader.file_location(record.as_file().unwrap())?;
 ///     // Frontend reads bytes at offset
 ///     let data = reader.decompress(record.as_file().unwrap(), &compressed_bytes)?;
 /// }
 /// ```
+// [spec:box:def:archive-state.root]
+// [spec:box:def:archive-state.root.reader]
+// [spec:box:sem:sans-io.root]
 pub struct ArchiveReader<'a> {
     /// Parsed 32-byte header
     pub header: BoxHeader,
@@ -60,6 +63,7 @@ impl<'a> ArchiveReader<'a> {
     ///
     /// Returns the parsed header data. The caller should use this to determine
     /// the trailer offset for reading metadata.
+    // [spec:box:sem:sans-io.root.header-metadata]
     pub fn parse_header(buf: &[u8]) -> Result<BoxHeader, ParseError> {
         if buf.len() < 32 {
             return Err(ParseError::NeedMoreBytes(32 - buf.len()));
@@ -80,6 +84,7 @@ impl<'a> ArchiveReader<'a> {
     ///
     /// For v0 archives, use `crate::de::v0::deserialize_metadata_borrowed`.
     /// For v1+ archives, use `crate::parse::parse_metadata_v1`.
+    // [spec:box:sem:sans-io.root.header-metadata]
     pub fn parse_metadata(buf: &'a [u8], version: u8) -> Result<BoxMetadata<'a>, std::io::Error> {
         crate::de::deserialize_metadata_borrowed(buf, &mut 0, version)
     }
@@ -178,18 +183,34 @@ impl<'a> ArchiveReader<'a> {
 
     /// Get the absolute file location for a file record.
     ///
-    /// Returns (absolute_offset, length) for the frontend to read.
+    /// Returns (absolute_offset, length) for the frontend to read, or invalid
+    /// data when the embedded archive base and record offset overflow.
     #[inline]
-    pub fn file_location(&self, record: &FileRecord<'_>) -> (u64, u64) {
-        (self.offset + record.data.get(), record.length)
+    // [spec:box:sem:sans-io.root.data-location]
+    pub fn file_location(&self, record: &FileRecord<'_>) -> std::io::Result<(u64, u64)> {
+        let offset = self.offset.checked_add(record.data.get()).ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "archive and record data offsets overflow u64",
+            )
+        })?;
+        Ok((offset, record.length))
     }
 
     /// Get the absolute file location for a chunked file record.
     ///
-    /// Returns (absolute_offset, length) for the frontend to read.
+    /// Returns (absolute_offset, length) for the frontend to read, or invalid
+    /// data when the embedded archive base and record offset overflow.
     #[inline]
-    pub fn chunked_location(&self, record: &ChunkedFileRecord<'_>) -> (u64, u64) {
-        (self.offset + record.data.get(), record.length)
+    // [spec:box:sem:sans-io.root.data-location]
+    pub fn chunked_location(&self, record: &ChunkedFileRecord<'_>) -> std::io::Result<(u64, u64)> {
+        let offset = self.offset.checked_add(record.data.get()).ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "archive and record data offsets overflow u64",
+            )
+        })?;
+        Ok((offset, record.length))
     }
 
     // ========================================================================
@@ -199,6 +220,7 @@ impl<'a> ArchiveReader<'a> {
     /// Decompress file data that was read by the frontend.
     ///
     /// Takes the compressed data and returns decompressed bytes.
+    // [spec:box:sem:sans-io.root.data-location]
     pub fn decompress(&self, record: &FileRecord<'_>, data: &[u8]) -> std::io::Result<Vec<u8>> {
         decompress_bytes_sync(data, record.compression, self.meta.dictionary())
     }
@@ -206,6 +228,7 @@ impl<'a> ArchiveReader<'a> {
     /// Decompress a single block from a chunked file.
     ///
     /// Takes the compressed block data and returns decompressed bytes.
+    // [spec:box:sem:sans-io.root.data-location]
     pub fn decompress_chunked_block(
         &self,
         record: &ChunkedFileRecord<'_>,
@@ -234,13 +257,12 @@ impl<'a> ArchiveReader<'a> {
     }
 
     /// Get the file mode (permissions) for a record, with fallback to default.
+    // [spec:box:def:attributes.root.standard-keys]
     pub fn get_mode(&self, record: &Record<'_>) -> u32 {
         // Try to get from record attrs first
         if let Some(value) = self.get_attr_value(record, crate::attrs::UNIX_MODE) {
-            match value {
-                AttrValue::Vu32(m) => return m,
-                AttrValue::U8(m) => return m as u32,
-                _ => {}
+            if let AttrValue::Vu32(mode) = value {
+                return mode;
             }
         }
 
@@ -251,10 +273,8 @@ impl<'a> ArchiveReader<'a> {
                 .attr_key(crate::attrs::UNIX_MODE)
                 .and_then(|k| self.meta.attr_key_type(k))
             {
-                match self.meta.parse_attr_value(bytes, attr_type) {
-                    AttrValue::Vu32(m) => return m,
-                    AttrValue::U8(m) => return m as u32,
-                    _ => {}
+                if let AttrValue::Vu32(mode) = self.meta.parse_attr_value(bytes, attr_type) {
+                    return mode;
                 }
             }
         }
@@ -319,6 +339,42 @@ impl<'a> ArchiveReader<'a> {
         self.meta.path_for_index(index)
     }
 
+    /// Validate an indexed archive path before a frontend converts it to a
+    /// platform path for extraction.
+    pub(crate) fn validate_extraction_path(
+        &self,
+        path: &BoxPath<'_>,
+        index: RecordIndex,
+    ) -> std::io::Result<()> {
+        self.meta
+            .validate_extraction_path(path, index, self.header.allow_escapes)
+    }
+
+    /// Resolve a link target to an indexed path that is safe to materialize.
+    pub(crate) fn extraction_path_for_index(
+        &self,
+        index: RecordIndex,
+    ) -> std::io::Result<BoxPath<'static>> {
+        let path = self.meta.path_for_index(index).ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!("could not find path for record index {}", index.get()),
+            )
+        })?;
+        self.validate_extraction_path(&path, index)?;
+        Ok(path)
+    }
+
+    /// Return validated direct children with their authoritative logical paths.
+    pub(crate) fn extraction_children_by_index(
+        &self,
+        dir_index: RecordIndex,
+        dir_path: &BoxPath<'_>,
+    ) -> std::io::Result<Vec<(BoxPath<'static>, RecordIndex)>> {
+        self.meta
+            .extraction_children_by_index(dir_index, dir_path, self.header.allow_escapes)
+    }
+
     // ========================================================================
     // Chunked file block lookup
     // ========================================================================
@@ -327,6 +383,7 @@ impl<'a> ArchiveReader<'a> {
     ///
     /// Returns a vector of (logical_offset, physical_offset) pairs.
     #[inline]
+    // [spec:box:sem:chunked-io.root.block-queries]
     pub fn blocks_for_record(&self, index: RecordIndex) -> Vec<(u64, u64)> {
         self.meta.blocks_for_record(index)
     }
@@ -336,6 +393,7 @@ impl<'a> ArchiveReader<'a> {
     /// Returns (physical_offset, block_logical_offset) for the block containing
     /// the given logical offset, or None if not found.
     #[inline]
+    // [spec:box:sem:chunked-io.root.block-queries]
     pub fn find_block(&self, index: RecordIndex, logical_offset: u64) -> Option<(u64, u64)> {
         self.meta.find_block(index, logical_offset)
     }
@@ -344,6 +402,7 @@ impl<'a> ArchiveReader<'a> {
     ///
     /// Returns (next_logical_offset, physical_offset), or None if no more blocks.
     #[inline]
+    // [spec:box:sem:chunked-io.root.block-queries]
     pub fn next_block(&self, index: RecordIndex, current_logical: u64) -> Option<(u64, u64)> {
         self.meta.next_block(index, current_logical)
     }
@@ -351,9 +410,26 @@ impl<'a> ArchiveReader<'a> {
 
 #[cfg(test)]
 mod tests {
+    use std::borrow::Cow;
+    use std::num::NonZeroU64;
+
     use super::*;
+    use crate::compression::Compression;
+    use crate::core::meta::{AttrMap, AttrType};
+
+    fn file_record_with_attrs(attrs: AttrMap) -> Record<'static> {
+        Record::File(FileRecord {
+            compression: Compression::Stored,
+            length: 0,
+            decompressed_length: 0,
+            data: NonZeroU64::new(32).unwrap(),
+            name: Cow::Borrowed("file"),
+            attrs,
+        })
+    }
 
     #[test]
+    // [spec:box:sem:sans-io.root.header-metadata/test]
     fn test_parse_header() {
         let mut buf = [0u8; 32];
         buf[0..4].copy_from_slice(b"\xffBOX");
@@ -371,17 +447,78 @@ mod tests {
     }
 
     #[test]
+    // [spec:box:sem:sans-io.root.header-metadata/test]
     fn test_parse_header_invalid_magic() {
         let buf = [0u8; 32];
         assert!(ArchiveReader::parse_header(&buf).is_err());
     }
 
     #[test]
+    // [spec:box:sem:sans-io.root.header-metadata/test]
     fn test_parse_header_too_short() {
         let buf = b"\xffBOX";
         assert!(matches!(
             ArchiveReader::parse_header(buf),
             Err(ParseError::NeedMoreBytes(28))
         ));
+    }
+
+    // [spec:box:sem:sans-io.root.data-location/test/unit]
+    #[test]
+    fn data_locations_reject_embedded_archive_offset_overflow() {
+        let reader = ArchiveReader::new(BoxHeader::default(), BoxMetadata::default(), 1);
+        let file = FileRecord {
+            compression: Compression::Stored,
+            length: 1,
+            decompressed_length: 1,
+            data: NonZeroU64::new(u64::MAX).unwrap(),
+            name: Cow::Borrowed("file"),
+            attrs: Default::default(),
+        };
+        let chunked = ChunkedFileRecord {
+            compression: Compression::Stored,
+            block_size: 1,
+            length: 1,
+            decompressed_length: 1,
+            data: NonZeroU64::new(u64::MAX).unwrap(),
+            name: Cow::Borrowed("chunked"),
+            attrs: Default::default(),
+        };
+
+        for error in [
+            reader.file_location(&file).unwrap_err(),
+            reader.chunked_location(&chunked).unwrap_err(),
+        ] {
+            assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        }
+    }
+
+    #[test]
+    // [spec:box:def:attributes.root.standard-keys/test/unit]
+    fn record_u8_mode_uses_type_fallback() {
+        let mut meta = BoxMetadata::default();
+        let mode_key = meta
+            .attr_key_or_create(crate::attrs::UNIX_MODE, AttrType::U8)
+            .unwrap();
+        let mut attrs = AttrMap::default();
+        attrs.insert(mode_key, vec![0o7].into_boxed_slice());
+        let record = file_record_with_attrs(attrs);
+        let reader = ArchiveReader::new(BoxHeader::default(), meta, 0);
+
+        assert_eq!(reader.get_mode(&record), crate::fs::DEFAULT_FILE_MODE);
+    }
+
+    #[test]
+    // [spec:box:def:attributes.root.standard-keys/test/unit]
+    fn default_u8_mode_uses_type_fallback() {
+        let mut meta = BoxMetadata::default();
+        let mode_key = meta
+            .attr_key_or_create(crate::attrs::UNIX_MODE, AttrType::U8)
+            .unwrap();
+        meta.attrs.insert(mode_key, vec![0o7].into_boxed_slice());
+        let record = file_record_with_attrs(AttrMap::default());
+        let reader = ArchiveReader::new(BoxHeader::default(), meta, 0);
+
+        assert_eq!(reader.get_mode(&record), crate::fs::DEFAULT_FILE_MODE);
     }
 }

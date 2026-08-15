@@ -21,6 +21,8 @@
 //! └─────────────────────────────────────────┘
 //! ```
 
+#[cfg(all(feature = "std", feature = "reader"))]
+mod extraction;
 pub mod meta;
 #[cfg(all(feature = "std", feature = "reader"))]
 mod reader;
