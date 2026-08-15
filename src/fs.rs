@@ -7,8 +7,10 @@ use fastvint::Vi64;
 use crate::{BOX_EPOCH_UNIX, attrs};
 
 /// Default mode for files (0o644 = rw-r--r--)
+// [spec:box:def:attributes.root.standard-keys]
 pub const DEFAULT_FILE_MODE: u32 = 0o100644;
 /// Default mode for directories (0o755 = rwxr-xr-x)
+// [spec:box:def:attributes.root.standard-keys]
 pub const DEFAULT_DIR_MODE: u32 = 0o40755;
 
 #[cfg(unix)]

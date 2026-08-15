@@ -14,6 +14,7 @@ pub trait Checksum: Digest + Default + Unpin {
     const NAME: &'static str;
 }
 
+// [spec:box:def:checksums.root.attribute]
 impl Checksum for blake3::Hasher {
     const NAME: &'static str = crate::attrs::BLAKE3;
 }
@@ -23,6 +24,7 @@ impl Checksum for blake3::Hasher {
 /// Use this when checksums are disabled (`--no-checksum`).
 /// All operations are no-ops and the output is zero-length.
 #[derive(Default, Clone)]
+// [spec:box:req:checksums.root.disabled]
 pub struct NullChecksum;
 
 impl Checksum for NullChecksum {
@@ -57,6 +59,7 @@ impl HashMarker for NullChecksum {}
 mod tests {
     use super::*;
 
+    // [spec:box:req:checksums.root.disabled/test/unit]
     #[test]
     fn test_null_checksum() {
         let mut hasher = NullChecksum;
@@ -65,6 +68,7 @@ mod tests {
         assert_eq!(result.len(), 0);
     }
 
+    // [spec:box:def:checksums.root.attribute/test]
     #[test]
     fn test_blake3_name() {
         assert_eq!(blake3::Hasher::NAME, crate::attrs::BLAKE3);

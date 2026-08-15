@@ -20,6 +20,7 @@ pub struct DictionaryTrainer {
     total_size: usize,
 }
 
+// [spec:box:req:dictionaries.root.training]
 impl DictionaryTrainer {
     /// Create a new dictionary trainer.
     pub fn new() -> Self {
@@ -131,12 +132,14 @@ impl DictionaryTrainer {
 mod tests {
     use super::*;
 
+    // [spec:box:req:dictionaries.root.training/test]
     #[test]
     fn test_trainer_empty() {
         let trainer = DictionaryTrainer::new();
         assert!(trainer.train(DEFAULT_DICT_SIZE).is_none());
     }
 
+    // [spec:box:req:dictionaries.root.training/test]
     #[test]
     fn test_trainer_insufficient_samples() {
         let mut trainer = DictionaryTrainer::new();
@@ -146,6 +149,7 @@ mod tests {
         assert!(trainer.train(DEFAULT_DICT_SIZE).is_none());
     }
 
+    // [spec:box:req:dictionaries.root.training/test]
     #[test]
     fn test_trainer_with_samples() {
         let mut trainer = DictionaryTrainer::new();
@@ -166,6 +170,7 @@ mod tests {
         assert!(!dict.is_empty());
     }
 
+    // [spec:box:req:dictionaries.root.training/test]
     #[test]
     fn test_sample_truncation() {
         let mut trainer = DictionaryTrainer::new();

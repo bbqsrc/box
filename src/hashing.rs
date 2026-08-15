@@ -10,6 +10,7 @@ use tokio::io::{AsyncBufRead, AsyncRead, AsyncWrite, ReadBuf};
 /// A reader wrapper that computes a hash digest while data is read through it.
 ///
 /// The hash is updated as data passes through `poll_read`.
+// [spec:box:req:checksums.root]
 pub struct HashingReader<R, D> {
     inner: R,
     hasher: D,
@@ -140,6 +141,7 @@ mod tests {
     use super::*;
     use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader};
 
+    // [spec:box:req:checksums.root/test]
     #[tokio::test]
     async fn test_hashing_reader() {
         let data = b"hello world";
