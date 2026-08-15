@@ -1,6 +1,7 @@
 use crate::compat::NonZeroU64;
 
 /// Box archive header (32 bytes on disk).
+// [spec:box:syn:wire.root]
 #[derive(Debug, Clone)]
 pub struct BoxHeader {
     /// Format version (currently 1).

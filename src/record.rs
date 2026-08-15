@@ -6,6 +6,7 @@ use crate::AttrValue;
 use crate::core::{BoxMetadata, RecordIndex};
 use crate::{AttrMap, compression::Compression};
 
+// [spec:box:def:records.root]
 #[derive(Debug, Clone)]
 pub enum Record<'a> {
     File(FileRecord<'a>),
@@ -172,6 +173,7 @@ impl<'a> Record<'a> {
     }
 }
 
+// [spec:box:def:records.root.non-file-records]
 #[derive(Debug, Clone)]
 pub struct LinkRecord<'a> {
     pub name: Cow<'a, str>,
@@ -207,6 +209,7 @@ impl<'a> From<LinkRecord<'a>> for Record<'a> {
 }
 
 /// A symlink that points outside the archive (external target).
+// [spec:box:def:records.root.non-file-records]
 #[derive(Debug, Clone)]
 pub struct ExternalLinkRecord<'a> {
     pub name: Cow<'a, str>,
@@ -241,6 +244,7 @@ impl<'a> From<ExternalLinkRecord<'a>> for Record<'a> {
     }
 }
 
+// [spec:box:def:records.root.non-file-records]
 #[derive(Debug, Clone)]
 pub struct DirectoryRecord<'a> {
     /// The name of the directory
@@ -287,6 +291,7 @@ impl<'a> From<DirectoryRecord<'a>> for Record<'a> {
     }
 }
 
+// [spec:box:def:records.root.file-records]
 #[derive(Debug, Clone)]
 pub struct FileRecord<'a> {
     /// a bytestring representing the type of compression being used, always 8 bytes.
@@ -340,6 +345,7 @@ impl<'a> From<FileRecord<'a>> for Record<'a> {
 
 /// A file record for large files stored as independently-compressed blocks.
 /// This allows random access and parallel decompression.
+// [spec:box:def:records.root.file-records]
 #[derive(Debug, Clone)]
 pub struct ChunkedFileRecord<'a> {
     /// The compression algorithm used for each block.

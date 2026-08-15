@@ -544,6 +544,7 @@ async fn test_parallel_extraction_with_symlinks() {
 }
 
 /// Test resolve_link method
+// [spec:box:req:records.root.references.resolution/test/integration]
 #[tokio::test]
 async fn test_resolve_link() {
     let (_temp_dir, archive_path) = create_test_archive().await;
@@ -597,6 +598,8 @@ async fn test_resolve_link() {
 // ============================================================================
 
 /// Test that creating a symlink with an invalid (non-existent) RecordIndex fails at creation time
+// [spec:box:req:sans-io.root.hierarchy/test/integration]
+// [spec:box:req:records.root.references.insertion-target/test/integration]
 #[tokio::test]
 async fn test_symlink_invalid_target_index_creation_fails() {
     let (_temp_dir, archive_path) = create_test_archive().await;
@@ -677,6 +680,7 @@ async fn test_symlink_various_invalid_indices() {
 }
 
 /// Test that RecordIndex::new(0) fails (index must be non-zero)
+// [spec:box:req:records.root.references/test/unit]
 #[tokio::test]
 async fn test_record_index_zero_fails() {
     let result = RecordIndex::new(0);
@@ -685,6 +689,7 @@ async fn test_record_index_zero_fails() {
 
 /// Test creating a symlink that points to itself (same path)
 /// This should be allowed at creation but would be a broken symlink
+// [spec:box:sem:records.root.references.deferred-relationships/test/integration]
 #[tokio::test]
 async fn test_symlink_self_reference() {
     let (temp_dir, archive_path) = create_test_archive().await;

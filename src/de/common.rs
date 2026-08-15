@@ -23,6 +23,7 @@ pub(super) type AttrMapBorrowed = AttrMap;
 // BORROWED IMPLEMENTATIONS
 // ============================================================================
 
+// [spec:box:req:wire.root.bounds.lengths-and-counts]
 impl<'a> DeserializeBorrowed<'a> for Box<[u8]> {
     fn deserialize_borrowed(data: &'a [u8], pos: &mut usize) -> std::io::Result<Self> {
         let length_offset = *pos;
@@ -66,6 +67,9 @@ impl<'a> DeserializeBorrowed<'a> for Box<[u8]> {
     }
 }
 
+// [spec:box:def:attributes.root]
+// [spec:box:req:attributes.root.integrity]
+// [spec:box:req:wire.root.bounds.attrmap-envelope]
 impl<'a> DeserializeBorrowed<'a> for AttrMap {
     fn deserialize_borrowed(data: &'a [u8], pos: &mut usize) -> std::io::Result<Self> {
         let byte_count_offset = *pos;
@@ -145,6 +149,7 @@ impl<'a> DeserializeBorrowed<'a> for Compression {
     }
 }
 
+// [spec:box:req:wire.root.bounds.record-scalars]
 impl<'a> DeserializeBorrowed<'a> for FileRecord<'a> {
     fn deserialize_borrowed(data: &'a [u8], pos: &mut usize) -> std::io::Result<Self> {
         let offset = *pos;
@@ -269,6 +274,8 @@ impl<'a> DeserializeBorrowed<'a> for ExternalLinkRecord<'a> {
 
 /// Parse FST from remaining borrowed data.
 /// v1 format: [u64 length][FST bytes]
+// [spec:box:req:fst-format.root.validation]
+// [spec:box:req:wire.root.bounds.fst-envelope]
 pub(super) fn parse_fst_borrowed<'a>(
     data: &'a [u8],
     pos: &mut usize,

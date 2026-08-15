@@ -34,6 +34,7 @@ pub fn encode_u64_le(buf: &mut Vec<u8>, value: u64) {
 /// Encode a VLQ u64 (FastVint format) to a buffer.
 ///
 /// Returns the number of bytes written.
+// [spec:box:def:wire.root.primitives]
 pub fn encode_vu64(buf: &mut Vec<u8>, value: u64) -> usize {
     let start_len = buf.len();
     // Reserve maximum possible size
@@ -80,6 +81,7 @@ pub fn encode_bytes(buf: &mut Vec<u8>, data: &[u8]) {
 }
 
 /// Encode a length-prefixed UTF-8 string.
+// [spec:box:def:wire.root.primitives]
 pub fn encode_str(buf: &mut Vec<u8>, s: &str) {
     encode_bytes(buf, s.as_bytes());
 }
@@ -106,6 +108,7 @@ pub fn encode_record_index(buf: &mut Vec<u8>, index: RecordIndex) {
 /// Encode an AttrMap to a buffer.
 ///
 /// The byte count field is calculated and written automatically.
+// [spec:box:def:attributes.root]
 pub fn encode_attrmap(buf: &mut Vec<u8>, attrs: &AttrMap) {
     // Reserve space for the u64 byte count
     let byte_count_pos = buf.len();
@@ -128,6 +131,7 @@ pub fn encode_attrmap(buf: &mut Vec<u8>, attrs: &AttrMap) {
 }
 
 /// Encode attribute keys (Vec<AttrKey>) to a buffer.
+// [spec:box:def:attributes.root]
 pub fn encode_attr_keys(buf: &mut Vec<u8>, keys: &[AttrKey]) {
     encode_vu64(buf, keys.len() as u64);
     for key in keys {
@@ -178,6 +182,7 @@ impl HeaderConfig {
 /// Encode the 32-byte Box header.
 ///
 /// Always writes exactly 32 bytes.
+// [spec:box:req:wire.root.header]
 pub fn encode_header(buf: &mut Vec<u8>, config: &HeaderConfig) {
     let start = buf.len();
     buf.reserve(32);
@@ -243,6 +248,7 @@ pub fn encode_header_array(config: &HeaderConfig) -> [u8; 32] {
 // ============================================================================
 
 /// Encode an FST with u64 length prefix.
+// [spec:box:syn:fst-format.root]
 pub fn encode_fst(buf: &mut Vec<u8>, fst_bytes: Option<&[u8]>) {
     match fst_bytes {
         Some(bytes) => {
@@ -319,6 +325,7 @@ pub fn encode_external_symlink_record_header(buf: &mut Vec<u8>, name: &str, targ
 
 /// Encode a dictionary with Vu64 length prefix.
 /// If None, writes length 0.
+// [spec:box:sem:dictionaries.root]
 pub fn encode_dictionary(buf: &mut Vec<u8>, dict: Option<&[u8]>) {
     match dict {
         Some(bytes) => {
@@ -385,6 +392,7 @@ pub fn encode_external_link_record(buf: &mut Vec<u8>, record: &ExternalLinkRecor
 }
 
 /// Encode a Record (v1 format).
+// [spec:box:req:records.root.type-byte]
 pub fn encode_record_v1(buf: &mut Vec<u8>, record: &Record<'_>) {
     match record {
         Record::File(r) => encode_file_record(buf, r),
@@ -404,6 +412,7 @@ use crate::BoxMetadata;
 /// Encode BoxMetadata in v1 format.
 ///
 /// v1 layout: attr_keys → attrs → dictionary → records → fst → block_fst
+// [spec:box:req:versioning.root.v1]
 pub fn encode_metadata_v1(buf: &mut Vec<u8>, meta: &BoxMetadata<'_>) {
     // v1: root not serialized (paths indexed by FST)
 
@@ -433,6 +442,7 @@ mod tests {
     use super::*;
     use crate::parse;
 
+    // [spec:box:def:wire.root.primitives/test]
     #[test]
     fn test_encode_u32_le() {
         let mut buf = Vec::new();
@@ -440,6 +450,7 @@ mod tests {
         assert_eq!(buf, [0x01, 0x02, 0x03, 0x04]);
     }
 
+    // [spec:box:def:wire.root.primitives/test]
     #[test]
     fn test_encode_u64_le() {
         let mut buf = Vec::new();
@@ -447,6 +458,7 @@ mod tests {
         assert_eq!(buf, [0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08]);
     }
 
+    // [spec:box:def:wire.root.primitives/test]
     #[test]
     fn test_encode_vu64_roundtrip() {
         for value in [0u64, 1, 127, 128, 16511, 16512, u64::MAX] {
@@ -458,6 +470,7 @@ mod tests {
         }
     }
 
+    // [spec:box:def:wire.root.primitives/test]
     #[test]
     fn test_encode_str_roundtrip() {
         let mut buf = Vec::new();
@@ -467,6 +480,7 @@ mod tests {
         assert_eq!(consumed, buf.len());
     }
 
+    // [spec:box:req:wire.root.header/test]
     #[test]
     fn test_encode_header_roundtrip() {
         let config = HeaderConfig {
@@ -500,6 +514,7 @@ mod tests {
         assert_eq!(parsed.trailer_offset, 2048);
     }
 
+    // [spec:box:req:records.root.type-byte/test]
     #[test]
     fn test_encode_record_header() {
         let mut buf = Vec::new();
@@ -511,6 +526,7 @@ mod tests {
         assert_eq!(parsed.compression, Compression::Zstd);
     }
 
+    // [spec:box:def:attributes.root/test]
     #[test]
     fn test_encode_attrmap() {
         let mut attrs = AttrMap::new();
@@ -525,6 +541,7 @@ mod tests {
         assert_eq!(byte_count as usize, buf.len() - 8);
     }
 
+    // [spec:box:def:records.root.file-records/test]
     #[test]
     fn test_encode_file_record_roundtrip() {
         use std::borrow::Cow;
@@ -553,6 +570,7 @@ mod tests {
         assert_eq!(parsed_file.name.as_ref(), "test.txt");
     }
 
+    // [spec:box:def:records.root.non-file-records/test]
     #[test]
     fn test_encode_directory_record_roundtrip() {
         use std::borrow::Cow;
@@ -573,6 +591,7 @@ mod tests {
         assert_eq!(parsed_dir.name.as_ref(), "mydir");
     }
 
+    // [spec:box:sem:dictionaries.root/test]
     #[test]
     fn test_encode_dictionary_roundtrip() {
         // With dictionary

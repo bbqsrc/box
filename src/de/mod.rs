@@ -62,6 +62,7 @@ pub(super) fn read_context<T>(
     })
 }
 
+// [spec:box:req:wire.root.bounds.lengths-and-counts]
 pub(super) fn checked_count(
     data: &[u8],
     pos: usize,
@@ -169,6 +170,7 @@ pub(crate) trait DeserializeBorrowed<'a>: Send {
 // COMMON TRAIT IMPLEMENTATIONS (borrowed)
 // ============================================================================
 
+// [spec:box:req:wire.root.bounds.lengths-and-counts]
 impl<'a> DeserializeBorrowed<'a> for &'a str {
     fn deserialize_borrowed(data: &'a [u8], pos: &mut usize) -> std::io::Result<Self> {
         let length_offset = *pos;
@@ -224,6 +226,7 @@ impl<'a> DeserializeBorrowed<'a> for Cow<'a, str> {
     }
 }
 
+// [spec:box:req:paths.root]
 impl<'a> DeserializeBorrowed<'a> for BoxPath<'a> {
     fn deserialize_borrowed(data: &'a [u8], pos: &mut usize) -> std::io::Result<Self> {
         let offset = *pos;
@@ -234,6 +237,8 @@ impl<'a> DeserializeBorrowed<'a> for BoxPath<'a> {
     }
 }
 
+// [spec:box:req:records.root.references]
+// [spec:box:req:wire.root.bounds.record-scalars]
 impl<'a> DeserializeBorrowed<'a> for RecordIndex {
     fn deserialize_borrowed(data: &'a [u8], pos: &mut usize) -> std::io::Result<Self> {
         let offset = *pos;
@@ -269,6 +274,7 @@ impl<'a> DeserializeBorrowed<'a> for Vec<RecordIndex> {
 // ============================================================================
 
 /// Deserialize BoxMetadata with version awareness (borrowed).
+// [spec:box:sem:versioning.root]
 pub(crate) fn deserialize_metadata_borrowed<'a>(
     data: &'a [u8],
     pos: &mut usize,

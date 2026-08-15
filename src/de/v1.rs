@@ -47,6 +47,8 @@ fn parse_type_compression(byte: u8) -> (u8, Compression) {
 // ============================================================================
 
 /// Deserialize FileRecord in v1 format (compression already parsed from combined byte).
+// [spec:box:req:records.root.references]
+// [spec:box:req:wire.root.bounds.record-scalars]
 fn deserialize_file_borrowed<'a>(
     data: &'a [u8],
     pos: &mut usize,
@@ -104,6 +106,8 @@ fn deserialize_file_borrowed<'a>(
 }
 
 /// Deserialize ChunkedFileRecord in v1 format (compression already parsed from combined byte).
+// [spec:box:req:records.root.references]
+// [spec:box:req:wire.root.bounds.record-scalars]
 fn deserialize_chunked_file_borrowed<'a>(
     data: &'a [u8],
     pos: &mut usize,
@@ -168,6 +172,7 @@ fn deserialize_chunked_file_borrowed<'a>(
 }
 
 /// Deserialize Vec<AttrKey> in v1 format (with type tag).
+// [spec:box:req:attributes.root.integrity]
 pub(crate) fn deserialize_attr_keys_borrowed<'a>(
     data: &'a [u8],
     pos: &mut usize,
@@ -234,6 +239,8 @@ pub(crate) fn deserialize_directory_borrowed<'a>(
 }
 
 /// Deserialize Record in v1 format.
+// [spec:box:req:records.root.type-byte]
+// [spec:box:req:wire.root.bounds.record-scalars]
 pub(crate) fn deserialize_record_borrowed<'a>(
     data: &'a [u8],
     pos: &mut usize,
@@ -301,6 +308,10 @@ pub(crate) fn deserialize_record_borrowed<'a>(
 }
 
 /// Deserialize BoxMetadata in v1 format (no root).
+// [spec:box:sem:dictionaries.root]
+// [spec:box:req:wire.root.bounds.lengths-and-counts]
+// [spec:box:sem:records.root.references.deferred-relationships]
+// [spec:box:req:versioning.root.v1]
 pub(crate) fn deserialize_metadata_borrowed<'a>(
     data: &'a [u8],
     pos: &mut usize,

@@ -1,3 +1,631 @@
 schema_version 7
 
+last_sync_at 2026-08-15T21:50:30.711625Z
+
+rule_versions (
+    {id archive-state.root, version 0}
+    {id archive-state.root.reader, version 0}
+    {id archive-state.root.record-index, version 0}
+    {id archive-state.root.writer, version 0}
+    {id async-io.root, version 0}
+    {id async-io.root.open, version 0}
+    {id async-io.root.parallel-compression, version 1}
+    {id async-io.root.read, version 0}
+    {id async-io.root.streaming-insert, version 0}
+    {id async-io.root.writer-lifecycle, version 0}
+    {id attributes.root, version 0}
+    {id attributes.root.integrity, version 0}
+    {id attributes.root.standard-keys, version 0}
+    {id attributes.root.types, version 0}
+    {id c-api.root, version 0}
+    {id c-api.root.runtime-and-ownership, version 0}
+    {id checksums.root, version 0}
+    {id checksums.root.attachment, version 0}
+    {id checksums.root.attribute, version 0}
+    {id checksums.root.disabled, version 0}
+    {id checksums.root.logical-content-domain, version 0}
+    {id checksums.root.verification, version 0}
+    {id checksums.root.verification.checksum-less, version 0}
+    {id checksums.root.verification.cli-failure, version 0}
+    {id checksums.root.verification.extraction-statistics, version 0}
+    {id chunked-io.root, version 0}
+    {id chunked-io.root.async-range, version 0}
+    {id chunked-io.root.automatic-creation, version 0}
+    {id chunked-io.root.block-cache, version 0}
+    {id chunked-io.root.block-decompression, version 0}
+    {id chunked-io.root.block-index-entry, version 0}
+    {id chunked-io.root.block-queries, version 0}
+    {id chunked-io.root.explicit-insert, version 0}
+    {id chunked-io.root.seek-reader, version 0}
+    {id chunked-io.root.slice-extraction, version 0}
+    {id chunked-io.root.sync-range, version 0}
+    {id cli-commands.root, version 0}
+    {id cli-commands.root.create, version 1}
+    {id cli-commands.root.extract, version 0}
+    {id cli-commands.root.inspect, version 0}
+    {id cli-commands.root.validate, version 0}
+    {id cli-safety.root, version 0}
+    {id cli-safety.root.failure-status, version 0}
+    {id cli-safety.root.output-integrity, version 0}
+    {id cli-selection.root, version 0}
+    {id cli-selection.root.collection, version 0}
+    {id compression.root, version 0}
+    {id compression.root.codecs, version 0}
+    {id compression.root.stored, version 0}
+    {id compression.root.stream-state, version 0}
+    {id dictionaries.root, version 0}
+    {id dictionaries.root.training, version 0}
+    {id extraction.root, version 0}
+    {id extraction.root.checksum-verification, version 0}
+    {id extraction.root.external-symlink, version 0}
+    {id extraction.root.internal-symlink, version 0}
+    {id extraction.root.materialization, version 0}
+    {id extraction.root.parallel-ordering, version 0}
+    {id extraction.root.progress, version 0}
+    {id extraction.root.safety-options, version 0}
+    {id extraction.root.selection, version 2}
+    {id fskit-extension.root, version 0}
+    {id fskit-extension.root.probe-load-lifecycle, version 0}
+    {id fskit-extension.root.read-only-volume, version 0}
+    {id fskit-extension.root.record-mapping-and-cache, version 0}
+    {id fst-format.root, version 0}
+    {id fst-format.root.build, version 0}
+    {id fst-format.root.header-index, version 0}
+    {id fst-format.root.nodes, version 0}
+    {id fst-format.root.validation, version 0}
+    {id fst-queries.root, version 0}
+    {id fst-queries.root.archive-indexes, version 0}
+    {id fst-queries.root.predecessor, version 0}
+    {id fst-queries.root.prefix, version 0}
+    {id fuse-mount.root, version 0}
+    {id fuse-mount.root.file-data, version 0}
+    {id fuse-mount.root.links-and-xattrs, version 0}
+    {id fuse-mount.root.read-only-and-attributes, version 0}
+    {id kernel-abi.root, version 0}
+    {id kernel-abi.root.helpers-and-buffers, version 0}
+    {id kernel-abi.root.ownership-and-errors, version 0}
+    {id kernel-parser.root, version 0}
+    {id kernel-parser.root.header, version 0}
+    {id kernel-parser.root.records, version 0}
+    {id kernel-parser.root.trailer, version 0}
+    {id kernel-vfs.root, version 0}
+    {id kernel-vfs.root.data, version 0}
+    {id kernel-vfs.root.links-and-xattrs, version 0}
+    {id kernel-vfs.root.mount-lifecycle, version 0}
+    {id kernel-vfs.root.namespace, version 0}
+    {id multi-archive.root, version 0}
+    {id multi-archive.root.navigation, version 0}
+    {id multi-archive.root.precedence, version 0}
+    {id paths.root, version 0}
+    {id paths.root.encoding, version 0}
+    {id paths.root.extraction-gates, version 1}
+    {id paths.root.normalization, version 0}
+    {id projfs-provider.root, version 0}
+    {id projfs-provider.root.enumeration, version 0}
+    {id projfs-provider.root.file-data-and-errors, version 0}
+    {id projfs-provider.root.lifecycle, version 0}
+    {id projfs-provider.root.placeholders, version 0}
+    {id records.root, version 0}
+    {id records.root.file-records, version 0}
+    {id records.root.non-file-records, version 0}
+    {id records.root.references, version 0}
+    {id records.root.references.deferred-relationships, version 0}
+    {id records.root.references.external-header-flag, version 0}
+    {id records.root.references.insertion-target, version 0}
+    {id records.root.references.resolution, version 0}
+    {id records.root.type-byte, version 0}
+    {id sans-io.root, version 0}
+    {id sans-io.root.alignment, version 0}
+    {id sans-io.root.data-location, version 0}
+    {id sans-io.root.finalization, version 0}
+    {id sans-io.root.header-metadata, version 0}
+    {id sans-io.root.hierarchy, version 0}
+    {id sans-io.root.lookup, version 1}
+    {id sync-io.root, version 0}
+    {id sync-io.root.extraction-validation, version 2}
+    {id sync-io.root.open, version 0}
+    {id sync-io.root.read, version 0}
+    {id sync-io.root.write, version 0}
+    {id validation.root, version 0}
+    {id validation.root.parallel, version 0}
+    {id validation.root.payload-hash, version 0}
+    {id validation.root.results, version 0}
+    {id versioning.root, version 0}
+    {id versioning.root.v0, version 0}
+    {id versioning.root.v1, version 0}
+    {id wire.root, version 0}
+    {id wire.root.bounds, version 0}
+    {id wire.root.bounds.attrmap-envelope, version 0}
+    {id wire.root.bounds.fst-envelope, version 0}
+    {id wire.root.bounds.lengths-and-counts, version 0}
+    {id wire.root.bounds.record-scalars, version 0}
+    {id wire.root.header, version 0}
+    {id wire.root.primitives, version 0}
+)
+
+impl_evidence (
+    {id format.compression, covered_rules (
+        compression.root
+        compression.root.codecs
+        compression.root.stored
+        compression.root.stream-state
+    ), covered_claims (
+        {impl_name rust, rule compression.root}
+        {impl_name rust, rule compression.root.codecs}
+        {impl_name rust, rule compression.root.stored}
+        {impl_name rust, rule compression.root.stream-state}
+    ), rule_versions_seen (
+        {id compression.root, version 0}
+        {id compression.root.codecs, version 0}
+        {id compression.root.stored, version 0}
+        {id compression.root.stream-state, version 0}
+    )}
+    {id format.fst, covered_rules (
+        fst-format.root
+        fst-format.root.build
+        fst-format.root.header-index
+        fst-format.root.nodes
+        fst-format.root.validation
+        fst-queries.root
+        fst-queries.root.archive-indexes
+        fst-queries.root.predecessor
+        fst-queries.root.prefix
+    ), covered_claims (
+        {impl_name rust, rule fst-format.root}
+        {impl_name rust, rule fst-format.root.build}
+        {impl_name rust, rule fst-format.root.header-index}
+        {impl_name rust, rule fst-format.root.nodes}
+        {impl_name rust, rule fst-format.root.validation}
+        {impl_name rust, rule fst-queries.root}
+        {impl_name rust, rule fst-queries.root.archive-indexes}
+        {impl_name rust, rule fst-queries.root.predecessor}
+        {impl_name rust, rule fst-queries.root.prefix}
+    ), rule_versions_seen (
+        {id fst-format.root, version 0}
+        {id fst-format.root.build, version 0}
+        {id fst-format.root.header-index, version 0}
+        {id fst-format.root.nodes, version 0}
+        {id fst-format.root.validation, version 0}
+        {id fst-queries.root, version 0}
+        {id fst-queries.root.archive-indexes, version 0}
+        {id fst-queries.root.predecessor, version 0}
+        {id fst-queries.root.prefix, version 0}
+    )}
+    {id format.metadata-support, covered_rules (
+        attributes.root
+        attributes.root.integrity
+        attributes.root.standard-keys
+        attributes.root.types
+        checksums.root
+        checksums.root.attachment
+        checksums.root.attribute
+        checksums.root.disabled
+        checksums.root.logical-content-domain
+        checksums.root.verification
+        checksums.root.verification.checksum-less
+        checksums.root.verification.cli-failure
+        checksums.root.verification.extraction-statistics
+        dictionaries.root
+        dictionaries.root.training
+    ), covered_claims (
+        {impl_name rust, rule attributes.root}
+        {impl_name rust, rule attributes.root.integrity}
+        {impl_name rust, rule attributes.root.standard-keys}
+        {impl_name rust, rule attributes.root.types}
+        {impl_name rust, rule checksums.root}
+        {impl_name rust, rule checksums.root.attachment}
+        {impl_name rust, rule checksums.root.attribute}
+        {impl_name rust, rule checksums.root.disabled}
+        {impl_name rust, rule checksums.root.logical-content-domain}
+        {impl_name rust, rule checksums.root.verification}
+        {impl_name rust, rule checksums.root.verification.checksum-less}
+        {impl_name rust, rule checksums.root.verification.cli-failure}
+        {impl_name rust, rule checksums.root.verification.extraction-statistics}
+        {impl_name rust, rule dictionaries.root}
+        {impl_name rust, rule dictionaries.root.training}
+    ), rule_versions_seen (
+        {id attributes.root, version 0}
+        {id attributes.root.integrity, version 0}
+        {id attributes.root.standard-keys, version 0}
+        {id attributes.root.types, version 0}
+        {id checksums.root, version 0}
+        {id checksums.root.attachment, version 0}
+        {id checksums.root.attribute, version 0}
+        {id checksums.root.disabled, version 0}
+        {id checksums.root.logical-content-domain, version 0}
+        {id checksums.root.verification, version 0}
+        {id checksums.root.verification.checksum-less, version 0}
+        {id checksums.root.verification.cli-failure, version 0}
+        {id checksums.root.verification.extraction-statistics, version 0}
+        {id dictionaries.root, version 0}
+        {id dictionaries.root.training, version 0}
+    )}
+    {id format.paths, covered_rules (
+        paths.root
+        paths.root.encoding
+        paths.root.extraction-gates
+        paths.root.normalization
+    ), covered_claims (
+        {impl_name rust, rule paths.root}
+        {impl_name rust, rule paths.root.encoding}
+        {impl_name rust, rule paths.root.extraction-gates}
+        {impl_name rust, rule paths.root.normalization}
+    ), rule_versions_seen (
+        {id paths.root, version 0}
+        {id paths.root.encoding, version 0}
+        {id paths.root.extraction-gates, version 1}
+        {id paths.root.normalization, version 0}
+    )}
+    {id format.versioned-metadata, covered_rules (
+        versioning.root
+        versioning.root.v0
+        versioning.root.v1
+    ), covered_claims (
+        {impl_name rust, rule versioning.root}
+        {impl_name rust, rule versioning.root.v0}
+        {impl_name rust, rule versioning.root.v1}
+    ), rule_versions_seen (
+        {id versioning.root, version 0}
+        {id versioning.root.v0, version 0}
+        {id versioning.root.v1, version 0}
+    )}
+    {id format.wire-records, covered_rules (
+        records.root
+        records.root.file-records
+        records.root.non-file-records
+        records.root.references
+        records.root.references.deferred-relationships
+        records.root.references.external-header-flag
+        records.root.references.insertion-target
+        records.root.references.resolution
+        records.root.type-byte
+        wire.root
+        wire.root.bounds
+        wire.root.bounds.attrmap-envelope
+        wire.root.bounds.fst-envelope
+        wire.root.bounds.lengths-and-counts
+        wire.root.bounds.record-scalars
+        wire.root.header
+        wire.root.primitives
+    ), covered_claims (
+        {impl_name rust, rule records.root}
+        {impl_name rust, rule records.root.file-records}
+        {impl_name rust, rule records.root.non-file-records}
+        {impl_name rust, rule records.root.references}
+        {impl_name rust, rule records.root.references.deferred-relationships}
+        {impl_name rust, rule records.root.references.external-header-flag}
+        {impl_name rust, rule records.root.references.insertion-target}
+        {impl_name rust, rule records.root.references.resolution}
+        {impl_name rust, rule records.root.type-byte}
+        {impl_name rust, rule wire.root}
+        {impl_name rust, rule wire.root.bounds}
+        {impl_name rust, rule wire.root.bounds.attrmap-envelope}
+        {impl_name rust, rule wire.root.bounds.fst-envelope}
+        {impl_name rust, rule wire.root.bounds.lengths-and-counts}
+        {impl_name rust, rule wire.root.bounds.record-scalars}
+        {impl_name rust, rule wire.root.header}
+        {impl_name rust, rule wire.root.primitives}
+    ), rule_versions_seen (
+        {id records.root, version 0}
+        {id records.root.file-records, version 0}
+        {id records.root.non-file-records, version 0}
+        {id records.root.references, version 0}
+        {id records.root.references.deferred-relationships, version 0}
+        {id records.root.references.external-header-flag, version 0}
+        {id records.root.references.insertion-target, version 0}
+        {id records.root.references.resolution, version 0}
+        {id records.root.type-byte, version 0}
+        {id wire.root, version 0}
+        {id wire.root.bounds, version 0}
+        {id wire.root.bounds.attrmap-envelope, version 0}
+        {id wire.root.bounds.fst-envelope, version 0}
+        {id wire.root.bounds.lengths-and-counts, version 0}
+        {id wire.root.bounds.record-scalars, version 0}
+        {id wire.root.header, version 0}
+        {id wire.root.primitives, version 0}
+    )}
+    {id integration.c-api, covered_rules (
+        c-api.root
+        c-api.root.runtime-and-ownership
+    ), covered_claims (
+        {impl_name rust, rule c-api.root}
+        {impl_name rust, rule c-api.root.runtime-and-ownership}
+    ), rule_versions_seen (
+        {id c-api.root, version 0}
+        {id c-api.root.runtime-and-ownership, version 0}
+    )}
+    {id integration.cli, covered_rules (
+        cli-commands.root
+        cli-commands.root.create
+        cli-commands.root.extract
+        cli-commands.root.inspect
+        cli-commands.root.validate
+        cli-safety.root
+        cli-safety.root.failure-status
+        cli-safety.root.output-integrity
+        cli-selection.root
+        cli-selection.root.collection
+    ), covered_claims (
+        {impl_name rust, rule cli-commands.root}
+        {impl_name rust, rule cli-commands.root.create}
+        {impl_name rust, rule cli-commands.root.extract}
+        {impl_name rust, rule cli-commands.root.inspect}
+        {impl_name rust, rule cli-commands.root.validate}
+        {impl_name rust, rule cli-safety.root}
+        {impl_name rust, rule cli-safety.root.failure-status}
+        {impl_name rust, rule cli-safety.root.output-integrity}
+        {impl_name rust, rule cli-selection.root}
+        {impl_name rust, rule cli-selection.root.collection}
+    ), rule_versions_seen (
+        {id cli-commands.root, version 0}
+        {id cli-commands.root.create, version 1}
+        {id cli-commands.root.extract, version 0}
+        {id cli-commands.root.inspect, version 0}
+        {id cli-commands.root.validate, version 0}
+        {id cli-safety.root, version 0}
+        {id cli-safety.root.failure-status, version 0}
+        {id cli-safety.root.output-integrity, version 0}
+        {id cli-selection.root, version 0}
+        {id cli-selection.root.collection, version 0}
+    )}
+    {id integration.fskit, covered_rules (
+        fskit-extension.root
+        fskit-extension.root.probe-load-lifecycle
+        fskit-extension.root.read-only-volume
+        fskit-extension.root.record-mapping-and-cache
+    ), covered_claims (
+        {impl_name rust, rule fskit-extension.root}
+        {impl_name rust, rule fskit-extension.root.probe-load-lifecycle}
+        {impl_name rust, rule fskit-extension.root.read-only-volume}
+        {impl_name rust, rule fskit-extension.root.record-mapping-and-cache}
+    ), rule_versions_seen (
+        {id fskit-extension.root, version 0}
+        {id fskit-extension.root.probe-load-lifecycle, version 0}
+        {id fskit-extension.root.read-only-volume, version 0}
+        {id fskit-extension.root.record-mapping-and-cache, version 0}
+    )}
+    {id integration.fuse, covered_rules (
+        fuse-mount.root
+        fuse-mount.root.file-data
+        fuse-mount.root.links-and-xattrs
+        fuse-mount.root.read-only-and-attributes
+        multi-archive.root
+        multi-archive.root.navigation
+        multi-archive.root.precedence
+    ), covered_claims (
+        {impl_name rust, rule fuse-mount.root}
+        {impl_name rust, rule fuse-mount.root.file-data}
+        {impl_name rust, rule fuse-mount.root.links-and-xattrs}
+        {impl_name rust, rule fuse-mount.root.read-only-and-attributes}
+        {impl_name rust, rule multi-archive.root}
+        {impl_name rust, rule multi-archive.root.navigation}
+        {impl_name rust, rule multi-archive.root.precedence}
+    ), rule_versions_seen (
+        {id fuse-mount.root, version 0}
+        {id fuse-mount.root.file-data, version 0}
+        {id fuse-mount.root.links-and-xattrs, version 0}
+        {id fuse-mount.root.read-only-and-attributes, version 0}
+        {id multi-archive.root, version 0}
+        {id multi-archive.root.navigation, version 0}
+        {id multi-archive.root.precedence, version 0}
+    )}
+    {id integration.kernel, covered_rules (
+        kernel-abi.root
+        kernel-abi.root.helpers-and-buffers
+        kernel-abi.root.ownership-and-errors
+        kernel-parser.root
+        kernel-parser.root.header
+        kernel-parser.root.records
+        kernel-parser.root.trailer
+        kernel-vfs.root
+        kernel-vfs.root.data
+        kernel-vfs.root.links-and-xattrs
+        kernel-vfs.root.mount-lifecycle
+        kernel-vfs.root.namespace
+    ), covered_claims (
+        {impl_name rust, rule kernel-abi.root}
+        {impl_name rust, rule kernel-abi.root.helpers-and-buffers}
+        {impl_name rust, rule kernel-abi.root.ownership-and-errors}
+        {impl_name rust, rule kernel-parser.root}
+        {impl_name rust, rule kernel-parser.root.header}
+        {impl_name rust, rule kernel-parser.root.records}
+        {impl_name rust, rule kernel-parser.root.trailer}
+        {impl_name rust, rule kernel-vfs.root}
+        {impl_name rust, rule kernel-vfs.root.data}
+        {impl_name rust, rule kernel-vfs.root.links-and-xattrs}
+        {impl_name rust, rule kernel-vfs.root.mount-lifecycle}
+        {impl_name rust, rule kernel-vfs.root.namespace}
+    ), rule_versions_seen (
+        {id kernel-abi.root, version 0}
+        {id kernel-abi.root.helpers-and-buffers, version 0}
+        {id kernel-abi.root.ownership-and-errors, version 0}
+        {id kernel-parser.root, version 0}
+        {id kernel-parser.root.header, version 0}
+        {id kernel-parser.root.records, version 0}
+        {id kernel-parser.root.trailer, version 0}
+        {id kernel-vfs.root, version 0}
+        {id kernel-vfs.root.data, version 0}
+        {id kernel-vfs.root.links-and-xattrs, version 0}
+        {id kernel-vfs.root.mount-lifecycle, version 0}
+        {id kernel-vfs.root.namespace, version 0}
+    )}
+    {id integration.projfs, covered_rules (
+        projfs-provider.root
+        projfs-provider.root.enumeration
+        projfs-provider.root.file-data-and-errors
+        projfs-provider.root.lifecycle
+        projfs-provider.root.placeholders
+    ), covered_claims (
+        {impl_name rust, rule projfs-provider.root}
+        {impl_name rust, rule projfs-provider.root.enumeration}
+        {impl_name rust, rule projfs-provider.root.file-data-and-errors}
+        {impl_name rust, rule projfs-provider.root.lifecycle}
+        {impl_name rust, rule projfs-provider.root.placeholders}
+    ), rule_versions_seen (
+        {id projfs-provider.root, version 0}
+        {id projfs-provider.root.enumeration, version 0}
+        {id projfs-provider.root.file-data-and-errors, version 0}
+        {id projfs-provider.root.lifecycle, version 0}
+        {id projfs-provider.root.placeholders, version 0}
+    )}
+    {id io.async, covered_rules (
+        async-io.root
+        async-io.root.open
+        async-io.root.parallel-compression
+        async-io.root.read
+        async-io.root.streaming-insert
+        async-io.root.writer-lifecycle
+        extraction.root
+        extraction.root.checksum-verification
+        extraction.root.external-symlink
+        extraction.root.internal-symlink
+        extraction.root.materialization
+        extraction.root.parallel-ordering
+        extraction.root.progress
+        extraction.root.safety-options
+        extraction.root.selection
+        validation.root
+        validation.root.parallel
+        validation.root.payload-hash
+        validation.root.results
+    ), covered_claims (
+        {impl_name rust, rule async-io.root}
+        {impl_name rust, rule async-io.root.open}
+        {impl_name rust, rule async-io.root.parallel-compression}
+        {impl_name rust, rule async-io.root.read}
+        {impl_name rust, rule async-io.root.streaming-insert}
+        {impl_name rust, rule async-io.root.writer-lifecycle}
+        {impl_name rust, rule extraction.root}
+        {impl_name rust, rule extraction.root.checksum-verification}
+        {impl_name rust, rule extraction.root.external-symlink}
+        {impl_name rust, rule extraction.root.internal-symlink}
+        {impl_name rust, rule extraction.root.materialization}
+        {impl_name rust, rule extraction.root.parallel-ordering}
+        {impl_name rust, rule extraction.root.progress}
+        {impl_name rust, rule extraction.root.safety-options}
+        {impl_name rust, rule extraction.root.selection}
+        {impl_name rust, rule validation.root}
+        {impl_name rust, rule validation.root.parallel}
+        {impl_name rust, rule validation.root.payload-hash}
+        {impl_name rust, rule validation.root.results}
+    ), rule_versions_seen (
+        {id async-io.root, version 0}
+        {id async-io.root.open, version 0}
+        {id async-io.root.parallel-compression, version 1}
+        {id async-io.root.read, version 0}
+        {id async-io.root.streaming-insert, version 0}
+        {id async-io.root.writer-lifecycle, version 0}
+        {id extraction.root, version 0}
+        {id extraction.root.checksum-verification, version 0}
+        {id extraction.root.external-symlink, version 0}
+        {id extraction.root.internal-symlink, version 0}
+        {id extraction.root.materialization, version 0}
+        {id extraction.root.parallel-ordering, version 0}
+        {id extraction.root.progress, version 0}
+        {id extraction.root.safety-options, version 0}
+        {id extraction.root.selection, version 2}
+        {id validation.root, version 0}
+        {id validation.root.parallel, version 0}
+        {id validation.root.payload-hash, version 0}
+        {id validation.root.results, version 0}
+    )}
+    {id io.automatic-chunked-creation, covered_rules (
+        chunked-io.root.automatic-creation
+    ), covered_claims (
+        {impl_name rust, rule chunked-io.root.automatic-creation}
+    ), rule_versions_seen (
+        {id chunked-io.root.automatic-creation, version 0}
+    )}
+    {id io.chunked, covered_rules (
+        chunked-io.root
+        chunked-io.root.async-range
+        chunked-io.root.block-cache
+        chunked-io.root.block-decompression
+        chunked-io.root.block-index-entry
+        chunked-io.root.block-queries
+        chunked-io.root.explicit-insert
+        chunked-io.root.seek-reader
+        chunked-io.root.slice-extraction
+        chunked-io.root.sync-range
+    ), covered_claims (
+        {impl_name rust, rule chunked-io.root}
+        {impl_name rust, rule chunked-io.root.async-range}
+        {impl_name rust, rule chunked-io.root.block-cache}
+        {impl_name rust, rule chunked-io.root.block-decompression}
+        {impl_name rust, rule chunked-io.root.block-index-entry}
+        {impl_name rust, rule chunked-io.root.block-queries}
+        {impl_name rust, rule chunked-io.root.explicit-insert}
+        {impl_name rust, rule chunked-io.root.seek-reader}
+        {impl_name rust, rule chunked-io.root.slice-extraction}
+        {impl_name rust, rule chunked-io.root.sync-range}
+    ), rule_versions_seen (
+        {id chunked-io.root, version 0}
+        {id chunked-io.root.async-range, version 0}
+        {id chunked-io.root.block-cache, version 0}
+        {id chunked-io.root.block-decompression, version 0}
+        {id chunked-io.root.block-index-entry, version 0}
+        {id chunked-io.root.block-queries, version 0}
+        {id chunked-io.root.explicit-insert, version 0}
+        {id chunked-io.root.seek-reader, version 0}
+        {id chunked-io.root.slice-extraction, version 0}
+        {id chunked-io.root.sync-range, version 0}
+    )}
+    {id io.sans, covered_rules (
+        archive-state.root
+        archive-state.root.reader
+        archive-state.root.record-index
+        archive-state.root.writer
+        sans-io.root
+        sans-io.root.alignment
+        sans-io.root.data-location
+        sans-io.root.finalization
+        sans-io.root.header-metadata
+        sans-io.root.hierarchy
+        sans-io.root.lookup
+    ), covered_claims (
+        {impl_name rust, rule archive-state.root}
+        {impl_name rust, rule archive-state.root.reader}
+        {impl_name rust, rule archive-state.root.record-index}
+        {impl_name rust, rule archive-state.root.writer}
+        {impl_name rust, rule sans-io.root}
+        {impl_name rust, rule sans-io.root.alignment}
+        {impl_name rust, rule sans-io.root.data-location}
+        {impl_name rust, rule sans-io.root.finalization}
+        {impl_name rust, rule sans-io.root.header-metadata}
+        {impl_name rust, rule sans-io.root.hierarchy}
+        {impl_name rust, rule sans-io.root.lookup}
+    ), rule_versions_seen (
+        {id archive-state.root, version 0}
+        {id archive-state.root.reader, version 0}
+        {id archive-state.root.record-index, version 0}
+        {id archive-state.root.writer, version 0}
+        {id sans-io.root, version 0}
+        {id sans-io.root.alignment, version 0}
+        {id sans-io.root.data-location, version 0}
+        {id sans-io.root.finalization, version 0}
+        {id sans-io.root.header-metadata, version 0}
+        {id sans-io.root.hierarchy, version 0}
+        {id sans-io.root.lookup, version 1}
+    )}
+    {id io.sync, covered_rules (
+        sync-io.root
+        sync-io.root.extraction-validation
+        sync-io.root.open
+        sync-io.root.read
+        sync-io.root.write
+    ), covered_claims (
+        {impl_name rust, rule sync-io.root}
+        {impl_name rust, rule sync-io.root.extraction-validation}
+        {impl_name rust, rule sync-io.root.open}
+        {impl_name rust, rule sync-io.root.read}
+        {impl_name rust, rule sync-io.root.write}
+    ), rule_versions_seen (
+        {id sync-io.root, version 0}
+        {id sync-io.root.extraction-validation, version 2}
+        {id sync-io.root.open, version 0}
+        {id sync-io.root.read, version 0}
+        {id sync-io.root.write, version 0}
+    )}
+)
+
 onboarding {kind @adopt, phase 6}
