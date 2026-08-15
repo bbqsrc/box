@@ -1,21 +1,28 @@
 //! Path conversion utilities between BoxPath and Windows paths.
 
-use box_format::path::{BoxPath, PATH_BOX_SEP};
+use std::path::PathBuf;
+
+use box_format::path::BoxPath;
 
 /// Convert a Windows relative path (from ProjFS callback) to BoxPath.
 ///
-/// Windows paths use `\` separator, BoxPath uses `\x1f`.
+/// Windows paths use `\` separators. Each callback component is validated
+/// before constructing the archive path.
 /// Empty paths return None (represents root directory).
 pub fn windows_to_box_path(windows_path: &str) -> Option<BoxPath<'static>> {
     if windows_path.is_empty() {
         return None;
     }
 
-    // Replace Windows separator with Box separator
-    let box_path_str = windows_path.replace('\\', PATH_BOX_SEP);
+    let mut native_path = PathBuf::new();
+    for component in windows_path.split(['\\', '/']) {
+        if component.is_empty() || component == "." || component == ".." {
+            return None;
+        }
+        native_path.push(component);
+    }
 
-    // Use BoxPath::new to ensure proper sanitization
-    BoxPath::new(&box_path_str).ok()
+    BoxPath::new(native_path).ok()
 }
 
 /// Convert a BoxPath to Windows relative path string.
@@ -30,12 +37,14 @@ pub fn to_wide_string(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
+#[cfg(windows)]
 use windows::core::PCWSTR;
 
 /// Convert a PCWSTR to Rust String.
 ///
 /// # Safety
 /// The pointer must be valid and null-terminated.
+#[cfg(windows)]
 pub unsafe fn pcwstr_to_string(s: PCWSTR) -> String {
     if s.is_null() {
         return String::new();
@@ -57,7 +66,15 @@ mod tests {
         let result = windows_to_box_path("foo\\bar\\baz.txt");
         assert!(result.is_some());
         let bp = result.unwrap();
+        assert_eq!(bp.iter().collect::<Vec<_>>(), ["foo", "bar", "baz.txt"]);
         assert_eq!(bp.filename(), "baz.txt");
+    }
+
+    #[test]
+    fn windows_to_box_path_rejects_non_relative_parts() {
+        assert!(windows_to_box_path("foo\\..\\bar").is_none());
+        assert!(windows_to_box_path("foo\\\\bar").is_none());
+        assert!(windows_to_box_path("\\foo").is_none());
     }
 
     #[test]

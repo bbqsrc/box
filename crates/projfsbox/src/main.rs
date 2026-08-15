@@ -1,12 +1,14 @@
 //! projfsbox CLI - Mount .box archives as virtual filesystems using Windows ProjFS.
 
-#![cfg(windows)]
-
+#[cfg(windows)]
 use std::path::PathBuf;
+#[cfg(windows)]
 use std::sync::Arc;
 
+#[cfg(windows)]
 use clap::Parser;
 
+#[cfg(windows)]
 #[derive(Parser)]
 #[command(name = "projfsbox")]
 #[command(about = "Mount .box archives as virtual filesystems using Windows ProjFS")]
@@ -21,6 +23,7 @@ struct Args {
     mountpoint: PathBuf,
 }
 
+#[cfg(windows)]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -83,7 +86,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Start virtualization
     tracing::info!("Starting ProjFS virtualization...");
-    provider.clone().start()?;
+    provider.start()?;
 
     println!(
         "Mounted {} at {}",
@@ -106,6 +109,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 }
 
+#[cfg(not(windows))]
+fn main() {
+    eprintln!("projfsbox is supported only on Windows");
+}
+
+#[cfg(windows)]
 fn ctrlc_handler<F: Fn() + Send + Sync + 'static>(
     handler: F,
 ) -> Result<(), Box<dyn std::error::Error>> {

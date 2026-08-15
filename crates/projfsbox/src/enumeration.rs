@@ -11,14 +11,17 @@ pub struct EnumerationEntry {
     pub index: RecordIndex,
     /// Whether this entry is a directory.
     pub is_directory: bool,
-    /// File size in bytes (0 for directories).
-    pub file_size: u64,
+    /// File size in bytes (0 for directories and links), represented in the
+    /// signed form required by the ProjFS ABI.
+    pub file_size: i64,
     /// Creation time as Windows FILETIME.
     pub creation_time: i64,
     /// Last write time as Windows FILETIME.
     pub last_write_time: i64,
     /// Windows file attributes.
     pub file_attributes: u32,
+    /// Windows-relative symlink target for ProjFS extended information.
+    pub symlink_target: Option<String>,
 }
 
 /// Windows file attribute constants.
@@ -183,6 +186,7 @@ pub fn matches_search_expression(name: &str, search: &str) -> bool {
 mod tests {
     use super::*;
 
+    // [spec:box:req:projfs-provider.root.enumeration/test]
     #[test]
     fn test_matches_star() {
         assert!(matches_search_expression("test.txt", "*"));
@@ -192,6 +196,7 @@ mod tests {
         assert!(!matches_search_expression("test.txt", "*.doc"));
     }
 
+    // [spec:box:req:projfs-provider.root.enumeration/test]
     #[test]
     fn test_matches_question() {
         assert!(matches_search_expression("test.txt", "????.txt"));
@@ -199,6 +204,7 @@ mod tests {
         assert!(matches_search_expression("a.txt", "?.txt"));
     }
 
+    // [spec:box:req:projfs-provider.root.enumeration/test]
     #[test]
     fn test_matches_case_insensitive() {
         assert!(matches_search_expression("TEST.TXT", "test.txt"));

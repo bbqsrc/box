@@ -8,13 +8,22 @@ use box_format::{BoxFileReader, Record, RecordIndex};
 use tokio::runtime::Runtime;
 
 use crate::enumeration::EnumerationSession;
+use crate::file_data::logical_file_buffer;
+use crate::lifecycle::{CallbackOwner, HRESULT_ALREADY_EXISTS, is_already_exists_hresult};
 
 use windows::Win32::Storage::ProjectedFileSystem::PRJ_NAMESPACE_VIRTUALIZATION_CONTEXT;
+
+struct VirtualizationState {
+    namespace_context: PRJ_NAMESPACE_VIRTUALIZATION_CONTEXT,
+    _callback_owner: Box<CallbackOwner<BoxProvider>>,
+}
 
 /// The main ProjFS provider that coordinates access to a `.box` archive.
 ///
 /// This struct holds the archive reader, caches, and enumeration sessions.
-/// It is passed as the `instanceContext` to ProjFS and must outlive all callbacks.
+/// ProjFS receives a stable weak callback owner and each callback upgrades it
+/// for the duration of that call.
+// [spec:box:req:projfs-provider.root]
 pub struct BoxProvider {
     /// The opened box archive reader.
     pub(crate) reader: BoxFileReader,
@@ -29,7 +38,7 @@ pub struct BoxProvider {
     /// The virtualization root path.
     pub(crate) root_path: PathBuf,
     /// ProjFS namespace handle (set after start).
-    pub(crate) namespace_context: Mutex<Option<PRJ_NAMESPACE_VIRTUALIZATION_CONTEXT>>,
+    namespace_context: Mutex<Option<VirtualizationState>>,
 }
 
 // Safety: BoxProvider is thread-safe because:
@@ -91,36 +100,54 @@ impl BoxProvider {
     }
 
     /// Get or decompress file data, using cache if available.
+    // [spec:box:req:projfs-provider.root.file-data-and-errors]
     pub fn get_or_decompress(&self, index: RecordIndex) -> std::io::Result<Vec<u8>> {
         // Check cache first
         {
-            let cache = self.cache.read().unwrap();
+            let cache = self
+                .cache
+                .read()
+                .map_err(|_| std::io::Error::other("ProjFS file cache is poisoned"))?;
             if let Some(cached) = cache.get(&index) {
                 return Ok(cached.clone());
             }
         }
 
-        // Get the record
-        let record = self
-            .reader
-            .metadata()
-            .record(index)
-            .and_then(|r| r.as_file())
-            .ok_or_else(|| {
-                std::io::Error::new(
-                    std::io::ErrorKind::NotFound,
-                    "Record not found or not a file",
-                )
+        // Get the record and reconstruct its complete logical contents. ProjFS
+        // may request arbitrary aligned ranges later, so both ordinary and
+        // chunked records share the same whole-file cache contract.
+        let record =
+            self.reader.metadata().record(index).ok_or_else(|| {
+                std::io::Error::new(std::io::ErrorKind::NotFound, "Record not found")
             })?;
 
-        // Decompress using async runtime
-        let mut buf = Vec::with_capacity(record.decompressed_length as usize);
-        self.runtime
-            .block_on(self.reader.decompress(record, &mut buf))?;
+        let buf = match record {
+            Record::File(file) => {
+                let mut buf = logical_file_buffer(file.decompressed_length)?;
+                self.runtime
+                    .block_on(self.reader.decompress(file, &mut buf))?;
+                buf
+            }
+            Record::ChunkedFile(file) => {
+                let mut buf = logical_file_buffer(file.decompressed_length)?;
+                self.runtime
+                    .block_on(self.reader.decompress_chunked(file, index, &mut buf))?;
+                buf
+            }
+            _ => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "Record is not a hydratable file",
+                ));
+            }
+        };
 
         // Cache and return
         {
-            let mut cache = self.cache.write().unwrap();
+            let mut cache = self
+                .cache
+                .write()
+                .map_err(|_| std::io::Error::other("ProjFS file cache is poisoned"))?;
             cache.insert(index, buf.clone());
         }
 
@@ -156,9 +183,24 @@ impl BoxProvider {
     }
 
     /// Start the ProjFS virtualization instance.
-    pub fn start(self: Arc<Self>) -> Result<(), windows::core::Error> {
+    // [spec:box:req:projfs-provider.root]
+    // [spec:box:req:projfs-provider.root.lifecycle]
+    pub fn start(self: &Arc<Self>) -> Result<(), windows::core::Error> {
+        use windows::Win32::Foundation::E_FAIL;
         use windows::Win32::Storage::ProjectedFileSystem::*;
-        use windows::core::PCWSTR;
+        use windows::core::{Error, HRESULT, PCWSTR};
+
+        let mut namespace_context = self
+            .namespace_context
+            .lock()
+            .map_err(|_| Error::new(E_FAIL, "ProjFS provider lifecycle state is poisoned"))?;
+
+        if namespace_context.is_some() {
+            return Err(Error::new(
+                HRESULT(HRESULT_ALREADY_EXISTS),
+                "ProjFS provider is already started",
+            ));
+        }
 
         let root_wide = crate::path::to_wide_string(&self.root_path.to_string_lossy());
 
@@ -173,9 +215,8 @@ impl BoxProvider {
             ) {
                 Ok(()) => {}
                 Err(e) => {
-                    // Ignore ERROR_ALREADY_EXISTS (0x800700B7)
-                    if e.code().0 != -2147024713 {
-                        tracing::warn!("PrjMarkDirectoryAsPlaceholder: {:?}", e);
+                    if !is_already_exists_hresult(e.code().0) {
+                        return Err(e);
                     }
                 }
             }
@@ -193,8 +234,11 @@ impl BoxProvider {
             CancelCommandCallback: None,
         };
 
-        // Leak Arc to get stable pointer for ProjFS lifetime
-        let provider_ptr = Arc::into_raw(Arc::clone(&self));
+        // ProjFS keeps this stable box address only until stop returns. The box
+        // contains a Weak, and each callback upgrades it to an Arc for exactly
+        // the duration of that callback.
+        let callback_owner = Box::new(CallbackOwner::new(self));
+        let provider_ptr = std::ptr::from_ref(callback_owner.as_ref());
 
         // SAFETY: All parameters are valid, callbacks are extern "system" fn
         let context = unsafe {
@@ -207,7 +251,10 @@ impl BoxProvider {
         };
 
         // Store context for later cleanup
-        *self.namespace_context.lock().unwrap() = Some(context);
+        *namespace_context = Some(VirtualizationState {
+            namespace_context: context,
+            _callback_owner: callback_owner,
+        });
 
         tracing::info!(
             "Started ProjFS virtualization at {}",
@@ -218,13 +265,23 @@ impl BoxProvider {
     }
 
     /// Stop the ProjFS virtualization instance.
+    // [spec:box:req:projfs-provider.root.lifecycle]
     pub fn stop(&self) {
         use windows::Win32::Storage::ProjectedFileSystem::PrjStopVirtualizing;
 
-        if let Some(ctx) = self.namespace_context.lock().unwrap().take() {
+        let context = match self.namespace_context.lock() {
+            Ok(mut context) => context.take(),
+            Err(poisoned) => poisoned.into_inner().take(),
+        };
+
+        if let Some(state) = context {
             unsafe {
-                PrjStopVirtualizing(ctx);
+                PrjStopVirtualizing(state.namespace_context);
             }
+            // `PrjStopVirtualizing` has returned, so no callback can still use
+            // the stable callback-owner address. Dropping the state now frees
+            // its Weak without retaining the provider.
+            drop(state);
             tracing::info!(
                 "Stopped ProjFS virtualization at {}",
                 self.root_path.display()

@@ -3,19 +3,23 @@
 //! These callbacks are invoked by Windows when the filesystem is accessed.
 //! Each callback receives a `PRJ_CALLBACK_DATA` containing context and request info.
 
+use std::sync::Arc;
+
 use box_format::{Record, attrs};
-use fastvint::ReadVintExt;
 use windows::Win32::Foundation::{
-    ERROR_FILE_NOT_FOUND, ERROR_INSUFFICIENT_BUFFER, ERROR_NOT_ENOUGH_MEMORY,
+    E_FAIL, ERROR_FILE_NOT_FOUND, ERROR_INSUFFICIENT_BUFFER, ERROR_INVALID_PARAMETER,
+    ERROR_NOT_ENOUGH_MEMORY,
 };
 use windows::Win32::Storage::ProjectedFileSystem::*;
 use windows::core::{HRESULT, PCWSTR};
 
 use crate::enumeration::{EnumerationEntry, file_attributes, matches_search_expression};
 use crate::error::hresult;
+use crate::file_data::{FileSizeOutOfRange, checked_file_data_range, checked_file_size};
+use crate::lifecycle::CallbackOwner;
 use crate::path::{pcwstr_to_string, to_wide_string};
 use crate::provider::BoxProvider;
-use crate::time::{box_to_filetime, now_as_filetime};
+use crate::time::{box_to_filetime, now_as_filetime, record_timestamp_minutes};
 
 /// Convert a GUID to u128 for use as a map key.
 fn guid_to_u128(guid: &windows::core::GUID) -> u128 {
@@ -30,35 +34,41 @@ fn guid_to_u128(guid: &windows::core::GUID) -> u128 {
 /// Get provider from callback data.
 ///
 /// # Safety
-/// Assumes InstanceContext is a valid pointer to BoxProvider.
-unsafe fn get_provider<'a>(callback_data: &PRJ_CALLBACK_DATA) -> &'a BoxProvider {
-    // SAFETY: Caller guarantees InstanceContext is valid BoxProvider pointer
-    unsafe { &*(callback_data.InstanceContext as *const BoxProvider) }
+/// Assumes `InstanceContext` is the stable `CallbackOwner<BoxProvider>` pointer
+/// installed by `BoxProvider::start` and retained until stop completes.
+unsafe fn get_provider(callback_data: &PRJ_CALLBACK_DATA) -> Result<Arc<BoxProvider>, HRESULT> {
+    let callback_owner = callback_data.InstanceContext as *const CallbackOwner<BoxProvider>;
+    if callback_owner.is_null() {
+        return Err(E_FAIL);
+    }
+
+    // SAFETY: the callback-owner box remains alive until
+    // PrjStopVirtualizing returns. Upgrading its Weak pins the provider for this
+    // callback and fails once destruction has begun.
+    unsafe { &*callback_owner }.upgrade().ok_or(E_FAIL)
 }
 
 /// Extract timestamp from a record's attribute.
 fn get_record_timestamp(provider: &BoxProvider, record: &Record<'_>, attr: &str) -> i64 {
-    record
-        .attr(provider.reader.metadata(), attr)
-        .and_then(|bytes| {
-            let mut cursor = std::io::Cursor::new(bytes);
-            cursor.read_vi64().ok()
-        })
+    record_timestamp_minutes(provider.reader.metadata(), record, attr)
         .map(box_to_filetime)
         .unwrap_or_else(now_as_filetime)
 }
 
 /// Build EnumerationEntry from a record.
+// [spec:box:req:projfs-provider.root.placeholders]
 fn record_to_entry(
     provider: &BoxProvider,
     name: String,
     index: box_format::RecordIndex,
     record: &Record<'_>,
-) -> EnumerationEntry {
-    let (is_directory, file_size) = match record {
-        Record::File(f) => (false, f.decompressed_length),
-        Record::Directory(_) => (true, 0),
-        Record::Link(_) => (false, 0), // Treat links as files for now
+) -> Result<EnumerationEntry, FileSizeOutOfRange> {
+    let (is_directory, file_size, symlink_target) = match record {
+        Record::File(f) => (false, checked_file_size(f.decompressed_length)?, None),
+        Record::ChunkedFile(f) => (false, checked_file_size(f.decompressed_length)?, None),
+        Record::Directory(_) => (true, 0, None),
+        Record::Link(_) => (false, 0, None), // Treat internal links as files for now
+        Record::ExternalLink(link) => (false, 0, Some(link.target.replace('/', "\\"))),
     };
 
     let creation_time = get_record_timestamp(provider, record, attrs::CREATED);
@@ -71,7 +81,7 @@ fn record_to_entry(
         file_attributes::FILE_ATTRIBUTE_ARCHIVE | file_attributes::FILE_ATTRIBUTE_READONLY
     };
 
-    EnumerationEntry {
+    Ok(EnumerationEntry {
         name,
         index,
         is_directory,
@@ -79,12 +89,24 @@ fn record_to_entry(
         creation_time,
         last_write_time,
         file_attributes,
+        symlink_target,
+    })
+}
+
+fn symlink_extended_info(target: PCWSTR) -> PRJ_EXTENDED_INFO {
+    PRJ_EXTENDED_INFO {
+        InfoType: PRJ_EXT_INFO_TYPE_SYMLINK,
+        NextInfoOffset: 0,
+        Anonymous: PRJ_EXTENDED_INFO_0 {
+            Symlink: PRJ_EXTENDED_INFO_0_0 { TargetName: target },
+        },
     }
 }
 
 /// PRJ_START_DIRECTORY_ENUMERATION_CB implementation.
 ///
 /// Called when a directory enumeration is starting.
+// [spec:box:req:projfs-provider.root.enumeration]
 pub unsafe extern "system" fn start_directory_enumeration(
     callback_data: *const PRJ_CALLBACK_DATA,
     enumeration_id: *const windows::core::GUID,
@@ -92,7 +114,10 @@ pub unsafe extern "system" fn start_directory_enumeration(
     // SAFETY: ProjFS guarantees callback_data and enumeration_id are valid
     unsafe {
         let data = &*callback_data;
-        let provider = get_provider(data);
+        let provider = match get_provider(data) {
+            Ok(provider) => provider,
+            Err(error) => return error,
+        };
 
         let path = pcwstr_to_string(data.FilePathName);
         tracing::debug!("start_directory_enumeration: {}", path);
@@ -124,6 +149,7 @@ pub unsafe extern "system" fn start_directory_enumeration(
 /// PRJ_GET_DIRECTORY_ENUMERATION_CB implementation.
 ///
 /// Called to get directory entries. May be called multiple times if buffer fills.
+// [spec:box:req:projfs-provider.root.enumeration]
 pub unsafe extern "system" fn get_directory_enumeration(
     callback_data: *const PRJ_CALLBACK_DATA,
     enumeration_id: *const windows::core::GUID,
@@ -133,7 +159,10 @@ pub unsafe extern "system" fn get_directory_enumeration(
     // SAFETY: ProjFS guarantees all pointers are valid
     unsafe {
         let data = &*callback_data;
-        let provider = get_provider(data);
+        let provider = match get_provider(data) {
+            Ok(provider) => provider,
+            Err(error) => return error,
+        };
         let guid = guid_to_u128(&*enumeration_id);
 
         let search = if search_expression.is_null() {
@@ -169,12 +198,27 @@ pub unsafe extern "system" fn get_directory_enumeration(
                 };
 
                 let search_pattern = session.search_expression();
-                let entries: Vec<EnumerationEntry> = records
+                let entries = records
                     .into_iter()
                     .map(|(idx, record)| {
                         let name = record.name().to_string();
-                        record_to_entry(provider, name, idx, record)
+                        record_to_entry(&provider, name, idx, record)
                     })
+                    .collect::<Result<Vec<EnumerationEntry>, FileSizeOutOfRange>>();
+
+                let entries = match entries {
+                    Ok(entries) => entries,
+                    Err(FileSizeOutOfRange(file_size)) => {
+                        tracing::warn!(
+                            file_size,
+                            "Archive file size cannot be represented by the ProjFS ABI"
+                        );
+                        return hresult::from_win32(ERROR_INVALID_PARAMETER.0);
+                    }
+                };
+
+                let entries = entries
+                    .into_iter()
                     .filter(|entry| {
                         search_pattern
                             .map(|s| matches_search_expression(&entry.name, s))
@@ -191,7 +235,7 @@ pub unsafe extern "system" fn get_directory_enumeration(
 
                 let file_info = PRJ_FILE_BASIC_INFO {
                     IsDirectory: entry.is_directory.into(),
-                    FileSize: entry.file_size as i64,
+                    FileSize: entry.file_size,
                     CreationTime: entry.creation_time,
                     LastAccessTime: entry.creation_time,
                     LastWriteTime: entry.last_write_time,
@@ -199,11 +243,23 @@ pub unsafe extern "system" fn get_directory_enumeration(
                     FileAttributes: entry.file_attributes,
                 };
 
-                let result = PrjFillDirEntryBuffer(
-                    PCWSTR(name_wide.as_ptr()),
-                    Some(&file_info),
-                    dir_entry_buffer_handle,
-                );
+                let result = if let Some(target) = entry.symlink_target.as_deref() {
+                    let target_wide = to_wide_string(target);
+                    let extended_info = symlink_extended_info(PCWSTR(target_wide.as_ptr()));
+
+                    PrjFillDirEntryBuffer2(
+                        dir_entry_buffer_handle,
+                        PCWSTR(name_wide.as_ptr()),
+                        Some(&file_info),
+                        Some(&extended_info),
+                    )
+                } else {
+                    PrjFillDirEntryBuffer(
+                        PCWSTR(name_wide.as_ptr()),
+                        Some(&file_info),
+                        dir_entry_buffer_handle,
+                    )
+                };
 
                 match result {
                     Ok(()) => {
@@ -235,6 +291,7 @@ pub unsafe extern "system" fn get_directory_enumeration(
 /// PRJ_END_DIRECTORY_ENUMERATION_CB implementation.
 ///
 /// Called when directory enumeration is complete.
+// [spec:box:req:projfs-provider.root.enumeration]
 pub unsafe extern "system" fn end_directory_enumeration(
     callback_data: *const PRJ_CALLBACK_DATA,
     enumeration_id: *const windows::core::GUID,
@@ -242,7 +299,10 @@ pub unsafe extern "system" fn end_directory_enumeration(
     // SAFETY: ProjFS guarantees pointers are valid
     unsafe {
         let data = &*callback_data;
-        let provider = get_provider(data);
+        let provider = match get_provider(data) {
+            Ok(provider) => provider,
+            Err(error) => return error,
+        };
         let guid = guid_to_u128(&*enumeration_id);
 
         tracing::debug!("end_directory_enumeration: {:x}", guid);
@@ -255,13 +315,17 @@ pub unsafe extern "system" fn end_directory_enumeration(
 /// PRJ_GET_PLACEHOLDER_INFO_CB implementation.
 ///
 /// Called to get file/directory metadata for placeholder creation.
+// [spec:box:req:projfs-provider.root.placeholders]
 pub unsafe extern "system" fn get_placeholder_info(
     callback_data: *const PRJ_CALLBACK_DATA,
 ) -> HRESULT {
     // SAFETY: ProjFS guarantees callback_data is valid
     unsafe {
         let data = &*callback_data;
-        let provider = get_provider(data);
+        let provider = match get_provider(data) {
+            Ok(provider) => provider,
+            Err(error) => return error,
+        };
 
         let path = pcwstr_to_string(data.FilePathName);
         tracing::debug!("get_placeholder_info: {}", path);
@@ -274,12 +338,22 @@ pub unsafe extern "system" fn get_placeholder_info(
             }
         };
 
-        let entry = record_to_entry(provider, record.name().to_string(), index, record);
+        let entry = match record_to_entry(&provider, record.name().to_string(), index, record) {
+            Ok(entry) => entry,
+            Err(FileSizeOutOfRange(file_size)) => {
+                tracing::warn!(
+                    path,
+                    file_size,
+                    "Archive file size cannot be represented by the ProjFS ABI"
+                );
+                return hresult::from_win32(ERROR_INVALID_PARAMETER.0);
+            }
+        };
 
         let placeholder_info = PRJ_PLACEHOLDER_INFO {
             FileBasicInfo: PRJ_FILE_BASIC_INFO {
                 IsDirectory: entry.is_directory.into(),
-                FileSize: entry.file_size as i64,
+                FileSize: entry.file_size,
                 CreationTime: entry.creation_time,
                 LastAccessTime: entry.creation_time,
                 LastWriteTime: entry.last_write_time,
@@ -295,12 +369,27 @@ pub unsafe extern "system" fn get_placeholder_info(
 
         let path_wide = to_wide_string(&path);
 
-        match PrjWritePlaceholderInfo(
-            data.NamespaceVirtualizationContext,
-            PCWSTR(path_wide.as_ptr()),
-            &placeholder_info,
-            std::mem::size_of::<PRJ_PLACEHOLDER_INFO>() as u32,
-        ) {
+        let result = if let Some(target) = entry.symlink_target.as_deref() {
+            let target_wide = to_wide_string(target);
+            let extended_info = symlink_extended_info(PCWSTR(target_wide.as_ptr()));
+
+            PrjWritePlaceholderInfo2(
+                data.NamespaceVirtualizationContext,
+                PCWSTR(path_wide.as_ptr()),
+                &placeholder_info,
+                std::mem::size_of::<PRJ_PLACEHOLDER_INFO>() as u32,
+                Some(&extended_info),
+            )
+        } else {
+            PrjWritePlaceholderInfo(
+                data.NamespaceVirtualizationContext,
+                PCWSTR(path_wide.as_ptr()),
+                &placeholder_info,
+                std::mem::size_of::<PRJ_PLACEHOLDER_INFO>() as u32,
+            )
+        };
+
+        match result {
             Ok(()) => hresult::S_OK,
             Err(e) => {
                 tracing::error!("PrjWritePlaceholderInfo failed for {}: {:?}", path, e);
@@ -313,6 +402,7 @@ pub unsafe extern "system" fn get_placeholder_info(
 /// PRJ_GET_FILE_DATA_CB implementation.
 ///
 /// Called to get file contents when a file is read.
+// [spec:box:req:projfs-provider.root.file-data-and-errors]
 pub unsafe extern "system" fn get_file_data(
     callback_data: *const PRJ_CALLBACK_DATA,
     byte_offset: u64,
@@ -321,7 +411,10 @@ pub unsafe extern "system" fn get_file_data(
     // SAFETY: ProjFS guarantees callback_data is valid
     unsafe {
         let data = &*callback_data;
-        let provider = get_provider(data);
+        let provider = match get_provider(data) {
+            Ok(provider) => provider,
+            Err(error) => return error,
+        };
 
         let path = pcwstr_to_string(data.FilePathName);
         tracing::debug!(
@@ -339,8 +432,9 @@ pub unsafe extern "system" fn get_file_data(
             }
         };
 
-        // Verify it's a file
-        if record.as_file().is_none() {
+        // Verify it is a hydratable file record. External links are projected
+        // as symlinks and therefore do not enter the file-data callback.
+        if !matches!(record, Record::File(_) | Record::ChunkedFile(_)) {
             tracing::warn!("Not a file: {}", path);
             return hresult::from_win32(ERROR_FILE_NOT_FOUND.0);
         }
@@ -354,27 +448,48 @@ pub unsafe extern "system" fn get_file_data(
             }
         };
 
-        // Allocate aligned buffer
+        let range = match checked_file_data_range(byte_offset, length, file_data.len()) {
+            Ok(range) => range,
+            Err(e) => {
+                tracing::warn!(
+                    path,
+                    byte_offset,
+                    length,
+                    file_size = file_data.len(),
+                    error = ?e,
+                    "Invalid file-data range"
+                );
+                return hresult::from_win32(ERROR_INVALID_PARAMETER.0);
+            }
+        };
+
+        let file_slice = match file_data.get(range) {
+            Some(slice) => slice,
+            None => return hresult::from_win32(ERROR_INVALID_PARAMETER.0),
+        };
+
+        let copy_len = file_slice.len();
+        if copy_len == 0 {
+            return hresult::S_OK;
+        }
+
+        let copy_len_u32 = match u32::try_from(copy_len) {
+            Ok(length) => length,
+            Err(_) => {
+                return hresult::from_win32(ERROR_INVALID_PARAMETER.0);
+            }
+        };
+
+        // Allocate only the in-range portion of the request.
         let aligned_buffer =
-            PrjAllocateAlignedBuffer(data.NamespaceVirtualizationContext, length as usize);
+            PrjAllocateAlignedBuffer(data.NamespaceVirtualizationContext, copy_len);
 
         if aligned_buffer.is_null() {
             tracing::error!("Failed to allocate aligned buffer");
             return hresult::from_win32(ERROR_NOT_ENOUGH_MEMORY.0);
         }
 
-        // Copy requested range to aligned buffer
-        let start = byte_offset as usize;
-        let end = (start + length as usize).min(file_data.len());
-        let copy_len = end.saturating_sub(start);
-
-        if copy_len > 0 {
-            std::ptr::copy_nonoverlapping(
-                file_data[start..].as_ptr(),
-                aligned_buffer as *mut u8,
-                copy_len,
-            );
-        }
+        std::ptr::copy_nonoverlapping(file_slice.as_ptr(), aligned_buffer as *mut u8, copy_len);
 
         // Write to ProjFS
         let result = PrjWriteFileData(
@@ -382,7 +497,7 @@ pub unsafe extern "system" fn get_file_data(
             &data.DataStreamId,
             aligned_buffer,
             byte_offset,
-            copy_len as u32,
+            copy_len_u32,
         );
 
         PrjFreeAlignedBuffer(aligned_buffer);
@@ -401,11 +516,15 @@ pub unsafe extern "system" fn get_file_data(
 ///
 /// Called to check if a file exists in the provider's namespace.
 /// This is optional but improves performance.
+// [spec:box:req:projfs-provider.root.file-data-and-errors]
 pub unsafe extern "system" fn query_file_name(callback_data: *const PRJ_CALLBACK_DATA) -> HRESULT {
     // SAFETY: ProjFS guarantees callback_data is valid
     unsafe {
         let data = &*callback_data;
-        let provider = get_provider(data);
+        let provider = match get_provider(data) {
+            Ok(provider) => provider,
+            Err(error) => return error,
+        };
 
         let path = pcwstr_to_string(data.FilePathName);
         tracing::debug!("query_file_name: {}", path);

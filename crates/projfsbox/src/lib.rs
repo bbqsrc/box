@@ -5,29 +5,38 @@
 //!
 //! # Requirements
 //!
-//! - Windows 10 version 1809 or later
+//! - Windows 10 version 2004 or later (for projected symbolic links)
 //! - ProjFS feature must be enabled:
 //!   ```powershell
 //!   Enable-WindowsOptionalFeature -Online -FeatureName Client-ProjFS -NoRestart
 //!   ```
 
-#![cfg(windows)]
+#![cfg(any(windows, test))]
 
+#[cfg(windows)]
 use std::path::Path;
 
+#[cfg(windows)]
 pub mod callbacks;
+#[cfg(windows)]
 pub mod enumeration;
+#[cfg(windows)]
 pub mod error;
+mod file_data;
+mod lifecycle;
 pub mod path;
+#[cfg(windows)]
 pub mod provider;
 pub mod time;
 
+#[cfg(windows)]
 pub use provider::BoxProvider;
 
 /// Mark a directory as a ProjFS virtualization root.
 ///
 /// This must be called once on an empty directory before starting virtualization.
 /// The directory must exist.
+#[cfg(windows)]
 pub fn mark_as_virtualization_root<P: AsRef<Path>>(path: P) -> Result<(), windows::core::Error> {
     use windows::Win32::Storage::ProjectedFileSystem::PrjMarkDirectoryAsPlaceholder;
     use windows::core::PCWSTR;
@@ -43,8 +52,7 @@ pub fn mark_as_virtualization_root<P: AsRef<Path>>(path: P) -> Result<(), window
         ) {
             Ok(()) => Ok(()),
             Err(e) => {
-                // Ignore ERROR_ALREADY_EXISTS (0x800700B7 = -2147024713)
-                if e.code().0 == -2147024713 {
+                if lifecycle::is_already_exists_hresult(e.code().0) {
                     Ok(())
                 } else {
                     Err(e)

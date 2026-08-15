@@ -74,6 +74,7 @@ pub fn error_to_hresult(err: &ProjFsError) -> HRESULT {
 }
 
 /// Convert a std::io::Error to an HRESULT.
+// [spec:box:req:projfs-provider.root.file-data-and-errors]
 pub fn io_error_to_hresult(err: &std::io::Error) -> HRESULT {
     use std::io::ErrorKind;
 
