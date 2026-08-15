@@ -16,6 +16,10 @@ crate-type = ["staticlib"]
 box-fst = { path = "../../crates/fst" }
 hashbrown = "0.15"
 
+[dev-dependencies]
+box-format = { path = "../.." }
+tempfile = "3"
+
 [features]
 default = ["std"]
 std = []

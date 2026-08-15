@@ -61,6 +61,8 @@ pub struct KStatfs {
 }
 
 // External C functions (defined in rust_helpers.c)
+// [spec:box:req:kernel-abi.root]
+// [spec:box:req:kernel-abi.root.helpers-and-buffers]
 extern "C" {
     // Buffer head operations
     pub fn boxfs_sb_bread(sb: *mut SuperBlock, block: u64) -> *mut BufferHead;
@@ -155,7 +157,11 @@ pub struct Folio {
 ///
 /// Returns a slice of the block data, or None if the read failed.
 /// The caller must call `release_block` when done with the data.
-pub unsafe fn read_block(sb: *mut SuperBlock, block: u64) -> Option<(*mut BufferHead, &'static [u8])> {
+// [spec:box:req:kernel-abi.root.helpers-and-buffers]
+pub unsafe fn read_block(
+    sb: *mut SuperBlock,
+    block: u64,
+) -> Option<(*mut BufferHead, &'static [u8])> {
     let bh = boxfs_sb_bread(sb, block);
     if bh.is_null() {
         return None;
@@ -169,6 +175,7 @@ pub unsafe fn read_block(sb: *mut SuperBlock, block: u64) -> Option<(*mut Buffer
 }
 
 /// Release a block previously read with `read_block`.
+// [spec:box:req:kernel-abi.root.helpers-and-buffers]
 pub unsafe fn release_block(bh: *mut BufferHead) {
     boxfs_brelse(bh);
 }

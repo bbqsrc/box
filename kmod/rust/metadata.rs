@@ -71,6 +71,7 @@ impl BlockCache {
 
     /// Insert a decompressed block into the cache.
     /// Evicts least recently used entries until there's room.
+    // [spec:box:req:kernel-vfs.root.data]
     pub fn insert(&mut self, composite: u128, block_offset: u64, data: Box<[u8]>) {
         let key = (composite, block_offset);
         let data_size = data.len();
@@ -94,10 +95,13 @@ impl BlockCache {
 
         self.used_bytes += data_size;
         self.access_counter += 1;
-        self.entries.insert(key, CacheEntry {
-            data,
-            last_access: self.access_counter,
-        });
+        self.entries.insert(
+            key,
+            CacheEntry {
+                data,
+                last_access: self.access_counter,
+            },
+        );
     }
 
     /// Evict the least recently used entry. Returns true if an entry was evicted.
@@ -107,7 +111,8 @@ impl BlockCache {
         }
 
         // Find entry with minimum last_access
-        let lru_key = self.entries
+        let lru_key = self
+            .entries
             .iter()
             .min_by_key(|(_, entry)| entry.last_access)
             .map(|(key, _)| *key);
@@ -189,6 +194,10 @@ pub struct AttrKey {
 /// Map of attribute key index -> raw value bytes
 pub type AttrMap = HashMap<usize, Box<[u8]>>;
 
+/// Reserved composite identity for the filesystem's synthetic merged root.
+/// Real archive record indices are one-based, so no path FST can name it.
+pub const SYNTHETIC_ROOT_INDEX: u128 = 0;
+
 /// Type of record in the archive
 #[derive(Debug, Clone)]
 pub enum RecordData {
@@ -242,7 +251,7 @@ pub struct Record {
     pub data: RecordData,
     /// Unix mode (permissions + type)
     pub mode: u16,
-    /// Modification time (seconds since box epoch)
+    /// Modification time (minutes since the Box epoch)
     pub mtime: i64,
     /// Extended attributes (key index -> raw bytes)
     pub attrs: AttrMap,
@@ -252,8 +261,8 @@ impl Record {
     /// Get the file type for dir_emit
     pub fn dtype(&self) -> u8 {
         match &self.data {
-            RecordData::File { .. } | RecordData::ChunkedFile { .. } => 8,  // DT_REG
-            RecordData::Directory { .. } => 4,  // DT_DIR
+            RecordData::File { .. } | RecordData::ChunkedFile { .. } => 8, // DT_REG
+            RecordData::Directory { .. } => 4,                             // DT_DIR
             RecordData::InternalLink { .. } | RecordData::ExternalLink { .. } => 10, // DT_LNK
         }
     }
@@ -265,19 +274,29 @@ impl Record {
 
     /// Check if this is a regular file (including chunked)
     pub fn is_file(&self) -> bool {
-        matches!(&self.data, RecordData::File { .. } | RecordData::ChunkedFile { .. })
+        matches!(
+            &self.data,
+            RecordData::File { .. } | RecordData::ChunkedFile { .. }
+        )
     }
 
     /// Check if this is a symlink
     pub fn is_symlink(&self) -> bool {
-        matches!(&self.data, RecordData::InternalLink { .. } | RecordData::ExternalLink { .. })
+        matches!(
+            &self.data,
+            RecordData::InternalLink { .. } | RecordData::ExternalLink { .. }
+        )
     }
 
     /// Get file size (decompressed size for files, 0 for others)
     pub fn size(&self) -> u64 {
         match &self.data {
-            RecordData::File { decompressed_size, .. } => *decompressed_size,
-            RecordData::ChunkedFile { decompressed_size, .. } => *decompressed_size,
+            RecordData::File {
+                decompressed_size, ..
+            } => *decompressed_size,
+            RecordData::ChunkedFile {
+                decompressed_size, ..
+            } => *decompressed_size,
             _ => 0,
         }
     }
@@ -289,8 +308,6 @@ pub struct ArchiveData {
     pub id: u64,
     /// All records in this archive (0-indexed, but record indices are 1-based)
     pub records: Vec<Record>,
-    /// Root record index within this archive (1-based, local)
-    pub root_index: u64,
     /// Total archive size
     pub archive_size: u64,
     /// Base offset of this archive's data in the block device
@@ -313,6 +330,8 @@ pub struct BoxfsMetadata {
     pub archives: HashMap<u64, ArchiveData>,
     /// Merged path→composite_index FST (in-memory, queryable)
     pub merged_fst: FstBuilder<u128>,
+    /// Directory record representing the merged namespace root.
+    synthetic_root: Record,
     /// Next archive ID to assign
     next_archive_id: u64,
     /// Cache for decompressed blocks (interior mutability for shared access)
@@ -343,6 +362,15 @@ impl BoxfsMetadata {
         BoxfsMetadata {
             archives: HashMap::new(),
             merged_fst: FstBuilder::new(),
+            synthetic_root: Record {
+                name: String::new(),
+                data: RecordData::Directory {
+                    children: Vec::new(),
+                },
+                mode: 0o40755,
+                mtime: 0,
+                attrs: AttrMap::new(),
+            },
             next_archive_id: 0,
             block_cache: RefCell::new(BlockCache::default()),
         }
@@ -412,7 +440,12 @@ impl BoxfsMetadata {
 
     /// Get an xattr value for a record by xattr name (e.g., "user.myattr")
     /// This looks up "linux.xattr.{name}" in the record's attrs
-    pub fn get_xattr<'a>(&'a self, composite: u128, record: &'a Record, name: &str) -> Option<&'a [u8]> {
+    pub fn get_xattr<'a>(
+        &'a self,
+        composite: u128,
+        record: &'a Record,
+        name: &str,
+    ) -> Option<&'a [u8]> {
         let full_name = alloc::format!("{}{}", LINUX_XATTR_PREFIX, name);
         let key_idx = self.find_attr_key(composite, &full_name)?;
         record.attrs.get(&key_idx).map(|v| v.as_ref())
@@ -420,7 +453,11 @@ impl BoxfsMetadata {
 
     /// List all xattr names for a record
     /// Returns iterator over xattr names (without "linux.xattr." prefix)
-    pub fn list_xattrs<'a>(&'a self, composite: u128, record: &'a Record) -> impl Iterator<Item = &'a str> {
+    pub fn list_xattrs<'a>(
+        &'a self,
+        composite: u128,
+        record: &'a Record,
+    ) -> impl Iterator<Item = &'a str> {
         let archive = self.get_archive(composite);
         record.attrs.keys().filter_map(move |&key_idx| {
             archive
@@ -432,6 +469,9 @@ impl BoxfsMetadata {
 
     /// Get a record by composite index.
     pub fn get(&self, composite: u128) -> Option<&Record> {
+        if composite == SYNTHETIC_ROOT_INDEX {
+            return Some(&self.synthetic_root);
+        }
         let (archive_id, local_idx) = Self::unpack_index(composite);
         if local_idx == 0 {
             return None;
@@ -485,17 +525,14 @@ impl BoxfsMetadata {
     /// Get path (as FST key bytes) for a composite index.
     /// Returns None if not found in merged FST.
     pub fn path_for_index(&self, composite: u128) -> Option<Vec<u8>> {
+        if composite == SYNTHETIC_ROOT_INDEX {
+            return Some(Vec::new());
+        }
+
         // Search merged FST for this composite index
         for (key, idx) in self.merged_fst.prefix_iter(&[]) {
             if idx == composite {
                 return Some(key);
-            }
-        }
-
-        // Check if this is a root of any archive
-        for (archive_id, archive) in &self.archives {
-            if Self::pack_index(*archive_id, archive.root_index) == composite {
-                return Some(Vec::new()); // Root has empty path
             }
         }
 
@@ -506,7 +543,8 @@ impl BoxfsMetadata {
     pub fn path_string_for_index(&self, composite: u128) -> Option<String> {
         let key = self.path_for_index(composite)?;
         // Convert key to path string (0x1f -> /)
-        let path_bytes: Vec<u8> = key.iter()
+        let path_bytes: Vec<u8> = key
+            .iter()
             .map(|&b| if b == 0x1f { b'/' } else { b })
             .collect();
         core::str::from_utf8(&path_bytes).ok().map(String::from)
@@ -633,14 +671,9 @@ impl BoxfsMetadata {
         blocks
     }
 
-    /// Get the first archive's root as the filesystem root.
-    /// Returns composite index or 0 if no archives.
+    /// Get the synthetic merged root identity.
+    // [spec:box:req:kernel-vfs.root.namespace]
     pub fn root_index(&self) -> u128 {
-        // Return first archive's root
-        if let Some((&archive_id, archive)) = self.archives.iter().next() {
-            Self::pack_index(archive_id, archive.root_index)
-        } else {
-            0
-        }
+        SYNTHETIC_ROOT_INDEX
     }
 }

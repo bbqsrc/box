@@ -32,6 +32,8 @@ pub struct BoxHeader {
 }
 
 /// Parse the 32-byte Box header.
+// [spec:box:syn:kernel-parser.root]
+// [spec:box:syn:kernel-parser.root.header]
 pub fn parse_header(data: &[u8]) -> Result<BoxHeader, KernelError> {
     if data.len() < HEADER_SIZE {
         return Err(KernelError::BadData);
@@ -85,8 +87,6 @@ fn decode_vu64(data: &[u8]) -> Result<(u64, usize), KernelError> {
     }
 
     let first = data[0];
-
-    // Count leading zeros to determine length
     let leading_zeros = first.leading_zeros() as usize;
     let len = leading_zeros + 1;
 
@@ -94,44 +94,33 @@ fn decode_vu64(data: &[u8]) -> Result<(u64, usize), KernelError> {
         return Err(KernelError::BadData);
     }
 
-    let value = match len {
-        1 => (first & 0x7F) as u64,
-        2 => {
-            let b = [data[0] & 0x3F, data[1]];
-            u16::from_be_bytes(b) as u64
-        }
-        3 => {
-            let b = [0, data[0] & 0x1F, data[1], data[2]];
-            u32::from_be_bytes(b) as u64
-        }
-        4 => {
-            let b = [data[0] & 0x0F, data[1], data[2], data[3]];
-            u32::from_be_bytes(b) as u64
-        }
-        5 => {
-            let b = [0, 0, 0, data[0] & 0x07, data[1], data[2], data[3], data[4]];
-            u64::from_be_bytes(b)
-        }
-        6 => {
-            let b = [0, 0, data[0] & 0x03, data[1], data[2], data[3], data[4], data[5]];
-            u64::from_be_bytes(b)
-        }
-        7 => {
-            let b = [0, data[0] & 0x01, data[1], data[2], data[3], data[4], data[5], data[6]];
-            u64::from_be_bytes(b)
-        }
-        8 => {
-            // First byte is 0x00, next 7 bytes are value
-            let b = [0, data[1], data[2], data[3], data[4], data[5], data[6], data[7]];
-            u64::from_be_bytes(b)
-        }
-        9 => {
-            // First byte is 0x00, next 8 bytes are full u64
-            let b: [u8; 8] = data[1..9].try_into().unwrap();
-            u64::from_be_bytes(b)
-        }
-        _ => return Err(KernelError::BadData),
+    // FastVint stores the bytes following the prefix least-significant first
+    // and offsets each length's value range so every representation is unique.
+    const OFFSETS: [u64; 9] = [
+        0,
+        0x80,
+        0x4080,
+        0x20_4080,
+        0x1020_4080,
+        0x0008_1020_4080,
+        0x0408_1020_4080,
+        0x0002_0408_1020_4080,
+        0x0102_0408_1020_4080,
+    ];
+
+    let prefix_mask = (0xffu16 >> len) as u8;
+    let mut raw = if len < 9 {
+        u64::from(first & prefix_mask) << ((len - 1) * 8)
+    } else {
+        0
     };
+    for (index, byte) in data[1..len].iter().enumerate() {
+        raw |= u64::from(*byte) << (index * 8);
+    }
+
+    let value = raw
+        .checked_add(OFFSETS[len - 1])
+        .ok_or(KernelError::BadData)?;
 
     Ok((value, len))
 }
@@ -148,23 +137,22 @@ fn decode_vi64(data: &[u8]) -> Result<(i64, usize), KernelError> {
 /// Parse a length-prefixed string.
 fn parse_str(data: &[u8]) -> Result<(&str, usize), KernelError> {
     let (len, prefix_size) = decode_vu64(data)?;
-    let len = len as usize;
-    let total = prefix_size + len;
+    let len = usize::try_from(len).map_err(|_| KernelError::BadData)?;
+    let total = prefix_size.checked_add(len).ok_or(KernelError::BadData)?;
 
     if data.len() < total {
         return Err(KernelError::BadData);
     }
 
-    let s = core::str::from_utf8(&data[prefix_size..total])
-        .map_err(|_| KernelError::BadData)?;
+    let s = core::str::from_utf8(&data[prefix_size..total]).map_err(|_| KernelError::BadData)?;
     Ok((s, total))
 }
 
 /// Parse a length-prefixed byte slice.
 fn parse_bytes(data: &[u8]) -> Result<(&[u8], usize), KernelError> {
     let (len, prefix_size) = decode_vu64(data)?;
-    let len = len as usize;
-    let total = prefix_size + len;
+    let len = usize::try_from(len).map_err(|_| KernelError::BadData)?;
+    let total = prefix_size.checked_add(len).ok_or(KernelError::BadData)?;
 
     if data.len() < total {
         return Err(KernelError::BadData);
@@ -199,104 +187,122 @@ fn parse_attrmap(data: &[u8]) -> Result<(AttrMap, usize), KernelError> {
     }
 
     // Read byte count (includes entry count VLQ but not the u64 itself)
-    let byte_count = u64::from_le_bytes(data[0..8].try_into().unwrap()) as usize;
+    let byte_count = usize::try_from(u64::from_le_bytes(data[0..8].try_into().unwrap()))
+        .map_err(|_| KernelError::BadData)?;
 
     // Total size is 8 (for byte_count) + byte_count
-    let total = 8 + byte_count;
+    let total = 8usize.checked_add(byte_count).ok_or(KernelError::BadData)?;
     if data.len() < total {
         return Err(KernelError::BadData);
     }
 
-    if byte_count == 0 {
-        return Ok((HashMap::new(), total));
-    }
-
-    // Parse the attrmap contents
-    let mut pos = 8;
-    let end = 8 + byte_count;
+    // Confine every nested decoder to the declared byte-count envelope. Bytes
+    // following the map belong to the next trailer field and must never be
+    // consumed to complete a malformed entry.
+    let contents = &data[8..total];
+    let mut pos = 0usize;
 
     // Read entry count
-    let (count, consumed) = decode_vu64(&data[pos..])?;
+    let (count, consumed) = decode_vu64(contents)?;
     pos += consumed;
+    let count = usize::try_from(count).map_err(|_| KernelError::BadData)?;
+    // Every entry needs at least one byte for its key and one for its value
+    // length, so this also prevents attacker-controlled oversized allocation.
+    if count > contents.len().saturating_sub(pos) / 2 {
+        return Err(KernelError::BadData);
+    }
 
-    let mut attrs = HashMap::with_capacity(count as usize);
+    let mut attrs = HashMap::with_capacity(count);
 
     // Parse each entry: key_index(vu64) + value(bytes)
     for _ in 0..count {
-        if pos >= end {
+        if pos >= contents.len() {
             return Err(KernelError::BadData);
         }
 
-        let (key_index, consumed) = decode_vu64(&data[pos..])?;
+        let (key_index, consumed) = decode_vu64(&contents[pos..])?;
+        pos += consumed;
+        let key_index = usize::try_from(key_index).map_err(|_| KernelError::BadData)?;
+
+        let (value, consumed) = parse_bytes(&contents[pos..])?;
         pos += consumed;
 
-        let (value, consumed) = parse_bytes(&data[pos..])?;
-        pos += consumed;
+        attrs.insert(key_index, value.to_vec().into_boxed_slice());
+    }
 
-        attrs.insert(key_index as usize, value.to_vec().into_boxed_slice());
+    if pos != contents.len() {
+        return Err(KernelError::BadData);
     }
 
     Ok((attrs, total))
 }
 
-/// Skip over an AttrMap without parsing it.
+/// Validate an AttrMap and return its encoded length.
 fn skip_attrmap(data: &[u8]) -> Result<usize, KernelError> {
-    if data.len() < 8 {
-        return Err(KernelError::BadData);
-    }
-
-    let byte_count = u64::from_le_bytes(data[0..8].try_into().unwrap()) as usize;
-    let total = 8 + byte_count;
-    if data.len() < total {
-        return Err(KernelError::BadData);
-    }
-
-    Ok(total)
+    parse_attrmap(data).map(|(_, consumed)| consumed)
 }
 
 // ============================================================================
 // RECORD PARSING
 // ============================================================================
 
-/// Attribute key names for mode and mtime
+/// Standard attribute key names used for inode metadata.
 const ATTR_KEY_UNIX_MODE: &str = "unix.mode";
-const ATTR_KEY_UNIX_MTIME: &str = "unix.mtime";
+const ATTR_KEY_MODIFIED: &str = "modified";
+
+fn decode_exact_vu32(value: &[u8]) -> Option<u32> {
+    let (decoded, consumed) = decode_vu64(value).ok()?;
+    if consumed != value.len() {
+        return None;
+    }
+    u32::try_from(decoded).ok()
+}
+
+fn decode_exact_vi64(value: &[u8]) -> Option<i64> {
+    let (decoded, consumed) = decode_vi64(value).ok()?;
+    (consumed == value.len()).then_some(decoded)
+}
 
 /// Extract mode from attrs if present, otherwise use default.
+// [spec:box:def:attributes.root.standard-keys]
 fn extract_mode(attrs: &AttrMap, attr_keys: &[AttrKey], default_mode: u16) -> u16 {
-    // Find the unix.mode key index
     for (idx, key) in attr_keys.iter().enumerate() {
         if key.name == ATTR_KEY_UNIX_MODE {
-            if let Some(value) = attrs.get(&idx) {
-                // Mode is stored as u16
-                if value.len() >= 2 {
-                    return u16::from_le_bytes([value[0], value[1]]);
-                }
+            if key.attr_type != AttrType::Vu32 {
+                return default_mode;
             }
-            break;
+            if let Some(mode) = attrs
+                .get(&idx)
+                .and_then(|value| decode_exact_vu32(value))
+                .and_then(|mode| u16::try_from(mode).ok())
+            {
+                return mode;
+            }
+            return default_mode;
         }
     }
     default_mode
 }
 
-/// Extract mtime from attrs if present, otherwise use 0.
+/// Extract the DateTime-encoded modification time, in minutes from the Box epoch.
+// [spec:box:def:attributes.root.standard-keys]
 fn extract_mtime(attrs: &AttrMap, attr_keys: &[AttrKey]) -> i64 {
-    // Find the unix.mtime key index
     for (idx, key) in attr_keys.iter().enumerate() {
-        if key.name == ATTR_KEY_UNIX_MTIME {
-            if let Some(value) = attrs.get(&idx) {
-                // mtime is stored as vi64 (zigzag), decode it
-                if let Ok((mtime, _)) = decode_vi64(value) {
-                    return mtime;
-                }
+        if key.name == ATTR_KEY_MODIFIED {
+            if key.attr_type != AttrType::DateTime {
+                return 0;
             }
-            break;
+            return attrs
+                .get(&idx)
+                .and_then(|value| decode_exact_vi64(value))
+                .unwrap_or(0);
         }
     }
     0
 }
 
 /// Parse a single record from the trailer.
+// [spec:box:syn:kernel-parser.root.records]
 fn parse_record(data: &[u8], attr_keys: &[AttrKey]) -> Result<(Record, usize), KernelError> {
     if data.is_empty() {
         return Err(KernelError::BadData);
@@ -327,13 +333,18 @@ fn parse_record(data: &[u8], attr_keys: &[AttrKey]) -> Result<(Record, usize), K
             let mode = extract_mode(&attrs, attr_keys, 0o40755);
             let mtime = extract_mtime(&attrs, attr_keys);
 
-            Ok((Record {
-                name: String::from(name),
-                data: RecordData::Directory { children: Vec::new() },
-                mode,
-                mtime,
-                attrs,
-            }, pos))
+            Ok((
+                Record {
+                    name: String::from(name),
+                    data: RecordData::Directory {
+                        children: Vec::new(),
+                    },
+                    mode,
+                    mtime,
+                    attrs,
+                },
+                pos,
+            ))
         }
         RECORD_TYPE_FILE => {
             // File: length(u64) + decompressed_length(u64) + data_offset(u64) + name + attrs
@@ -341,11 +352,11 @@ fn parse_record(data: &[u8], attr_keys: &[AttrKey]) -> Result<(Record, usize), K
                 return Err(KernelError::BadData);
             }
 
-            let compressed_size = u64::from_le_bytes(data[pos..pos+8].try_into().unwrap());
+            let compressed_size = u64::from_le_bytes(data[pos..pos + 8].try_into().unwrap());
             pos += 8;
-            let decompressed_size = u64::from_le_bytes(data[pos..pos+8].try_into().unwrap());
+            let decompressed_size = u64::from_le_bytes(data[pos..pos + 8].try_into().unwrap());
             pos += 8;
-            let data_offset = u64::from_le_bytes(data[pos..pos+8].try_into().unwrap());
+            let data_offset = u64::from_le_bytes(data[pos..pos + 8].try_into().unwrap());
             pos += 8;
 
             let (name, consumed) = parse_str(&data[pos..])?;
@@ -357,18 +368,21 @@ fn parse_record(data: &[u8], attr_keys: &[AttrKey]) -> Result<(Record, usize), K
             let mode = extract_mode(&attrs, attr_keys, 0o100644);
             let mtime = extract_mtime(&attrs, attr_keys);
 
-            Ok((Record {
-                name: String::from(name),
-                data: RecordData::File {
-                    compression,
-                    data_offset,
-                    compressed_size,
-                    decompressed_size,
+            Ok((
+                Record {
+                    name: String::from(name),
+                    data: RecordData::File {
+                        compression,
+                        data_offset,
+                        compressed_size,
+                        decompressed_size,
+                    },
+                    mode,
+                    mtime,
+                    attrs,
                 },
-                mode,
-                mtime,
-                attrs,
-            }, pos))
+                pos,
+            ))
         }
         RECORD_TYPE_CHUNKED_FILE => {
             // ChunkedFile: block_size(u32) + length(u64) + decompressed_length(u64) + data_offset(u64) + name + attrs
@@ -376,13 +390,13 @@ fn parse_record(data: &[u8], attr_keys: &[AttrKey]) -> Result<(Record, usize), K
                 return Err(KernelError::BadData);
             }
 
-            let block_size = u32::from_le_bytes(data[pos..pos+4].try_into().unwrap());
+            let block_size = u32::from_le_bytes(data[pos..pos + 4].try_into().unwrap());
             pos += 4;
-            let compressed_size = u64::from_le_bytes(data[pos..pos+8].try_into().unwrap());
+            let compressed_size = u64::from_le_bytes(data[pos..pos + 8].try_into().unwrap());
             pos += 8;
-            let decompressed_size = u64::from_le_bytes(data[pos..pos+8].try_into().unwrap());
+            let decompressed_size = u64::from_le_bytes(data[pos..pos + 8].try_into().unwrap());
             pos += 8;
-            let data_offset = u64::from_le_bytes(data[pos..pos+8].try_into().unwrap());
+            let data_offset = u64::from_le_bytes(data[pos..pos + 8].try_into().unwrap());
             pos += 8;
 
             let (name, consumed) = parse_str(&data[pos..])?;
@@ -394,19 +408,22 @@ fn parse_record(data: &[u8], attr_keys: &[AttrKey]) -> Result<(Record, usize), K
             let mode = extract_mode(&attrs, attr_keys, 0o100644);
             let mtime = extract_mtime(&attrs, attr_keys);
 
-            Ok((Record {
-                name: String::from(name),
-                data: RecordData::ChunkedFile {
-                    compression,
-                    block_size,
-                    data_offset,
-                    compressed_size,
-                    decompressed_size,
+            Ok((
+                Record {
+                    name: String::from(name),
+                    data: RecordData::ChunkedFile {
+                        compression,
+                        block_size,
+                        data_offset,
+                        compressed_size,
+                        decompressed_size,
+                    },
+                    mode,
+                    mtime,
+                    attrs,
                 },
-                mode,
-                mtime,
-                attrs,
-            }, pos))
+                pos,
+            ))
         }
         RECORD_TYPE_SYMLINK => {
             // Symlink: name + target_index(vu64) + attrs
@@ -422,13 +439,16 @@ fn parse_record(data: &[u8], attr_keys: &[AttrKey]) -> Result<(Record, usize), K
             let mode = extract_mode(&attrs, attr_keys, 0o120777);
             let mtime = extract_mtime(&attrs, attr_keys);
 
-            Ok((Record {
-                name: String::from(name),
-                data: RecordData::InternalLink { target_index },
-                mode,
-                mtime,
-                attrs,
-            }, pos))
+            Ok((
+                Record {
+                    name: String::from(name),
+                    data: RecordData::InternalLink { target_index },
+                    mode,
+                    mtime,
+                    attrs,
+                },
+                pos,
+            ))
         }
         RECORD_TYPE_EXTERNAL_SYMLINK => {
             // External symlink: name + target(string) + attrs
@@ -444,13 +464,18 @@ fn parse_record(data: &[u8], attr_keys: &[AttrKey]) -> Result<(Record, usize), K
             let mode = extract_mode(&attrs, attr_keys, 0o120777);
             let mtime = extract_mtime(&attrs, attr_keys);
 
-            Ok((Record {
-                name: String::from(name),
-                data: RecordData::ExternalLink { target: String::from(target) },
-                mode,
-                mtime,
-                attrs,
-            }, pos))
+            Ok((
+                Record {
+                    name: String::from(name),
+                    data: RecordData::ExternalLink {
+                        target: String::from(target),
+                    },
+                    mode,
+                    mtime,
+                    attrs,
+                },
+                pos,
+            ))
         }
         _ => Err(KernelError::BadData),
     }
@@ -464,8 +489,18 @@ fn parse_attr_keys(data: &[u8]) -> Result<(Vec<AttrKey>, usize), KernelError> {
     // Read count
     let (count, consumed) = decode_vu64(data)?;
     pos += consumed;
+    let count = usize::try_from(count).map_err(|_| KernelError::BadData)?;
 
-    let mut keys = Vec::with_capacity(count as usize);
+    // Each key needs at least its type byte and an encoded string length.
+    // Check that lower bound before reserving from an untrusted count.
+    let remaining = data.len().checked_sub(pos).ok_or(KernelError::BadData)?;
+    if count > remaining / 2 {
+        return Err(KernelError::BadData);
+    }
+
+    let mut keys = Vec::new();
+    keys.try_reserve_exact(count)
+        .map_err(|_| KernelError::BadData)?;
 
     // Parse each key: type(1 byte) + name(string)
     for _ in 0..count {
@@ -474,13 +509,17 @@ fn parse_attr_keys(data: &[u8]) -> Result<(Vec<AttrKey>, usize), KernelError> {
         }
         let type_byte = data[pos];
         pos += 1;
+        let attr_type = AttrType::from(type_byte);
+        if matches!(attr_type, AttrType::Unknown(_)) {
+            return Err(KernelError::BadData);
+        }
 
         let (name, consumed) = parse_str(&data[pos..])?;
         pos += consumed;
 
         keys.push(AttrKey {
             name: String::from(name),
-            attr_type: AttrType::from(type_byte),
+            attr_type,
         });
     }
 
@@ -490,10 +529,10 @@ fn parse_attr_keys(data: &[u8]) -> Result<(Vec<AttrKey>, usize), KernelError> {
 /// Skip over dictionary.
 fn skip_dictionary(data: &[u8]) -> Result<usize, KernelError> {
     let (len, prefix_consumed) = decode_vu64(data)?;
-    if len == 0 {
-        return Ok(prefix_consumed);
-    }
-    let total = prefix_consumed + len as usize;
+    let len = usize::try_from(len).map_err(|_| KernelError::BadData)?;
+    let total = prefix_consumed
+        .checked_add(len)
+        .ok_or(KernelError::BadData)?;
     if data.len() < total {
         return Err(KernelError::BadData);
     }
@@ -506,12 +545,9 @@ fn skip_fst(data: &[u8]) -> Result<usize, KernelError> {
         return Err(KernelError::BadData);
     }
 
-    let fst_len = u64::from_le_bytes(data[0..8].try_into().unwrap()) as usize;
-    if fst_len == 0 {
-        return Ok(8);
-    }
-
-    let total = 8 + fst_len;
+    let fst_len = usize::try_from(u64::from_le_bytes(data[0..8].try_into().unwrap()))
+        .map_err(|_| KernelError::BadData)?;
+    let total = 8usize.checked_add(fst_len).ok_or(KernelError::BadData)?;
     if data.len() < total {
         return Err(KernelError::BadData);
     }
@@ -530,17 +566,19 @@ fn parse_fst_data(data: &[u8]) -> Result<Option<Box<[u8]>>, KernelError> {
         return Err(KernelError::BadData);
     }
 
-    let fst_len = u64::from_le_bytes(data[0..8].try_into().unwrap()) as usize;
+    let fst_len = usize::try_from(u64::from_le_bytes(data[0..8].try_into().unwrap()))
+        .map_err(|_| KernelError::BadData)?;
     if fst_len == 0 {
         return Ok(None);
     }
 
-    let total = 8 + fst_len;
+    let total = 8usize.checked_add(fst_len).ok_or(KernelError::BadData)?;
     if data.len() < total {
         return Err(KernelError::BadData);
     }
 
     let fst_bytes = data[8..total].to_vec().into_boxed_slice();
+    Fst::<_, u64>::new(Cow::Borrowed(fst_bytes.as_ref())).map_err(|_| KernelError::BadData)?;
     Ok(Some(fst_bytes))
 }
 
@@ -550,6 +588,8 @@ fn parse_fst_data(data: &[u8]) -> Result<Option<Box<[u8]>>, KernelError> {
 
 /// Parse the complete trailer into archive data.
 /// Returns ArchiveData that can be added to BoxfsMetadata via add_archive().
+// [spec:box:syn:kernel-parser.root]
+// [spec:box:syn:kernel-parser.root.trailer]
 pub fn parse_trailer(data: &[u8]) -> Result<ArchiveData, KernelError> {
     let mut pos = 0;
 
@@ -568,9 +608,26 @@ pub fn parse_trailer(data: &[u8]) -> Result<ArchiveData, KernelError> {
     // Parse record count
     let (record_count, consumed) = decode_vu64(&data[pos..])?;
     pos += consumed;
+    let record_count = usize::try_from(record_count).map_err(|_| KernelError::BadData)?;
+
+    // The smallest record is a directory with an empty name and AttrMap
+    // (1-byte header, 1-byte name length, and 9-byte empty AttrMap). Two
+    // 8-byte FST length fields must follow the records.
+    const MIN_RECORD_SIZE: usize = 11;
+    const MIN_FST_TRAILERS_SIZE: usize = 16;
+    let remaining = data.len().checked_sub(pos).ok_or(KernelError::BadData)?;
+    let available_for_records = remaining
+        .checked_sub(MIN_FST_TRAILERS_SIZE)
+        .ok_or(KernelError::BadData)?;
+    if record_count > available_for_records / MIN_RECORD_SIZE {
+        return Err(KernelError::BadData);
+    }
 
     // Parse all records
-    let mut records = Vec::with_capacity(record_count as usize);
+    let mut records = Vec::new();
+    records
+        .try_reserve_exact(record_count)
+        .map_err(|_| KernelError::BadData)?;
     for _ in 0..record_count {
         let (record, consumed) = parse_record(&data[pos..], &attr_keys)?;
         pos += consumed;
@@ -588,17 +645,10 @@ pub fn parse_trailer(data: &[u8]) -> Result<ArchiveData, KernelError> {
     // Build parent-child relationships from FST
     build_directory_tree(&mut records, fst_data.as_deref());
 
-    // Find root directory index (first directory or index 0)
-    let root_index = records.iter()
-        .position(|r| r.is_dir())
-        .map(|i| i as u64 + 1) // +1 because indices are 1-based
-        .unwrap_or(1);
-
     Ok(ArchiveData {
         id: 0, // Will be assigned by add_archive()
         records,
-        root_index,
-        archive_size: 0, // Set later by caller
+        archive_size: 0,      // Set later by caller
         data_offset_base: 32, // Header size, data starts after
         fst_data,
         block_fst_data,
@@ -659,7 +709,8 @@ fn build_directory_tree(records: &mut [Record], fst_data: Option<&[u8]>) {
         // Find the parent directory's index
         let parent_index = if parent_path.is_empty() {
             // Root children - find root directory
-            records.iter()
+            records
+                .iter()
                 .position(|r| r.is_dir() && r.name.is_empty())
                 .map(|i| i as u64 + 1)
         } else {
@@ -668,7 +719,10 @@ fn build_directory_tree(records: &mut [Record], fst_data: Option<&[u8]>) {
 
         if let Some(idx) = parent_index {
             if idx > 0 && (idx as usize) <= records.len() {
-                if let RecordData::Directory { children: ref mut dir_children } = records[idx as usize - 1].data {
+                if let RecordData::Directory {
+                    children: ref mut dir_children,
+                } = records[idx as usize - 1].data
+                {
                     *dir_children = children;
                 }
             }
@@ -685,7 +739,8 @@ pub fn fst_lookup(fst_data: &[u8], path: &str) -> Option<u64> {
     let fst = Fst::<_, u64>::new(Cow::Borrowed(fst_data)).ok()?;
 
     // Convert path to FST key format (using 0x1f as separator)
-    let key: Vec<u8> = path.as_bytes()
+    let key: Vec<u8> = path
+        .as_bytes()
         .iter()
         .map(|&b| if b == b'/' { 0x1f } else { b })
         .collect();
@@ -704,7 +759,8 @@ pub fn fst_children(fst_data: &[u8], parent_path: &str) -> Vec<(String, u64)> {
     let prefix: Vec<u8> = if parent_path.is_empty() {
         Vec::new()
     } else {
-        let mut p: Vec<u8> = parent_path.as_bytes()
+        let mut p: Vec<u8> = parent_path
+            .as_bytes()
             .iter()
             .map(|&b| if b == b'/' { 0x1f } else { b })
             .collect();
@@ -732,4 +788,368 @@ pub fn fst_children(fst_data: &[u8], parent_path: &str) -> Vec<(String, u64)> {
     }
 
     children
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::metadata::{BoxfsMetadata, SYNTHETIC_ROOT_INDEX};
+    use box_format::{
+        sync::BoxWriter, BoxPath, Compression as WriterCompression, CompressionConfig,
+        HashMap as WriterHashMap,
+    };
+    use std::io::Cursor;
+
+    fn encoded_attrmap(declared_len: u64, contents_and_following: &[u8]) -> Vec<u8> {
+        let mut data = Vec::new();
+        data.extend_from_slice(&declared_len.to_le_bytes());
+        data.extend_from_slice(contents_and_following);
+        data
+    }
+
+    fn encoded_vu64_max() -> [u8; 9] {
+        [0, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff]
+    }
+
+    fn trailer_before_record_count() -> Vec<u8> {
+        let mut data = Vec::new();
+        data.push(0x80); // zero attribute keys
+        data.extend_from_slice(&1u64.to_le_bytes());
+        data.push(0x80); // zero entries in the one-byte global AttrMap
+        data.push(0x80); // zero-length dictionary
+        data
+    }
+
+    fn trailer_with_fsts(path_fst: &[u8], block_fst: &[u8]) -> Vec<u8> {
+        let mut data = trailer_before_record_count();
+        data.push(0x80); // zero records
+        data.extend_from_slice(&(path_fst.len() as u64).to_le_bytes());
+        data.extend_from_slice(path_fst);
+        data.extend_from_slice(&(block_fst.len() as u64).to_le_bytes());
+        data.extend_from_slice(block_fst);
+        data
+    }
+
+    fn writer_metadata(build: impl FnOnce(&mut BoxWriter)) -> BoxfsMetadata {
+        let temp = tempfile::tempdir().expect("temporary archive directory");
+        let archive_path = temp.path().join("kernel-root.box");
+        let mut writer = BoxWriter::create(&archive_path).expect("create writer archive");
+        build(&mut writer);
+        writer.finish().expect("finish writer archive");
+
+        let bytes = std::fs::read(&archive_path).expect("read writer archive");
+        let header = parse_header(&bytes[..HEADER_SIZE]).expect("parse writer header");
+        let trailer_offset = usize::try_from(header.trailer_offset).expect("trailer offset");
+        let mut archive = parse_trailer(&bytes[trailer_offset..]).expect("parse writer trailer");
+        archive.archive_size = bytes.len() as u64;
+
+        let mut metadata = BoxfsMetadata::empty();
+        metadata.add_archive(archive);
+        metadata
+    }
+
+    // [spec:box:req:kernel-vfs.root.namespace/test/unit]
+    #[test]
+    fn writer_archives_use_non_aliasing_synthetic_root() {
+        let config = CompressionConfig::new(WriterCompression::Stored);
+        let files_only = writer_metadata(|writer| {
+            writer
+                .insert(
+                    &config,
+                    BoxPath::new("alpha.txt").unwrap(),
+                    Cursor::new(b"alpha"),
+                    WriterHashMap::new(),
+                )
+                .unwrap();
+            writer
+                .insert(
+                    &config,
+                    BoxPath::new("beta.txt").unwrap(),
+                    Cursor::new(b"beta"),
+                    WriterHashMap::new(),
+                )
+                .unwrap();
+        });
+
+        let root = files_only.root_index();
+        assert_eq!(root, SYNTHETIC_ROOT_INDEX);
+        assert!(files_only.get(root).is_some_and(Record::is_dir));
+        assert_eq!(files_only.path_for_index(root), Some(Vec::new()));
+        assert!(files_only
+            .merged_fst
+            .prefix_iter(&[])
+            .all(|(_, composite)| composite != root));
+        let mut names: Vec<_> = files_only
+            .children(root)
+            .into_iter()
+            .map(|(_, record)| record.name.as_str())
+            .collect();
+        names.sort_unstable();
+        assert_eq!(names, ["alpha.txt", "beta.txt"]);
+        assert!(files_only.find_child(root, "alpha.txt").is_some());
+
+        let mixed = writer_metadata(|writer| {
+            writer
+                .insert(
+                    &config,
+                    BoxPath::new("top.txt").unwrap(),
+                    Cursor::new(b"top"),
+                    WriterHashMap::new(),
+                )
+                .unwrap();
+            writer
+                .mkdir(BoxPath::new("dir").unwrap(), WriterHashMap::new())
+                .unwrap();
+            writer
+                .insert(
+                    &config,
+                    BoxPath::new("dir/nested.txt").unwrap(),
+                    Cursor::new(b"nested"),
+                    WriterHashMap::new(),
+                )
+                .unwrap();
+        });
+
+        let root = mixed.root_index();
+        let mut names: Vec<_> = mixed
+            .children(root)
+            .into_iter()
+            .map(|(_, record)| record.name.as_str())
+            .collect();
+        names.sort_unstable();
+        assert_eq!(names, ["dir", "top.txt"]);
+        let directory = mixed.find_child(root, "dir").expect("top-level directory");
+        assert!(mixed.find_child(directory, "nested.txt").is_some());
+    }
+
+    // [spec:box:syn:kernel-parser.root.trailer/test/unit]
+    #[test]
+    fn path_fst_magic_is_validated_during_trailer_parsing() {
+        let invalid_magic = [0u8; 24];
+        assert!(matches!(
+            parse_trailer(&trailer_with_fsts(&invalid_magic, &[])),
+            Err(KernelError::BadData)
+        ));
+    }
+
+    // [spec:box:syn:kernel-parser.root.trailer/test/unit]
+    #[test]
+    fn block_fst_version_is_validated_during_trailer_parsing() {
+        let mut invalid_version = [0u8; 24];
+        invalid_version[..4].copy_from_slice(b"BFST");
+        invalid_version[4] = 2;
+        assert!(matches!(
+            parse_trailer(&trailer_with_fsts(&[], &invalid_version)),
+            Err(KernelError::BadData)
+        ));
+    }
+
+    // [spec:box:syn:kernel-parser.root.trailer/test/unit]
+    #[test]
+    fn reserved_attribute_types_are_rejected() {
+        for type_tag in [11, u8::MAX] {
+            let data = [0x81, type_tag, 0x81, b'x'];
+            assert!(matches!(parse_attr_keys(&data), Err(KernelError::BadData)));
+        }
+    }
+
+    // [spec:box:def:attributes.root.standard-keys/test/unit]
+    #[test]
+    fn unix_mode_requires_exact_vu32() {
+        let mut attrs = AttrMap::new();
+        // FastVint Vu32 for 0100600: offset(3) + 0x4100.
+        attrs.insert(0, Vec::from([0x20, 0x00, 0x41]).into_boxed_slice());
+        let mut keys = Vec::from([AttrKey {
+            name: String::from(ATTR_KEY_UNIX_MODE),
+            attr_type: AttrType::Vu32,
+        }]);
+
+        assert_eq!(extract_mode(&attrs, &keys, 0o100644), 0o100600);
+
+        attrs.insert(0, Vec::from([0x20, 0x00]).into_boxed_slice());
+        assert_eq!(extract_mode(&attrs, &keys, 0o100644), 0o100644);
+
+        attrs.insert(0, Vec::from([0x20, 0x00, 0x41, 0x80]).into_boxed_slice());
+        assert_eq!(extract_mode(&attrs, &keys, 0o100644), 0o100644);
+
+        attrs.insert(0, Vec::from([0x20, 0x00, 0x41]).into_boxed_slice());
+        keys[0].attr_type = AttrType::Bytes;
+        assert_eq!(extract_mode(&attrs, &keys, 0o100644), 0o100644);
+
+        // 65536 is a valid Vu32 but cannot be represented by Record::mode.
+        keys[0].attr_type = AttrType::Vu32;
+        attrs.insert(0, Vec::from([0x20, 0x80, 0xbf]).into_boxed_slice());
+        assert_eq!(extract_mode(&attrs, &keys, 0o100644), 0o100644);
+    }
+
+    // [spec:box:def:attributes.root.standard-keys/test/unit]
+    #[test]
+    fn modified_datetime_uses_standard_exact_vi64() {
+        let mut attrs = AttrMap::new();
+        // FastVint Vi64 for -9000 minutes: zigzag(−9000) = 17999.
+        attrs.insert(0, Vec::from([0x20, 0xcf, 0x05]).into_boxed_slice());
+        let mut keys = Vec::from([AttrKey {
+            name: String::from(ATTR_KEY_MODIFIED),
+            attr_type: AttrType::DateTime,
+        }]);
+
+        assert_eq!(extract_mtime(&attrs, &keys), -9000);
+
+        keys[0].name = String::from("unix.mtime");
+        assert_eq!(extract_mtime(&attrs, &keys), 0);
+
+        keys[0].name = String::from(ATTR_KEY_MODIFIED);
+        keys[0].attr_type = AttrType::Vi64;
+        assert_eq!(extract_mtime(&attrs, &keys), 0);
+
+        keys[0].attr_type = AttrType::DateTime;
+        attrs.insert(0, Vec::from([0x20, 0xcf, 0x05, 0x80]).into_boxed_slice());
+        assert_eq!(extract_mtime(&attrs, &keys), 0);
+    }
+
+    // [spec:box:syn:kernel-parser.root.trailer/test/unit]
+    #[test]
+    fn attrmap_parser_confines_entries_to_the_declared_envelope() {
+        // count=1, key=2, value length=3, then the value. The final byte is
+        // the start of the next trailer field and is not part of the map.
+        let valid = encoded_attrmap(6, &[0x81, 0x82, 0x83, 1, 2, 3, 0xaa]);
+        let (attrs, consumed) = parse_attrmap(&valid).expect("valid attribute map");
+        assert_eq!(consumed, 14);
+        assert_eq!(
+            attrs.get(&2).map(|value| value.as_ref()),
+            Some(&[1, 2, 3][..])
+        );
+
+        // The value bytes exist in the surrounding trailer, but lie beyond
+        // the declared three-byte map envelope.
+        let crossing = encoded_attrmap(3, &[0x81, 0x82, 0x82, 1, 2]);
+        assert!(matches!(
+            parse_attrmap(&crossing),
+            Err(KernelError::BadData)
+        ));
+
+        // A declared envelope that is itself truncated is invalid.
+        let truncated = encoded_attrmap(6, &[0x81, 0x82, 0x83, 1, 2]);
+        assert!(matches!(
+            parse_attrmap(&truncated),
+            Err(KernelError::BadData)
+        ));
+
+        // Entries must consume the envelope exactly; padding is not accepted.
+        let padded = encoded_attrmap(2, &[0x80, 0x80]);
+        assert!(matches!(parse_attrmap(&padded), Err(KernelError::BadData)));
+
+        // Even an empty map contains its encoded zero entry count.
+        let missing_count = encoded_attrmap(0, &[0x80]);
+        assert!(matches!(
+            parse_attrmap(&missing_count),
+            Err(KernelError::BadData)
+        ));
+
+        // Length and entry-count conversions must fail rather than wrap or
+        // attempt an attacker-selected allocation.
+        let oversized_envelope = encoded_attrmap(u64::MAX, &[]);
+        assert!(matches!(
+            parse_attrmap(&oversized_envelope),
+            Err(KernelError::BadData)
+        ));
+        let oversized_count =
+            encoded_attrmap(9, &[0, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff]);
+        assert!(matches!(
+            parse_attrmap(&oversized_count),
+            Err(KernelError::BadData)
+        ));
+    }
+
+    // [spec:box:syn:kernel-parser.root.trailer/test/unit]
+    #[test]
+    fn attr_key_counts_are_bounded_before_allocation() {
+        assert!(matches!(
+            parse_attr_keys(&encoded_vu64_max()),
+            Err(KernelError::BadData)
+        ));
+
+        // Two keys cannot fit in the zero bytes following this count.
+        assert!(matches!(
+            parse_attr_keys(&[0x82]),
+            Err(KernelError::BadData)
+        ));
+
+        // The declared two-byte name has only one byte available.
+        assert!(matches!(
+            parse_attr_keys(&[0x81, 0x01, 0x82, b'a']),
+            Err(KernelError::BadData)
+        ));
+    }
+
+    // [spec:box:syn:kernel-parser.root.trailer/test/unit]
+    #[test]
+    fn dictionary_and_fst_lengths_reject_overflow_and_truncation() {
+        assert!(matches!(
+            skip_dictionary(&encoded_vu64_max()),
+            Err(KernelError::BadData)
+        ));
+        assert!(matches!(
+            skip_dictionary(&[0x83, 1, 2]),
+            Err(KernelError::BadData)
+        ));
+
+        let oversized_fst = u64::MAX.to_le_bytes();
+        assert!(matches!(
+            skip_fst(&oversized_fst),
+            Err(KernelError::BadData)
+        ));
+        assert!(matches!(
+            parse_fst_data(&oversized_fst),
+            Err(KernelError::BadData)
+        ));
+
+        assert!(matches!(skip_fst(&[0; 7]), Err(KernelError::BadData)));
+        assert!(matches!(parse_fst_data(&[0; 7]), Err(KernelError::BadData)));
+
+        let mut truncated_fst = Vec::new();
+        truncated_fst.extend_from_slice(&3u64.to_le_bytes());
+        truncated_fst.extend_from_slice(&[1, 2]);
+        assert!(matches!(
+            skip_fst(&truncated_fst),
+            Err(KernelError::BadData)
+        ));
+        assert!(matches!(
+            parse_fst_data(&truncated_fst),
+            Err(KernelError::BadData)
+        ));
+    }
+
+    // [spec:box:syn:kernel-parser.root.trailer/test/unit]
+    #[test]
+    fn record_counts_are_bounded_before_allocation() {
+        let mut oversized = trailer_before_record_count();
+        oversized.extend_from_slice(&encoded_vu64_max());
+        assert!(matches!(
+            parse_trailer(&oversized),
+            Err(KernelError::BadData)
+        ));
+
+        let mut truncated = trailer_before_record_count();
+        truncated.push(0);
+        assert!(matches!(
+            parse_trailer(&truncated),
+            Err(KernelError::BadData)
+        ));
+
+        let mut impossible = trailer_before_record_count();
+        impossible.push(0x81); // one record
+        impossible.extend_from_slice(&0u64.to_le_bytes());
+        impossible.extend_from_slice(&0u64.to_le_bytes());
+        assert!(matches!(
+            parse_trailer(&impossible),
+            Err(KernelError::BadData)
+        ));
+
+        let mut empty = trailer_before_record_count();
+        empty.push(0x80); // zero records
+        empty.extend_from_slice(&0u64.to_le_bytes());
+        empty.extend_from_slice(&0u64.to_le_bytes());
+        assert!(parse_trailer(&empty).is_ok());
+    }
 }
