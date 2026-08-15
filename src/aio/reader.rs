@@ -105,10 +105,10 @@ pub(super) async fn read_trailer<R: tokio::io::AsyncRead + tokio::io::AsyncSeek 
 
 #[derive(Debug, thiserror::Error)]
 pub enum OpenError {
-    #[error("Could not find trailer (the end of the file is missing).")]
+    #[error("The Box header is valid, but it does not contain a metadata-trailer offset.")]
     MissingTrailer,
 
-    #[error("Invalid trailer data (the data that describes where all the files are is invalid).")]
+    #[error("The Box header is valid, but its metadata trailer could not be read.")]
     InvalidTrailer(#[source] std::io::Error),
 
     #[error("Could not read header. Is this a valid Box archive?")]
@@ -119,6 +119,80 @@ pub enum OpenError {
 
     #[error("Failed to read Box file. Path: '{}'", .1.display())]
     ReadFailed(#[source] std::io::Error, PathBuf),
+}
+
+impl OpenError {
+    pub(crate) fn invalid_trailer_at(
+        source: std::io::Error,
+        version: u8,
+        trailer_offset: u64,
+        file_size: u64,
+        parser_position: Option<usize>,
+    ) -> Self {
+        let trailer_len = file_size.saturating_sub(trailer_offset);
+        let location = match parser_position {
+            Some(position) => {
+                let absolute_position = trailer_offset.saturating_add(position as u64);
+                format!(
+                    "Box format version {version} metadata trailer starts at file byte \
+                     {trailer_offset} (0x{trailer_offset:x}) and has {trailer_len} bytes \
+                     through EOF at byte {file_size}; parsing failed at trailer byte \
+                     {position} (0x{position:x}), absolute file byte {absolute_position} \
+                     (0x{absolute_position:x})"
+                )
+            }
+            None if trailer_offset <= file_size => format!(
+                "Box format version {version} metadata trailer starts at file byte \
+                 {trailer_offset} (0x{trailer_offset:x}) and has {trailer_len} bytes \
+                 through EOF at byte {file_size}"
+            ),
+            None => format!(
+                "Box format version {version} header points to a metadata trailer at file byte \
+                 {trailer_offset} (0x{trailer_offset:x}), beyond EOF at byte {file_size}"
+            ),
+        };
+
+        Self::InvalidTrailer(crate::de::wrap_io_error(source, location))
+    }
+
+    pub(crate) fn invalid_trailer_pointer(
+        source: std::io::Error,
+        version: u8,
+        archive_offset: u64,
+        trailer_pointer: u64,
+        file_size: u64,
+    ) -> Self {
+        Self::InvalidTrailer(crate::de::wrap_io_error(
+            source,
+            format!(
+                "Box format version {version} header declares trailer offset {trailer_pointer} \
+                 relative to archive base {archive_offset}; archive file size is {file_size} bytes"
+            ),
+        ))
+    }
+
+    /// Actionable help for the stage at which opening the archive failed.
+    pub fn diagnostic_help(&self) -> &'static str {
+        match self {
+            Self::InvalidTrailer(_) => {
+                "The Box header is valid. The archive is likely truncated or its metadata \
+                 trailer is corrupt; use the record, field, and byte offsets above to locate \
+                 the failure."
+            }
+            Self::MissingTrailer => {
+                "The Box header is valid, but its trailer offset is zero. The archive may not \
+                 have been finalized."
+            }
+            Self::MissingHeader(_) => {
+                "No valid Box header was found. Check that this is a Box archive and that its \
+                 32-byte header is complete."
+            }
+            Self::InvalidPath(_, _) => "Check that the archive path exists and can be resolved.",
+            Self::ReadFailed(_, _) => {
+                "Check that the archive file is readable and was not moved or replaced."
+            }
+        }
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -313,20 +387,69 @@ impl BoxFileReader {
             .map_err(|e| OpenError::ReadFailed(e, path.clone()))?
             .len();
 
-        let trailer_offset = offset + trailer_ptr.get();
+        let trailer_offset = offset.checked_add(trailer_ptr.get()).ok_or_else(|| {
+            OpenError::invalid_trailer_pointer(
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "archive base plus trailer offset overflows a 64-bit file position",
+                ),
+                header.version,
+                offset,
+                trailer_ptr.get(),
+                file_size,
+            )
+        })?;
+        if trailer_offset > file_size {
+            return Err(OpenError::invalid_trailer_at(
+                std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    format!(
+                        "metadata trailer starts {} bytes beyond the end of the archive",
+                        trailer_offset - file_size
+                    ),
+                ),
+                header.version,
+                trailer_offset,
+                file_size,
+                None,
+            ));
+        }
         let trailer_len = file_size - trailer_offset;
 
-        let trailer_segment = Segment::new(mmap.into(), trailer_offset, trailer_len)
-            .map_err(|e| OpenError::InvalidTrailer(std::io::Error::other(e)))?;
+        let trailer_segment =
+            Segment::new(mmap.into(), trailer_offset, trailer_len).map_err(|e| {
+                OpenError::invalid_trailer_at(
+                    std::io::Error::other(e),
+                    header.version,
+                    trailer_offset,
+                    file_size,
+                    None,
+                )
+            })?;
 
-        let trailer_data = trailer_segment
-            .as_slice()
-            .map_err(|e| OpenError::InvalidTrailer(std::io::Error::other(e)))?;
+        let trailer_data = trailer_segment.as_slice().map_err(|e| {
+            OpenError::invalid_trailer_at(
+                std::io::Error::other(e),
+                header.version,
+                trailer_offset,
+                file_size,
+                None,
+            )
+        })?;
 
         // Deserialize with borrowed data from the mmap
         let mut pos = 0;
-        let meta = deserialize_metadata_borrowed(trailer_data, &mut pos, header.version)
-            .map_err(OpenError::InvalidTrailer)?;
+        let meta = deserialize_metadata_borrowed(trailer_data, &mut pos, header.version).map_err(
+            |source| {
+                OpenError::invalid_trailer_at(
+                    source,
+                    header.version,
+                    trailer_offset,
+                    file_size,
+                    Some(pos),
+                )
+            },
+        )?;
 
         // Safety: The trailer_segment holds an Arc<MemoryMappedFile> which keeps the
         // underlying memory alive. As long as BoxFileReader exists, the segment exists,

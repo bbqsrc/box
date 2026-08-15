@@ -91,20 +91,69 @@ impl BoxReader {
             .map_err(|e| OpenError::ReadFailed(e, path.clone()))?
             .len();
 
-        let trailer_offset = offset + trailer_ptr.get();
+        let trailer_offset = offset.checked_add(trailer_ptr.get()).ok_or_else(|| {
+            OpenError::invalid_trailer_pointer(
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "archive base plus trailer offset overflows a 64-bit file position",
+                ),
+                header.version,
+                offset,
+                trailer_ptr.get(),
+                file_size,
+            )
+        })?;
+        if trailer_offset > file_size {
+            return Err(OpenError::invalid_trailer_at(
+                std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    format!(
+                        "metadata trailer starts {} bytes beyond the end of the archive",
+                        trailer_offset - file_size
+                    ),
+                ),
+                header.version,
+                trailer_offset,
+                file_size,
+                None,
+            ));
+        }
         let trailer_len = file_size - trailer_offset;
 
-        let trailer_segment = Segment::new(mmap.into(), trailer_offset, trailer_len)
-            .map_err(|e| OpenError::InvalidTrailer(std::io::Error::other(e)))?;
+        let trailer_segment =
+            Segment::new(mmap.into(), trailer_offset, trailer_len).map_err(|e| {
+                OpenError::invalid_trailer_at(
+                    std::io::Error::other(e),
+                    header.version,
+                    trailer_offset,
+                    file_size,
+                    None,
+                )
+            })?;
 
-        let trailer_data = trailer_segment
-            .as_slice()
-            .map_err(|e| OpenError::InvalidTrailer(std::io::Error::other(e)))?;
+        let trailer_data = trailer_segment.as_slice().map_err(|e| {
+            OpenError::invalid_trailer_at(
+                std::io::Error::other(e),
+                header.version,
+                trailer_offset,
+                file_size,
+                None,
+            )
+        })?;
 
         // Deserialize with borrowed data from the mmap
         let mut pos = 0;
-        let meta = deserialize_metadata_borrowed(trailer_data, &mut pos, header.version)
-            .map_err(OpenError::InvalidTrailer)?;
+        let meta = deserialize_metadata_borrowed(trailer_data, &mut pos, header.version).map_err(
+            |source| {
+                OpenError::invalid_trailer_at(
+                    source,
+                    header.version,
+                    trailer_offset,
+                    file_size,
+                    Some(pos),
+                )
+            },
+        )?;
 
         // Safety: The trailer_segment holds an Arc<MemoryMappedFile> which keeps the
         // underlying memory alive. As long as BoxReader exists, the segment exists,

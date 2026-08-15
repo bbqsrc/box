@@ -2,15 +2,50 @@ use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
 
+const CLI_VERSION: &str = concat!(
+    env!("CARGO_PKG_VERSION"),
+    " (build ",
+    env!("BOX_BUILD_DATE"),
+    ", commit ",
+    env!("BOX_GIT_HASH"),
+    ")"
+);
+
 #[derive(Debug, Parser)]
 #[command(
     name = "box",
     about = "Create, modify and extract box archives.",
-    version
+    version = CLI_VERSION
 )]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Commands,
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::CommandFactory;
+
+    use super::Cli;
+
+    #[test]
+    fn version_contains_declared_version_build_date_and_commit() {
+        let version = Cli::command().render_version().to_string();
+        let build_date = env!("BOX_BUILD_DATE");
+
+        assert!(version.contains(env!("CARGO_PKG_VERSION")));
+        assert!(version.contains(&format!("build {build_date}")));
+        assert!(version.contains(&format!("commit {}", env!("BOX_GIT_HASH"))));
+        assert_eq!(build_date.len(), 10);
+        assert_eq!(&build_date[4..5], "-");
+        assert_eq!(&build_date[7..8], "-");
+        assert!(
+            build_date
+                .bytes()
+                .enumerate()
+                .all(|(index, byte)| matches!(index, 4 | 7) || byte.is_ascii_digit())
+        );
+    }
 }
 
 #[derive(Debug, Subcommand)]

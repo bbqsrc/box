@@ -18,7 +18,8 @@ use crate::{
 
 use super::common::{AttrMapBorrowed, parse_fst_borrowed};
 use super::{
-    DeserializeBorrowed, read_u8_slice, read_u32_le_slice, read_u64_le_slice, read_vlq_u64,
+    DeserializeBorrowed, checked_count, read_context, read_u8_slice, read_u32_le_slice,
+    read_u64_le_slice, read_vlq_u64,
 };
 
 // ============================================================================
@@ -51,11 +52,46 @@ fn deserialize_file_borrowed<'a>(
     pos: &mut usize,
     compression: Compression,
 ) -> std::io::Result<FileRecord<'a>> {
-    let length = read_u64_le_slice(data, pos)?;
-    let decompressed_length = read_u64_le_slice(data, pos)?;
-    let data_offset = read_u64_le_slice(data, pos)?;
-    let name = <Cow<'a, str>>::deserialize_borrowed(data, pos)?;
-    let attrs = AttrMapBorrowed::deserialize_borrowed(data, pos)?;
+    let offset = *pos;
+    let length = read_context(
+        read_u64_le_slice(data, pos),
+        "file compressed length",
+        offset,
+    )?;
+    let offset = *pos;
+    let decompressed_length = read_context(
+        read_u64_le_slice(data, pos),
+        "file decompressed length",
+        offset,
+    )?;
+    let data_offset_field = *pos;
+    let data_offset = read_context(
+        read_u64_le_slice(data, pos),
+        "file data offset",
+        data_offset_field,
+    )?;
+    let offset = *pos;
+    let name = read_context(
+        <Cow<'a, str>>::deserialize_borrowed(data, pos),
+        "file name",
+        offset,
+    )?;
+    let offset = *pos;
+    let attrs = read_context(
+        AttrMapBorrowed::deserialize_borrowed(data, pos),
+        "file attributes",
+        offset,
+    )?;
+    let data = read_context(
+        NonZeroU64::new(data_offset).ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "file data offset must not be zero",
+            )
+        }),
+        "file data offset",
+        data_offset_field,
+    )?;
 
     Ok(FileRecord {
         compression,
@@ -63,12 +99,7 @@ fn deserialize_file_borrowed<'a>(
         decompressed_length,
         name,
         attrs,
-        data: NonZeroU64::new(data_offset).ok_or_else(|| {
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "file data offset must not be zero",
-            )
-        })?,
+        data,
     })
 }
 
@@ -78,12 +109,52 @@ fn deserialize_chunked_file_borrowed<'a>(
     pos: &mut usize,
     compression: Compression,
 ) -> std::io::Result<ChunkedFileRecord<'a>> {
-    let block_size = read_u32_le_slice(data, pos)?;
-    let length = read_u64_le_slice(data, pos)?;
-    let decompressed_length = read_u64_le_slice(data, pos)?;
-    let data_offset = read_u64_le_slice(data, pos)?;
-    let name = <Cow<'a, str>>::deserialize_borrowed(data, pos)?;
-    let attrs = AttrMapBorrowed::deserialize_borrowed(data, pos)?;
+    let offset = *pos;
+    let block_size = read_context(
+        read_u32_le_slice(data, pos),
+        "chunked-file block size",
+        offset,
+    )?;
+    let offset = *pos;
+    let length = read_context(
+        read_u64_le_slice(data, pos),
+        "chunked-file compressed length",
+        offset,
+    )?;
+    let offset = *pos;
+    let decompressed_length = read_context(
+        read_u64_le_slice(data, pos),
+        "chunked-file decompressed length",
+        offset,
+    )?;
+    let data_offset_field = *pos;
+    let data_offset = read_context(
+        read_u64_le_slice(data, pos),
+        "chunked-file data offset",
+        data_offset_field,
+    )?;
+    let offset = *pos;
+    let name = read_context(
+        <Cow<'a, str>>::deserialize_borrowed(data, pos),
+        "chunked-file name",
+        offset,
+    )?;
+    let offset = *pos;
+    let attrs = read_context(
+        AttrMapBorrowed::deserialize_borrowed(data, pos),
+        "chunked-file attributes",
+        offset,
+    )?;
+    let data = read_context(
+        NonZeroU64::new(data_offset).ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "chunked-file data offset must not be zero",
+            )
+        }),
+        "chunked-file data offset",
+        data_offset_field,
+    )?;
 
     Ok(ChunkedFileRecord {
         compression,
@@ -92,12 +163,7 @@ fn deserialize_chunked_file_borrowed<'a>(
         decompressed_length,
         name,
         attrs,
-        data: NonZeroU64::new(data_offset).ok_or_else(|| {
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "chunked file data offset must not be zero",
-            )
-        })?,
+        data,
     })
 }
 
@@ -106,18 +172,35 @@ pub(crate) fn deserialize_attr_keys_borrowed<'a>(
     data: &'a [u8],
     pos: &mut usize,
 ) -> std::io::Result<Vec<AttrKey>> {
-    let len = read_vlq_u64(data, pos)? as usize;
+    let count_offset = *pos;
+    let len = read_context(read_vlq_u64(data, pos), "attribute-key count", count_offset)?;
+    let len = checked_count(data, *pos, len, "attribute-key count", count_offset)?;
     let mut keys = Vec::with_capacity(len);
-    for _ in 0..len {
+    for index in 0..len {
         // v1: read type tag first
-        let type_tag = read_u8_slice(data, pos)?;
+        let type_offset = *pos;
+        let type_tag = read_context(
+            read_u8_slice(data, pos),
+            format_args!("type tag for attribute key {} of {len}", index + 1),
+            type_offset,
+        )?;
         let attr_type = AttrType::from_u8(type_tag).ok_or_else(|| {
             std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
-                format!("unknown attribute type tag: {}", type_tag),
+                format!(
+                    "unknown attribute type tag 0x{type_tag:02x} for attribute key {} of {len} \
+                     at trailer byte {type_offset}",
+                    index + 1
+                ),
             )
         })?;
-        let name = <&'a str>::deserialize_borrowed(data, pos)?.to_string();
+        let name_offset = *pos;
+        let name = read_context(
+            <&'a str>::deserialize_borrowed(data, pos),
+            format_args!("name of attribute key {} of {len}", index + 1),
+            name_offset,
+        )?
+        .to_string();
         keys.push(AttrKey { name, attr_type });
     }
     Ok(keys)
@@ -128,10 +211,20 @@ pub(crate) fn deserialize_directory_borrowed<'a>(
     data: &'a [u8],
     pos: &mut usize,
 ) -> std::io::Result<DirectoryRecord<'a>> {
-    let name = <Cow<'a, str>>::deserialize_borrowed(data, pos)?;
+    let offset = *pos;
+    let name = read_context(
+        <Cow<'a, str>>::deserialize_borrowed(data, pos),
+        "directory name",
+        offset,
+    )?;
     // v1: entries not in binary format (looked up via FST)
     let entries = Vec::new();
-    let attrs = AttrMapBorrowed::deserialize_borrowed(data, pos)?;
+    let offset = *pos;
+    let attrs = read_context(
+        AttrMapBorrowed::deserialize_borrowed(data, pos),
+        "directory attributes",
+        offset,
+    )?;
 
     Ok(DirectoryRecord {
         name,
@@ -145,23 +238,62 @@ pub(crate) fn deserialize_record_borrowed<'a>(
     data: &'a [u8],
     pos: &mut usize,
 ) -> std::io::Result<Record<'a>> {
-    let type_compression = read_u8_slice(data, pos)?;
+    let record_offset = *pos;
+    let type_compression = read_context(
+        read_u8_slice(data, pos),
+        "record type/compression byte",
+        record_offset,
+    )?;
     let (record_type, compression) = parse_type_compression(type_compression);
 
     let record = match record_type {
-        RECORD_TYPE_DIRECTORY => Record::Directory(deserialize_directory_borrowed(data, pos)?),
-        RECORD_TYPE_FILE => Record::File(deserialize_file_borrowed(data, pos, compression)?),
-        RECORD_TYPE_CHUNKED_FILE => {
-            Record::ChunkedFile(deserialize_chunked_file_borrowed(data, pos, compression)?)
+        RECORD_TYPE_DIRECTORY => {
+            let offset = *pos;
+            Record::Directory(read_context(
+                deserialize_directory_borrowed(data, pos),
+                "directory record body",
+                offset,
+            )?)
         }
-        RECORD_TYPE_SYMLINK => Record::Link(LinkRecord::deserialize_borrowed(data, pos)?),
+        RECORD_TYPE_FILE => {
+            let offset = *pos;
+            Record::File(read_context(
+                deserialize_file_borrowed(data, pos, compression),
+                "file record body",
+                offset,
+            )?)
+        }
+        RECORD_TYPE_CHUNKED_FILE => {
+            let offset = *pos;
+            Record::ChunkedFile(read_context(
+                deserialize_chunked_file_borrowed(data, pos, compression),
+                "chunked-file record body",
+                offset,
+            )?)
+        }
+        RECORD_TYPE_SYMLINK => {
+            let offset = *pos;
+            Record::Link(read_context(
+                LinkRecord::deserialize_borrowed(data, pos),
+                "symlink record body",
+                offset,
+            )?)
+        }
         RECORD_TYPE_EXTERNAL_SYMLINK => {
-            Record::ExternalLink(ExternalLinkRecord::deserialize_borrowed(data, pos)?)
+            let offset = *pos;
+            Record::ExternalLink(read_context(
+                ExternalLinkRecord::deserialize_borrowed(data, pos),
+                "external-symlink record body",
+                offset,
+            )?)
         }
         _ => {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
-                format!("invalid or unsupported record type: 0x{:02x}", record_type),
+                format!(
+                    "invalid or unsupported record type 0x{record_type:02x} in combined \
+                     type/compression byte 0x{type_compression:02x} at trailer byte {record_offset}"
+                ),
             ));
         }
     };
@@ -177,33 +309,88 @@ pub(crate) fn deserialize_metadata_borrowed<'a>(
     // root not serialized (paths indexed by FST)
     let root = Vec::new();
 
-    let attr_keys = deserialize_attr_keys_borrowed(data, pos)?;
-    let attrs = AttrMapBorrowed::deserialize_borrowed(data, pos)?;
+    let offset = *pos;
+    let attr_keys = read_context(
+        deserialize_attr_keys_borrowed(data, pos),
+        "archive attribute-key schema",
+        offset,
+    )?;
+    let offset = *pos;
+    let attrs = read_context(
+        AttrMapBorrowed::deserialize_borrowed(data, pos),
+        "archive attributes",
+        offset,
+    )?;
 
     // Dictionary: [Vu64 length][bytes] - length=0 means no dictionary
-    let dict_len = read_vlq_u64(data, pos)? as usize;
+    let dict_length_offset = *pos;
+    let dict_len = read_context(
+        read_vlq_u64(data, pos),
+        "compression-dictionary length",
+        dict_length_offset,
+    )?;
+    let dict_len = usize::try_from(dict_len).map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "compression-dictionary length at trailer byte {dict_length_offset} does not \
+                 fit in memory: {dict_len} bytes"
+            ),
+        )
+    })?;
     let dictionary = if dict_len > 0 {
-        if *pos + dict_len > data.len() {
+        let dict_offset = *pos;
+        let Some(end) = dict_offset.checked_add(dict_len) else {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "compression dictionary at trailer byte {dict_offset} has an overflowing \
+                     length: {dict_len} bytes"
+                ),
+            ));
+        };
+        if end > data.len() {
+            let available = data.len().saturating_sub(dict_offset);
+            let missing = dict_len - available;
             return Err(std::io::Error::new(
                 std::io::ErrorKind::UnexpectedEof,
-                "unexpected end of data reading dictionary",
+                format!(
+                    "cannot read compression dictionary at trailer byte {dict_offset} \
+                     (0x{dict_offset:x}): its length prefix declares {dict_len} bytes, \
+                     but only {available} remain ({missing} bytes missing)"
+                ),
             ));
         }
-        let dict_bytes = data[*pos..*pos + dict_len].to_vec().into_boxed_slice();
-        *pos += dict_len;
+        let dict_bytes = data[dict_offset..end].to_vec().into_boxed_slice();
+        *pos = end;
         Some(dict_bytes)
     } else {
         None
     };
 
-    let record_count = read_vlq_u64(data, pos)? as usize;
+    let count_offset = *pos;
+    let record_count = read_context(read_vlq_u64(data, pos), "record count", count_offset)?;
+    let record_count = checked_count(data, *pos, record_count, "record count", count_offset)?;
     let mut records = Vec::with_capacity(record_count);
-    for _ in 0..record_count {
-        records.push(deserialize_record_borrowed(data, pos)?);
+    for index in 0..record_count {
+        let offset = *pos;
+        records.push(read_context(
+            deserialize_record_borrowed(data, pos),
+            format_args!("record {} of {record_count}", index + 1),
+            offset,
+        )?);
     }
 
-    let fst = parse_fst_borrowed(data, pos);
-    let block_fst = parse_fst_borrowed(data, pos);
+    let offset = *pos;
+    let fst = read_context(parse_fst_borrowed(data, pos), "path-index FST", offset)?;
+    let block_fst = if *pos == data.len() {
+        // The block index is optional; reaching EOF exactly after the path FST
+        // is its presence marker.
+        None
+    } else {
+        let offset = *pos;
+        read_context(parse_fst_borrowed(data, pos), "block-index FST", offset)?
+    };
 
     Ok(BoxMetadata {
         root,

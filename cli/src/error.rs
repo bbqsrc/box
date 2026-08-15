@@ -17,7 +17,7 @@ pub enum Error {
         source: IntoBoxPathError,
     },
 
-    #[diagnostic(help("Is this a valid .box file?"))]
+    #[diagnostic(help("{}", source.diagnostic_help()))]
     #[error("Cannot open archive `{}`", .path.display())]
     OpenArchive {
         path: PathBuf,
@@ -137,4 +137,42 @@ pub enum Error {
         "Use --allow-external-symlinks to include external symlinks in the archive"
     ))]
     ExternalSymlinkDetected { link_path: PathBuf, target: String },
+}
+
+#[cfg(test)]
+mod tests {
+    use miette::Diagnostic;
+
+    use super::Error;
+
+    fn help_for(source: box_format::OpenError) -> String {
+        let error = Error::OpenArchive {
+            path: "archive.box".into(),
+            source,
+        };
+        error.help().unwrap().to_string()
+    }
+
+    #[test]
+    fn trailer_failure_help_acknowledges_valid_header() {
+        let help = help_for(box_format::OpenError::InvalidTrailer(std::io::Error::new(
+            std::io::ErrorKind::UnexpectedEof,
+            "truncated",
+        )));
+
+        assert!(help.contains("Box header is valid"));
+        assert!(help.contains("record, field, and byte offsets"));
+        assert!(!help.contains("Is this a valid"));
+    }
+
+    #[test]
+    fn header_failure_help_still_questions_the_input_format() {
+        let help = help_for(box_format::OpenError::MissingHeader(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "invalid magic",
+        )));
+
+        assert!(help.contains("No valid Box header was found"));
+        assert!(help.contains("32-byte header"));
+    }
 }
