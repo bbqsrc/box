@@ -1,0 +1,38 @@
+specs (
+    {
+        name box
+        include (docs/spec/**/*.md)
+        verify_required (
+            {pattern "chunked-io.*", facet "/test/integration"}
+            {pattern "extraction.*", facet "/test/integration"}
+            {pattern "cli-commands.*", facet "/test/integration"}
+        )
+        impls (
+            {
+                name rust
+                languages (@rust)
+                include (
+                    build.rs
+                    src/**/*.rs
+                    tests/**/*.rs
+                    cli/**/*.rs
+                    crates/*/**/*.rs
+                    kmod/rust/**/*.rs
+                )
+                exclude (
+                    target/**
+                    **/target/**
+                    necessary-os/**
+                    **/generated/**
+                    **/*.generated.rs
+                    **/*.gen.rs
+                )
+                test_include (
+                    tests/**/*.rs
+                    cli/tests/**/*.rs
+                    crates/*/tests/**/*.rs
+                )
+            }
+        )
+    }
+)

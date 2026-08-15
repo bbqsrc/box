@@ -1,0 +1,3 @@
+schema_version 7
+
+onboarding {kind @adopt, phase 6}

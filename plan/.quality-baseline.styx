@@ -1,0 +1,180 @@
+generated_at 2026-08-15T15:05:13.72452Z
+
+seal 82462a8983a0d548
+
+files (
+    {path Cargo.toml, code_loc 124, function_count 0, max_cyclomatic 0, duplicate_memberships 0, trivial_function_count 0}
+    {path README.md, code_loc 0, function_count 0, max_cyclomatic 0, duplicate_memberships 0, trivial_function_count 0}
+    {path SPEC.html, code_loc 1746, function_count 0, max_cyclomatic 0, duplicate_memberships 0, trivial_function_count 0}
+    {path SPEC.typ, code_loc 887, function_count 0, max_cyclomatic 0, duplicate_memberships 0, trivial_function_count 0}
+    {path build.rs, code_loc 3, function_count 1, max_cyclomatic 1, duplicate_memberships 0, trivial_function_count 0}
+    {path cli/Cargo.toml, code_loc 38, function_count 0, max_cyclomatic 0, duplicate_memberships 0, trivial_function_count 0}
+    {path cli/README.md, code_loc 0, function_count 0, max_cyclomatic 0, duplicate_memberships 0, trivial_function_count 0}
+    {path cli/build.rs, code_loc 137, function_count 10, max_cyclomatic 4, duplicate_memberships 0, trivial_function_count 0}
+    {path cli/src/cli.rs, code_loc 165, function_count 1, max_cyclomatic 2, duplicate_memberships 0, trivial_function_count 0}
+    {path cli/src/commands/create.rs, code_loc 554, function_count 2, max_cyclomatic 59, duplicate_memberships 21, trivial_function_count 0}
+    {path cli/src/commands/extract.rs, code_loc 182, function_count 1, max_cyclomatic 27, duplicate_memberships 3, trivial_function_count 0}
+    {path cli/src/commands/info.rs, code_loc 266, function_count 5, max_cyclomatic 18, duplicate_memberships 2, trivial_function_count 0}
+    {path cli/src/commands/list.rs, code_loc 338, function_count 6, max_cyclomatic 13, duplicate_memberships 5, trivial_function_count 0}
+    {path cli/src/commands/mod.rs, code_loc 10, function_count 0, max_cyclomatic 0, duplicate_memberships 0, trivial_function_count 0}
+    {path cli/src/commands/validate.rs, code_loc 90, function_count 1, max_cyclomatic 18, duplicate_memberships 1, trivial_function_count 0}
+    {path cli/src/error.rs, code_loc 147, function_count 3, max_cyclomatic 1, duplicate_memberships 2, trivial_function_count 0}
+    {path cli/src/main.rs, code_loc 26, function_count 1, max_cyclomatic 6, duplicate_memberships 0, trivial_function_count 0}
+    {path cli/src/util.rs, code_loc 120, function_count 8, max_cyclomatic 11, duplicate_memberships 0, trivial_function_count 0}
+    {path crates/box-ffi/Cargo.toml, code_loc 15, function_count 0, max_cyclomatic 0, duplicate_memberships 0, trivial_function_count 0}
+    {path crates/box-ffi/src/lib.rs, code_loc 26, function_count 3, max_cyclomatic 1, duplicate_memberships 0, trivial_function_count 0}
+    {path crates/fskitbox/Cargo.toml, code_loc 20, function_count 0, max_cyclomatic 0, duplicate_memberships 0, trivial_function_count 0}
+    {path crates/fskitbox/README.md, code_loc 0, function_count 0, max_cyclomatic 0, duplicate_memberships 0, trivial_function_count 0}
+    {path crates/fskitbox/extension/main.m, code_loc 9, function_count 0, max_cyclomatic 0, duplicate_memberships 0, trivial_function_count 0}
+    {path crates/fskitbox/host/main.swift, code_loc 9, function_count 0, max_cyclomatic 0, duplicate_memberships 0, trivial_function_count 0}
+    {path crates/fskitbox/project.yml, code_loc 61, function_count 0, max_cyclomatic 0, duplicate_memberships 0, trivial_function_count 0}
+    {path crates/fskitbox/src/bindings/filesystem.rs, code_loc 28, function_count 0, max_cyclomatic 0, duplicate_memberships 0, trivial_function_count 0}
+    {path crates/fskitbox/src/bindings/framework.rs, code_loc 5, function_count 1, max_cyclomatic 1, duplicate_memberships 0, trivial_function_count 0}
+    {path crates/fskitbox/src/bindings/mod.rs, code_loc 10, function_count 0, max_cyclomatic 0, duplicate_memberships 0, trivial_function_count 0}
+    {path crates/fskitbox/src/bindings/resource.rs, code_loc 43, function_count 0, max_cyclomatic 0, duplicate_memberships 0, trivial_function_count 0}
+    {path crates/fskitbox/src/bindings/types.rs, code_loc 194, function_count 2, max_cyclomatic 1, duplicate_memberships 0, trivial_function_count 1}
+    {path crates/fskitbox/src/bindings/volume.rs, code_loc 24, function_count 0, max_cyclomatic 0, duplicate_memberships 0, trivial_function_count 0}
+    {path crates/fskitbox/src/extension.rs, code_loc 17, function_count 2, max_cyclomatic 2, duplicate_memberships 0, trivial_function_count 0}
+    {path crates/fskitbox/src/filesystem.rs, code_loc 227, function_count 7, max_cyclomatic 5, duplicate_memberships 0, trivial_function_count 0}
+    {path crates/fskitbox/src/item.rs, code_loc 102, function_count 14, max_cyclomatic 4, duplicate_memberships 5, trivial_function_count 0}
+    {path crates/fskitbox/src/lib.rs, code_loc 10, function_count 0, max_cyclomatic 0, duplicate_memberships 0, trivial_function_count 0}
+    {path crates/fskitbox/src/volume.rs, code_loc 365, function_count 10, max_cyclomatic 2, duplicate_memberships 2, trivial_function_count 0}
+    {path crates/fst/Cargo.toml, code_loc 15, function_count 0, max_cyclomatic 0, duplicate_memberships 0, trivial_function_count 0}
+    {path crates/fst/benches/lookup.rs, code_loc 615, function_count 18, max_cyclomatic 4, duplicate_memberships 6, trivial_function_count 1}
+    {path crates/fst/src/builder.rs, code_loc 613, function_count 35, max_cyclomatic 9, duplicate_memberships 11, trivial_function_count 1}
+    {path crates/fst/src/error.rs, code_loc 35, function_count 2, max_cyclomatic 5, duplicate_memberships 2, trivial_function_count 0}
+    {path crates/fst/src/fst.rs, code_loc 478, function_count 24, max_cyclomatic 14, duplicate_memberships 9, trivial_function_count 0}
+    {path crates/fst/src/lib.rs, code_loc 10, function_count 0, max_cyclomatic 0, duplicate_memberships 0, trivial_function_count 0}
+    {path crates/fst/src/node.rs, code_loc 518, function_count 28, max_cyclomatic 8, duplicate_memberships 4, trivial_function_count 0}
+    {path crates/fst/tests/large_fst.rs, code_loc 358, function_count 8, max_cyclomatic 5, duplicate_memberships 2, trivial_function_count 0}
+    {path crates/fusebox/Cargo.toml, code_loc 22, function_count 0, max_cyclomatic 0, duplicate_memberships 0, trivial_function_count 0}
+    {path crates/fusebox/README.md, code_loc 0, function_count 0, max_cyclomatic 0, duplicate_memberships 0, trivial_function_count 0}
+    {path crates/fusebox/src/lib.rs, code_loc 823, function_count 36, max_cyclomatic 24, duplicate_memberships 9, trivial_function_count 0}
+    {path crates/fusebox/src/main.rs, code_loc 45, function_count 1, max_cyclomatic 3, duplicate_memberships 0, trivial_function_count 0}
+    {path crates/fusebox/src/multi.rs, code_loc 208, function_count 18, max_cyclomatic 8, duplicate_memberships 4, trivial_function_count 0}
+    {path crates/projfsbox/Cargo.toml, code_loc 24, function_count 0, max_cyclomatic 0, duplicate_memberships 0, trivial_function_count 0}
+    {path crates/projfsbox/src/callbacks.rs, code_loc 317, function_count 10, max_cyclomatic 11, duplicate_memberships 0, trivial_function_count 0}
+    {path crates/projfsbox/src/enumeration.rs, code_loc 147, function_count 16, max_cyclomatic 15, duplicate_memberships 3, trivial_function_count 0}
+    {path crates/projfsbox/src/error.rs, code_loc 71, function_count 6, max_cyclomatic 6, duplicate_memberships 1, trivial_function_count 0}
+    {path crates/projfsbox/src/lib.rs, code_loc 31, function_count 1, max_cyclomatic 4, duplicate_memberships 0, trivial_function_count 0}
+    {path crates/projfsbox/src/main.rs, code_loc 101, function_count 3, max_cyclomatic 5, duplicate_memberships 0, trivial_function_count 0}
+    {path crates/projfsbox/src/path.rs, code_loc 60, function_count 9, max_cyclomatic 2, duplicate_memberships 2, trivial_function_count 0}
+    {path crates/projfsbox/src/provider.rs, code_loc 160, function_count 14, max_cyclomatic 4, duplicate_memberships 5, trivial_function_count 0}
+    {path crates/projfsbox/src/time.rs, code_loc 31, function_count 4, max_cyclomatic 1, duplicate_memberships 0, trivial_function_count 0}
+    {path kmod/Makefile, code_loc 16, function_count 0, max_cyclomatic 0, duplicate_memberships 0, trivial_function_count 0}
+    {path kmod/README.md, code_loc 0, function_count 0, max_cyclomatic 0, duplicate_memberships 0, trivial_function_count 0}
+    {path kmod/include/boxfs.h, code_loc 53, function_count 0, max_cyclomatic 0, duplicate_memberships 0, trivial_function_count 0}
+    {path kmod/rust/Cargo.toml, code_loc 13, function_count 0, max_cyclomatic 0, duplicate_memberships 0, trivial_function_count 0}
+    {path kmod/rust/bindings.rs, code_loc 124, function_count 2, max_cyclomatic 2, duplicate_memberships 0, trivial_function_count 1}
+    {path kmod/rust/error.rs, code_loc 34, function_count 1, max_cyclomatic 13, duplicate_memberships 0, trivial_function_count 0}
+    {path kmod/rust/lib.rs, code_loc 715, function_count 32, max_cyclomatic 15, duplicate_memberships 5, trivial_function_count 0}
+    {path kmod/rust/metadata.rs, code_loc 425, function_count 30, max_cyclomatic 13, duplicate_memberships 5, trivial_function_count 0}
+    {path kmod/rust/parser.rs, code_loc 500, function_count 18, max_cyclomatic 14, duplicate_memberships 5, trivial_function_count 0}
+    {path kmod/rust_helpers.c, code_loc 223, function_count 0, max_cyclomatic 0, duplicate_memberships 0, trivial_function_count 22}
+    {path kmod/super.c, code_loc 320, function_count 0, max_cyclomatic 0, duplicate_memberships 0, trivial_function_count 1}
+    {path necessary-os/2025-12-28-command-messageinit-is-analyzing-your-codebase.txt, code_loc 0, function_count 0, max_cyclomatic 0, duplicate_memberships 0, trivial_function_count 0}
+    {path necessary-os/CLAUDE.md, code_loc 0, function_count 0, max_cyclomatic 0, duplicate_memberships 0, trivial_function_count 0}
+    {path necessary-os/Makefile, code_loc 138, function_count 0, max_cyclomatic 0, duplicate_memberships 0, trivial_function_count 0}
+    {path necessary-os/README.md, code_loc 0, function_count 0, max_cyclomatic 0, duplicate_memberships 0, trivial_function_count 0}
+    {path necessary-os/config/README.md, code_loc 0, function_count 0, max_cyclomatic 0, duplicate_memberships 0, trivial_function_count 0}
+    {path necessary-os/patches/README.md, code_loc 0, function_count 0, max_cyclomatic 0, duplicate_memberships 0, trivial_function_count 0}
+    {path necessary-os/pkg/Cargo.toml, code_loc 23, function_count 0, max_cyclomatic 0, duplicate_memberships 0, trivial_function_count 0}
+    {path necessary-os/pkg/src/bundle.rs, code_loc 104, function_count 2, max_cyclomatic 10, duplicate_memberships 0, trivial_function_count 0}
+    {path necessary-os/pkg/src/commands/bundle.rs, code_loc 59, function_count 2, max_cyclomatic 4, duplicate_memberships 0, trivial_function_count 0}
+    {path necessary-os/pkg/src/commands/files.rs, code_loc 10, function_count 1, max_cyclomatic 2, duplicate_memberships 0, trivial_function_count 0}
+    {path necessary-os/pkg/src/commands/info.rs, code_loc 23, function_count 1, max_cyclomatic 5, duplicate_memberships 0, trivial_function_count 0}
+    {path necessary-os/pkg/src/commands/install.rs, code_loc 18, function_count 1, max_cyclomatic 4, duplicate_memberships 0, trivial_function_count 0}
+    {path necessary-os/pkg/src/commands/list.rs, code_loc 21, function_count 1, max_cyclomatic 3, duplicate_memberships 0, trivial_function_count 0}
+    {path necessary-os/pkg/src/commands/mod.rs, code_loc 7, function_count 0, max_cyclomatic 0, duplicate_memberships 0, trivial_function_count 0}
+    {path necessary-os/pkg/src/commands/owner.rs, code_loc 22, function_count 1, max_cyclomatic 4, duplicate_memberships 0, trivial_function_count 0}
+    {path necessary-os/pkg/src/commands/remove.rs, code_loc 11, function_count 1, max_cyclomatic 3, duplicate_memberships 0, trivial_function_count 0}
+    {path necessary-os/pkg/src/database.rs, code_loc 157, function_count 15, max_cyclomatic 7, duplicate_memberships 4, trivial_function_count 0}
+    {path necessary-os/pkg/src/install.rs, code_loc 189, function_count 1, max_cyclomatic 32, duplicate_memberships 0, trivial_function_count 0}
+    {path necessary-os/pkg/src/lib.rs, code_loc 9, function_count 0, max_cyclomatic 0, duplicate_memberships 0, trivial_function_count 0}
+    {path necessary-os/pkg/src/main.rs, code_loc 93, function_count 1, max_cyclomatic 8, duplicate_memberships 0, trivial_function_count 0}
+    {path necessary-os/pkg/src/package.rs, code_loc 89, function_count 3, max_cyclomatic 4, duplicate_memberships 0, trivial_function_count 0}
+    {path necessary-os/pkg/src/remove.rs, code_loc 45, function_count 1, max_cyclomatic 10, duplicate_memberships 0, trivial_function_count 0}
+    {path necessary-os/pkg/src/triggers.rs, code_loc 77, function_count 4, max_cyclomatic 16, duplicate_memberships 0, trivial_function_count 0}
+    {path necessary-os/scripts/create-image.sh, code_loc 69, function_count 0, max_cyclomatic 0, duplicate_memberships 0, trivial_function_count 0}
+    {path necessary-os/scripts/download-sources.sh, code_loc 160, function_count 0, max_cyclomatic 0, duplicate_memberships 0, trivial_function_count 0}
+    {path necessary-os/scripts/test-qemu.sh, code_loc 137, function_count 0, max_cyclomatic 0, duplicate_memberships 0, trivial_function_count 0}
+    {path plan/main.styx, code_loc 6, function_count 0, max_cyclomatic 0, duplicate_memberships 0, trivial_function_count 0}
+    {path spec.css, code_loc 359, function_count 0, max_cyclomatic 0, duplicate_memberships 0, trivial_function_count 0}
+    {path src/aio/mod.rs, code_loc 16, function_count 0, max_cyclomatic 0, duplicate_memberships 0, trivial_function_count 0}
+    {path src/aio/reader.rs, code_loc 2272, function_count 78, max_cyclomatic 39, duplicate_memberships 54, trivial_function_count 0}
+    {path src/aio/tests.rs, code_loc 490, function_count 14, max_cyclomatic 3, duplicate_memberships 0, trivial_function_count 0}
+    {path src/aio/writer.rs, code_loc 1567, function_count 46, max_cyclomatic 55, duplicate_memberships 19, trivial_function_count 2}
+    {path src/attrs.rs, code_loc 5, function_count 0, max_cyclomatic 0, duplicate_memberships 0, trivial_function_count 0}
+    {path src/checksum.rs, code_loc 47, function_count 6, max_cyclomatic 1, duplicate_memberships 0, trivial_function_count 0}
+    {path src/compat.rs, code_loc 28, function_count 0, max_cyclomatic 0, duplicate_memberships 0, trivial_function_count 0}
+    {path src/compression/mod.rs, code_loc 265, function_count 23, max_cyclomatic 6, duplicate_memberships 7, trivial_function_count 0}
+    {path src/compression/xz.rs, code_loc 198, function_count 11, max_cyclomatic 9, duplicate_memberships 3, trivial_function_count 0}
+    {path src/compression/zstd.rs, code_loc 259, function_count 18, max_cyclomatic 10, duplicate_memberships 3, trivial_function_count 0}
+    {path src/core/meta.rs, code_loc 740, function_count 52, max_cyclomatic 16, duplicate_memberships 12, trivial_function_count 0}
+    {path src/core/mod.rs, code_loc 13, function_count 0, max_cyclomatic 0, duplicate_memberships 0, trivial_function_count 0}
+    {path src/core/reader.rs, code_loc 216, function_count 32, max_cyclomatic 13, duplicate_memberships 19, trivial_function_count 0}
+    {path src/core/writer.rs, code_loc 557, function_count 45, max_cyclomatic 14, duplicate_memberships 13, trivial_function_count 2}
+    {path src/counting.rs, code_loc 60, function_count 7, max_cyclomatic 3, duplicate_memberships 2, trivial_function_count 0}
+    {path src/de/common.rs, code_loc 281, function_count 7, max_cyclomatic 5, duplicate_memberships 2, trivial_function_count 0}
+    {path src/de/mod.rs, code_loc 230, function_count 16, max_cyclomatic 3, duplicate_memberships 3, trivial_function_count 0}
+    {path src/de/v0.rs, code_loc 150, function_count 4, max_cyclomatic 6, duplicate_memberships 1, trivial_function_count 0}
+    {path src/de/v1.rs, code_loc 355, function_count 7, max_cyclomatic 7, duplicate_memberships 3, trivial_function_count 0}
+    {path src/dict.rs, code_loc 119, function_count 12, max_cyclomatic 5, duplicate_memberships 1, trivial_function_count 0}
+    {path src/encode.rs, code_loc 375, function_count 42, max_cyclomatic 6, duplicate_memberships 12, trivial_function_count 6}
+    {path src/fs.rs, code_loc 130, function_count 8, max_cyclomatic 8, duplicate_memberships 0, trivial_function_count 0}
+    {path src/hashing.rs, code_loc 135, function_count 15, max_cyclomatic 4, duplicate_memberships 6, trivial_function_count 0}
+    {path src/header.rs, code_loc 53, function_count 5, max_cyclomatic 1, duplicate_memberships 2, trivial_function_count 0}
+    {path src/lib.rs, code_loc 55, function_count 0, max_cyclomatic 0, duplicate_memberships 0, trivial_function_count 0}
+    {path src/parse.rs, code_loc 540, function_count 36, max_cyclomatic 11, duplicate_memberships 10, trivial_function_count 0}
+    {path src/path/error.rs, code_loc 33, function_count 4, max_cyclomatic 4, duplicate_memberships 0, trivial_function_count 0}
+    {path src/path/mod.rs, code_loc 366, function_count 36, max_cyclomatic 12, duplicate_memberships 18, trivial_function_count 0}
+    {path src/record.rs, code_loc 317, function_count 36, max_cyclomatic 6, duplicate_memberships 25, trivial_function_count 0}
+    {path src/ser/mod.rs, code_loc 0, function_count 0, max_cyclomatic 0, duplicate_memberships 0, trivial_function_count 0}
+    {path src/sync/mod.rs, code_loc 10, function_count 0, max_cyclomatic 0, duplicate_memberships 0, trivial_function_count 0}
+    {path src/sync/reader.rs, code_loc 738, function_count 29, max_cyclomatic 22, duplicate_memberships 15, trivial_function_count 0}
+    {path src/sync/tests.rs, code_loc 140, function_count 8, max_cyclomatic 2, duplicate_memberships 0, trivial_function_count 0}
+    {path src/sync/writer.rs, code_loc 530, function_count 27, max_cyclomatic 30, duplicate_memberships 16, trivial_function_count 2}
+    {path tests/symlinks.rs, code_loc 553, function_count 16, max_cyclomatic 3, duplicate_memberships 3, trivial_function_count 0}
+)
+
+directories (
+    {path "", test_ratio_milli 0}
+    {path cli, test_ratio_milli 0}
+    {path cli/src, test_ratio_milli 132}
+    {path cli/src/commands, test_ratio_milli 0}
+    {path crates/box-ffi, test_ratio_milli 0}
+    {path crates/box-ffi/src, test_ratio_milli 0}
+    {path crates/fskitbox, test_ratio_milli 0}
+    {path crates/fskitbox/extension, test_ratio_milli 0}
+    {path crates/fskitbox/host, test_ratio_milli 0}
+    {path crates/fskitbox/src, test_ratio_milli 0}
+    {path crates/fskitbox/src/bindings, test_ratio_milli 0}
+    {path crates/fst, test_ratio_milli 0}
+    {path crates/fst/benches, test_ratio_milli 0}
+    {path crates/fst/src, test_ratio_milli 323}
+    {path crates/fst/tests, test_ratio_milli 0}
+    {path crates/fusebox, test_ratio_milli 0}
+    {path crates/fusebox/src, test_ratio_milli 0}
+    {path crates/projfsbox, test_ratio_milli 0}
+    {path crates/projfsbox/src, test_ratio_milli 94}
+    {path kmod, test_ratio_milli 0}
+    {path kmod/include, test_ratio_milli 0}
+    {path kmod/rust, test_ratio_milli 0}
+    {path necessary-os, test_ratio_milli 0}
+    {path necessary-os/config, test_ratio_milli 0}
+    {path necessary-os/patches, test_ratio_milli 0}
+    {path necessary-os/pkg, test_ratio_milli 0}
+    {path necessary-os/pkg/src, test_ratio_milli 0}
+    {path necessary-os/pkg/src/commands, test_ratio_milli 0}
+    {path necessary-os/scripts, test_ratio_milli 0}
+    {path plan, test_ratio_milli 0}
+    {path src, test_ratio_milli 205}
+    {path src/aio, test_ratio_milli 128}
+    {path src/compression, test_ratio_milli 380}
+    {path src/core, test_ratio_milli 63}
+    {path src/de, test_ratio_milli 0}
+    {path src/path, test_ratio_milli 389}
+    {path src/ser, test_ratio_milli 0}
+    {path src/sync, test_ratio_milli 111}
+    {path tests, test_ratio_milli 0}
+)

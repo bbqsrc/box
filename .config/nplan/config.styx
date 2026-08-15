@@ -1,0 +1,38 @@
+platforms (
+    {
+        platform "rust"
+        files (
+            Cargo.toml
+            Cargo.lock
+            build.rs
+            src/**/*.rs
+            tests/**/*.rs
+            cli/Cargo.toml
+            cli/**/*.rs
+            crates/*/Cargo.toml
+            crates/*/**/*.rs
+            kmod/rust/Cargo.toml
+            kmod/rust/**/*.rs
+        )
+        checks {
+            format {
+                cmd "cargo fmt --all -- --check"
+                fix "cargo fmt --all"
+            }
+            lint {
+                cmd "cargo clippy --workspace --all-targets"
+            }
+            test {
+                cmd "cargo test --workspace"
+            }
+        }
+    }
+)
+
+commit {
+    type-prefix "required"
+}
+
+adoption {
+    scope "maintenance"
+}

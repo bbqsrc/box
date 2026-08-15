@@ -1,0 +1,352 @@
+name box
+
+source {
+    url "git@github.com:bbqsrc/box"
+    ref main
+}
+
+children (
+    {
+        id format
+        title "Format foundations"
+        priority 0
+        kind @feat
+        children (
+            {
+                id format.wire-records
+                title "Wire codec and record model"
+                priority 0
+                implements {
+                    rust (
+                        [spec:box:syn:wire.root]
+                        [spec:box:def:records.root]
+                        [spec:box:def:records.root.file-records]
+                        [spec:box:def:records.root.non-file-records]
+                        [spec:box:def:wire.root.primitives]
+                        [spec:box:req:records.root.references]
+                        [spec:box:req:records.root.type-byte]
+                        [spec:box:req:wire.root.bounds]
+                        [spec:box:req:wire.root.header]
+                        [spec:box:req:wire.root.bounds.lengths-and-counts]
+                        [spec:box:req:wire.root.bounds.record-scalars]
+                        [spec:box:req:wire.root.bounds.fst-envelope]
+                        [spec:box:req:wire.root.bounds.attrmap-envelope]
+                        [spec:box:req:records.root.references.insertion-target]
+                        [spec:box:req:records.root.references.resolution]
+                        [spec:box:req:records.root.references.external-header-flag]
+                        [spec:box:sem:records.root.references.deferred-relationships]
+                    )
+                }
+            }
+
+            {
+                id format.paths
+                title "Portable archive paths"
+                priority 0
+                implements {
+                    rust (
+                        [spec:box:req:paths.root]
+                        [spec:box:def:paths.root.encoding]
+                        [spec:box:req:paths.root.extraction-gates]
+                        [spec:box:req:paths.root.normalization]
+                    )
+                }
+            }
+
+            {
+                id format.metadata-support
+                title "Attributes, checksums, and dictionaries"
+                priority 0
+                implements {
+                    rust (
+                        [spec:box:def:attributes.root]
+                        [spec:box:req:checksums.root]
+                        [spec:box:sem:dictionaries.root]
+                        [spec:box:def:attributes.root.standard-keys]
+                        [spec:box:def:attributes.root.types]
+                        [spec:box:def:checksums.root.attribute]
+                        [spec:box:req:attributes.root.integrity]
+                        [spec:box:req:checksums.root.verification]
+                        [spec:box:req:dictionaries.root.training]
+                        [spec:box:req:checksums.root.attachment]
+                        [spec:box:req:checksums.root.disabled]
+                        [spec:box:def:checksums.root.logical-content-domain]
+                        [spec:box:sem:checksums.root.verification.extraction-statistics]
+                        [spec:box:sem:checksums.root.verification.checksum-less]
+                        [spec:box:req:checksums.root.verification.cli-failure]
+                    )
+                }
+                deps (format.wire-records)
+            }
+
+            {
+                id format.versioned-metadata
+                title "Version-aware metadata decoding"
+                priority 0
+                implements {
+                    rust ([spec:box:sem:versioning.root] [spec:box:def:versioning.root.v0] [spec:box:req:versioning.root.v1])
+                }
+                deps (format.wire-records format.metadata-support)
+            }
+
+            {
+                id format.compression
+                title "Compression codecs and streaming state"
+                priority 0
+                implements {
+                    rust (
+                        [spec:box:req:compression.root]
+                        [spec:box:def:compression.root.codecs]
+                        [spec:box:req:compression.root.stored]
+                        [spec:box:req:compression.root.stream-state]
+                    )
+                }
+                deps (format.metadata-support)
+            }
+
+            {
+                id format.fst
+                title "Path and block finite-state indexes"
+                priority 0
+                implements {
+                    rust (
+                        [spec:box:syn:fst-format.root]
+                        [spec:box:sem:fst-queries.root]
+                        [spec:box:def:fst-format.root.header-index]
+                        [spec:box:def:fst-format.root.nodes]
+                        [spec:box:def:fst-queries.root.archive-indexes]
+                        [spec:box:req:fst-format.root.build]
+                        [spec:box:req:fst-format.root.validation]
+                        [spec:box:req:fst-queries.root.predecessor]
+                        [spec:box:req:fst-queries.root.prefix]
+                    )
+                }
+                deps (format.paths format.wire-records)
+            }
+        )
+    }
+
+    {
+        id io
+        title "Archive access services"
+        priority 0
+        kind @feat
+        children (
+            {
+                id io.sans
+                title "Sans-I/O archive core"
+                priority 0
+                implements {
+                    rust (
+                        [spec:box:def:archive-state.root]
+                        [spec:box:sem:sans-io.root]
+                        [spec:box:def:archive-state.root.reader]
+                        [spec:box:def:archive-state.root.writer]
+                        [spec:box:req:sans-io.root.hierarchy]
+                        [spec:box:sem:archive-state.root.record-index]
+                        [spec:box:sem:sans-io.root.alignment]
+                        [spec:box:sem:sans-io.root.data-location]
+                        [spec:box:sem:sans-io.root.finalization]
+                        [spec:box:sem:sans-io.root.header-metadata]
+                        [spec:box:sem:sans-io.root.lookup]
+                    )
+                }
+                deps (format.versioned-metadata format.compression format.fst)
+            }
+
+            {
+                id io.async
+                title "Async archive workflows"
+                priority 0
+                implements {
+                    rust (
+                        [spec:box:sem:async-io.root]
+                        [spec:box:req:extraction.root]
+                        [spec:box:req:validation.root]
+                        [spec:box:req:extraction.root.checksum-verification]
+                        [spec:box:req:extraction.root.external-symlink]
+                        [spec:box:req:extraction.root.internal-symlink]
+                        [spec:box:req:extraction.root.materialization]
+                        [spec:box:req:extraction.root.safety-options]
+                        [spec:box:sem:async-io.root.open]
+                        [spec:box:sem:async-io.root.parallel-compression]
+                        [spec:box:sem:async-io.root.read]
+                        [spec:box:sem:async-io.root.streaming-insert]
+                        [spec:box:sem:async-io.root.writer-lifecycle]
+                        [spec:box:sem:extraction.root.parallel-ordering]
+                        [spec:box:sem:extraction.root.progress]
+                        [spec:box:sem:extraction.root.selection]
+                        [spec:box:sem:validation.root.parallel]
+                        [spec:box:sem:validation.root.payload-hash]
+                        [spec:box:sem:validation.root.results]
+                    )
+                }
+                deps (io.sans)
+            }
+
+            {
+                id io.sync
+                title "Synchronous archive workflows"
+                priority 0
+                implements {
+                    rust (
+                        [spec:box:sem:sync-io.root]
+                        [spec:box:sem:sync-io.root.extraction-validation]
+                        [spec:box:sem:sync-io.root.open]
+                        [spec:box:sem:sync-io.root.read]
+                        [spec:box:sem:sync-io.root.write]
+                    )
+                }
+                deps (io.sans)
+            }
+
+            {
+                id io.chunked
+                title "Low-level chunked-file I/O"
+                priority 0
+                implements {
+                    rust (
+                        [spec:box:sem:chunked-io.root]
+                        [spec:box:sem:chunked-io.root.async-range]
+                        [spec:box:sem:chunked-io.root.block-cache]
+                        [spec:box:sem:chunked-io.root.block-decompression]
+                        [spec:box:sem:chunked-io.root.block-queries]
+                        [spec:box:sem:chunked-io.root.explicit-insert]
+                        [spec:box:sem:chunked-io.root.seek-reader]
+                        [spec:box:sem:chunked-io.root.slice-extraction]
+                        [spec:box:sem:chunked-io.root.sync-range]
+                        [spec:box:syn:chunked-io.root.block-index-entry]
+                    )
+                }
+                deps (io.async io.sync)
+            }
+
+            {
+                id io.automatic-chunked-creation
+                title "Automatic large-file chunked creation"
+                priority 0
+                kind @feat
+                implements {
+                    rust ([spec:box:req:chunked-io.root.automatic-creation])
+                }
+                deps (io.chunked integration.cli)
+            }
+        )
+    }
+
+    {
+        id integration
+        title "User and platform integrations"
+        priority 0
+        kind @feat
+        children (
+            {
+                id integration.cli
+                title "Command-line archive workflows"
+                priority 0
+                implements {
+                    rust (
+                        [spec:box:req:cli-commands.root]
+                        [spec:box:sem:cli-selection.root]
+                        [spec:box:req:cli-safety.root]
+                        [spec:box:req:cli-commands.root.create]
+                        [spec:box:req:cli-commands.root.extract]
+                        [spec:box:req:cli-commands.root.inspect]
+                        [spec:box:req:cli-commands.root.validate]
+                        [spec:box:req:cli-safety.root.failure-status]
+                        [spec:box:req:cli-safety.root.output-integrity]
+                        [spec:box:sem:cli-selection.root.collection]
+                    )
+                }
+                deps (io.async io.chunked)
+            }
+
+            {
+                id integration.fuse
+                title "FUSE read-only mount"
+                priority 1
+                implements {
+                    rust (
+                        [spec:box:req:fuse-mount.root]
+                        [spec:box:sem:multi-archive.root]
+                        [spec:box:req:fuse-mount.root.file-data]
+                        [spec:box:req:fuse-mount.root.links-and-xattrs]
+                        [spec:box:req:fuse-mount.root.read-only-and-attributes]
+                        [spec:box:sem:multi-archive.root.navigation]
+                        [spec:box:sem:multi-archive.root.precedence]
+                    )
+                }
+                deps (io.sync io.chunked)
+            }
+
+            {
+                id integration.c-api
+                title "C archive API"
+                priority 2
+                implements {
+                    rust ([spec:box:req:c-api.root] [spec:box:req:c-api.root.runtime-and-ownership])
+                }
+                deps (io.async)
+            }
+
+            {
+                id integration.projfs
+                title "Windows ProjFS provider"
+                priority 2
+                implements {
+                    rust (
+                        [spec:box:req:projfs-provider.root]
+                        [spec:box:req:projfs-provider.root.enumeration]
+                        [spec:box:req:projfs-provider.root.file-data-and-errors]
+                        [spec:box:req:projfs-provider.root.lifecycle]
+                        [spec:box:req:projfs-provider.root.placeholders]
+                    )
+                }
+                deps (io.async)
+            }
+
+            {
+                id integration.fskit
+                title "macOS FSKit extension"
+                priority 2
+                implements {
+                    rust (
+                        [spec:box:req:fskit-extension.root]
+                        [spec:box:req:fskit-extension.root.probe-load-lifecycle]
+                        [spec:box:req:fskit-extension.root.read-only-volume]
+                        [spec:box:req:fskit-extension.root.record-mapping-and-cache]
+                    )
+                }
+                deps (io.async)
+            }
+
+            {
+                id integration.kernel
+                title "Linux kernel Box filesystem"
+                priority 2
+                implements {
+                    rust (
+                        [spec:box:syn:kernel-parser.root]
+                        [spec:box:req:kernel-vfs.root]
+                        [spec:box:req:kernel-abi.root]
+                        [spec:box:req:kernel-abi.root.helpers-and-buffers]
+                        [spec:box:req:kernel-abi.root.ownership-and-errors]
+                        [spec:box:req:kernel-vfs.root.data]
+                        [spec:box:req:kernel-vfs.root.links-and-xattrs]
+                        [spec:box:req:kernel-vfs.root.mount-lifecycle]
+                        [spec:box:req:kernel-vfs.root.namespace]
+                        [spec:box:syn:kernel-parser.root.header]
+                        [spec:box:syn:kernel-parser.root.records]
+                        [spec:box:syn:kernel-parser.root.trailer]
+                    )
+                }
+                deps (
+                    format.wire-records
+                    format.compression
+                    format.fst
+                    io.chunked
+                )
+            }
+        )
+    }
+)

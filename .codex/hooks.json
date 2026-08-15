@@ -1,0 +1,67 @@
+{
+  "hooks": {
+    "PermissionRequest": [
+      {
+        "hooks": [
+          {
+            "command": "nplan hook",
+            "type": "command"
+          }
+        ],
+        "matcher": "^mcp__nplan__"
+      }
+    ],
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "command": "nplan hook",
+            "type": "command"
+          }
+        ],
+        "matcher": "^(Edit|Write|MultiEdit)$"
+      }
+    ],
+    "PreToolUse": [
+      {
+        "hooks": [
+          {
+            "command": "nplan hook",
+            "type": "command"
+          }
+        ],
+        "matcher": "^(Bash|apply_patch)$"
+      }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "command": "nplan hook",
+            "type": "command"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "command": "nplan hook",
+            "type": "command"
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "command": "nplan hook",
+            "type": "command"
+          }
+        ]
+      }
+    ]
+  }
+}
