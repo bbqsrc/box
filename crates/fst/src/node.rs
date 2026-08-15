@@ -83,6 +83,7 @@ pub const FLAG_IS_FINAL: u8 = 0x01;
 pub const FLAG_INDEXED: u8 = 0x02; // Large node with 256-byte index
 
 /// Header data parsed from FST.
+// [spec:box:def:fst-format.root.header-index]
 #[derive(Debug, Clone, Copy)]
 pub struct Header {
     pub entry_count: u64,
@@ -111,6 +112,7 @@ pub fn write_header(header: &Header, buf: &mut Vec<u8>) {
 }
 
 /// Parse the FST header.
+// [spec:box:req:fst-format.root.validation]
 pub fn read_header(data: &[u8]) -> Result<Header, crate::FstError> {
     use crate::FstError;
 
@@ -150,6 +152,7 @@ fn write_vlq_u64(buf: &mut Vec<u8>, value: u64) {
 }
 
 /// Index entry for a node.
+// [spec:box:def:fst-format.root.header-index]
 #[derive(Debug, Clone, Copy)]
 pub struct NodeIndex {
     pub hot_offset: u32,
@@ -189,6 +192,7 @@ pub(crate) enum NodeFormat {
 }
 
 /// Node reference with hot/cold data separation.
+// [spec:box:def:fst-format.root.nodes]
 #[derive(Debug)]
 pub struct NodeRef<'a, V: FstValue = u64> {
     pub is_final: bool,
@@ -442,6 +446,7 @@ pub struct EdgeData<V: FstValue = u64> {
 }
 
 /// Write a node's hot section data, returns bytes written.
+// [spec:box:def:fst-format.root.nodes]
 pub fn write_node_hot<V: FstValue>(node: &NodeData<V>, buf: &mut Vec<u8>) -> usize {
     let start = buf.len();
     let edge_count = node.edges.len();
@@ -486,6 +491,7 @@ pub fn write_node_hot<V: FstValue>(node: &NodeData<V>, buf: &mut Vec<u8>) -> usi
 
 /// Write a node's cold section data and update hot section offsets.
 /// Returns bytes written to cold section.
+// [spec:box:def:fst-format.root.nodes]
 pub fn write_node_cold<V: FstValue>(
     node: &NodeData<V>,
     hot_buf: &mut [u8],
@@ -520,6 +526,7 @@ mod tests {
     use super::*;
     use alloc::vec;
 
+    // [spec:box:def:fst-format.root.nodes/test]
     #[test]
     fn test_node_roundtrip() {
         let node: NodeData<u64> = NodeData {
@@ -609,6 +616,7 @@ mod tests {
         assert!(parsed.find_edge(b'A').is_none());
     }
 
+    // [spec:box:def:fst-format.root.nodes/test]
     #[test]
     fn test_indexed_node() {
         // Create a node with >= INDEXED_THRESHOLD edges to trigger indexed format
@@ -656,6 +664,7 @@ mod tests {
         assert!(parsed.find_edge(b'A').is_none());
     }
 
+    // [spec:box:def:fst-format.root.header-index/test]
     #[test]
     fn test_header_roundtrip() {
         let header = Header {
@@ -675,6 +684,7 @@ mod tests {
         assert_eq!(parsed.hot_offset(), HEADER_SIZE + 100 * INDEX_ENTRY_SIZE);
     }
 
+    // [spec:box:def:fst-format.root.nodes/test]
     #[test]
     fn test_empty_node() {
         let node: NodeData<u64> = NodeData {

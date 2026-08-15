@@ -60,6 +60,7 @@ impl<V: FstValue> FstBuilder<V> {
     /// Insert a key-value pair.
     ///
     /// Keys must be inserted in lexicographic order.
+    // [spec:box:req:fst-format.root.build]
     pub fn insert(&mut self, key: &[u8], value: V) -> Result<(), BuildError> {
         // Validate ordering
         if let Some(ref last) = self.last_key {
@@ -105,6 +106,7 @@ impl<V: FstValue> FstBuilder<V> {
     ///
     /// Unlike `insert()`, this does not require sorted order and allows
     /// replacing existing keys. Useful for merging multiple FSTs.
+    // [spec:box:req:fst-format.root.build]
     pub fn insert_or_replace(&mut self, key: &[u8], value: V) {
         let is_new = Self::insert_or_replace_node(&mut self.root, key, value);
         if is_new {
@@ -114,7 +116,7 @@ impl<V: FstValue> FstBuilder<V> {
         if self
             .last_key
             .as_ref()
-            .map_or(true, |last| key > last.as_slice())
+            .is_none_or(|last| key > last.as_slice())
         {
             self.last_key = Some(key.to_vec());
         }
@@ -243,6 +245,8 @@ impl<V: FstValue> FstBuilder<V> {
     }
 
     /// Finish building and return the serialized FST bytes.
+    // [spec:box:syn:fst-format.root]
+    // [spec:box:req:fst-format.root.build]
     pub fn finish(self) -> Result<Vec<u8>, BuildError> {
         if self.len == 0 {
             return Err(BuildError::Empty);
@@ -417,7 +421,7 @@ impl<V: FstValue> FstBuilder<V> {
     fn collect_nodes(&self, root: &BuilderNode<V>, nodes: &mut Vec<NodeData<V>>) -> u32 {
         use VecDeque;
 
-        // Phase 1: Assign node IDs in BFS order
+        // Assign node IDs in BFS order.
         // Map from node pointer to assigned ID
         let mut node_ids: HashMap<*const BuilderNode<V>, u32> = HashMap::new();
         let mut queue: VecDeque<&BuilderNode<V>> = VecDeque::new();
@@ -439,7 +443,7 @@ impl<V: FstValue> FstBuilder<V> {
             }
         }
 
-        // Phase 2: Build NodeData in BFS order
+        // Build NodeData in BFS order.
         queue.push_back(root);
         let mut visited: HashSet<*const BuilderNode<V>> = HashSet::new();
 
@@ -667,6 +671,7 @@ mod tests {
         assert!(!data.is_empty());
     }
 
+    // [spec:box:req:fst-format.root.build/test]
     #[test]
     fn test_out_of_order() {
         let mut builder: FstBuilder<u64> = FstBuilder::new();
@@ -677,6 +682,7 @@ mod tests {
         ));
     }
 
+    // [spec:box:req:fst-format.root.build/test]
     #[test]
     fn test_duplicate() {
         let mut builder: FstBuilder<u64> = FstBuilder::new();
@@ -687,6 +693,7 @@ mod tests {
         ));
     }
 
+    // [spec:box:req:fst-format.root.build/test]
     #[test]
     fn test_empty() {
         let builder: FstBuilder<u64> = FstBuilder::new();
@@ -782,6 +789,7 @@ mod tests {
         assert_eq!(builder.get(b"bar"), Some(2));
     }
 
+    // [spec:box:req:fst-format.root.build/test]
     #[test]
     fn test_insert_or_replace_overwrite() {
         let mut builder: FstBuilder<u64> = FstBuilder::new();
@@ -792,6 +800,7 @@ mod tests {
         assert_eq!(builder.get(b"foo"), Some(99)); // Value updated
     }
 
+    // [spec:box:req:fst-format.root.build/test]
     #[test]
     fn test_insert_or_replace_out_of_order() {
         let mut builder: FstBuilder<u64> = FstBuilder::new();

@@ -114,6 +114,7 @@ pub struct Fst<D, V: FstValue = u64> {
 
 impl<D: AsRef<[u8]>, V: FstValue> Fst<D, V> {
     /// Open an FST from bytes.
+    // [spec:box:req:fst-format.root.validation]
     pub fn new(data: D) -> Result<Self, FstError> {
         let bytes = data.as_ref();
 
@@ -154,6 +155,7 @@ impl<D: AsRef<[u8]>, V: FstValue> Fst<D, V> {
     }
 
     /// Get the value for an exact key match.
+    // [spec:box:sem:fst-queries.root]
     pub fn get(&self, key: &[u8]) -> Option<V> {
         let bytes = self.data.as_ref();
         let mut current_node_id = 0u32; // Root is always node 0
@@ -213,11 +215,13 @@ impl<D: AsRef<[u8]>, V: FstValue> Fst<D, V> {
     }
 
     /// Iterate all entries with a given prefix.
+    // [spec:box:req:fst-queries.root.prefix]
     pub fn prefix_iter(&self, prefix: &[u8]) -> PrefixIter<'_, D, V> {
         PrefixIter::new(self, prefix)
     }
 
     /// Zero-allocation prefix traversal via callback.
+    // [spec:box:req:fst-queries.root.prefix]
     pub fn prefix_each<F>(&self, prefix: &[u8], mut f: F) -> bool
     where
         F: FnMut(&[u8], V) -> bool,
@@ -500,6 +504,7 @@ mod tests {
     use super::*;
     use crate::FstBuilder;
 
+    // [spec:box:sem:fst-queries.root/test]
     #[test]
     fn test_get_single() {
         let mut builder: FstBuilder<u64> = FstBuilder::new();
@@ -529,6 +534,7 @@ mod tests {
         assert_eq!(fst.get(b"qux"), None);
     }
 
+    // [spec:box:sem:fst-queries.root/test]
     #[test]
     fn test_shared_prefix() {
         let mut builder: FstBuilder<u64> = FstBuilder::new();
@@ -544,6 +550,7 @@ mod tests {
         assert_eq!(fst.get(b"tes"), None);
     }
 
+    // [spec:box:req:fst-queries.root.prefix/test]
     #[test]
     fn test_prefix_iter() {
         let mut builder: FstBuilder<u64> = FstBuilder::new();
@@ -572,6 +579,7 @@ mod tests {
         assert_eq!(results.len(), 0);
     }
 
+    // [spec:box:req:fst-queries.root.prefix/test]
     #[test]
     fn test_prefix_iter_all() {
         let mut builder: FstBuilder<u64> = FstBuilder::new();
@@ -586,6 +594,7 @@ mod tests {
         assert_eq!(results.len(), 3);
     }
 
+    // [spec:box:req:fst-queries.root.prefix/test]
     #[test]
     fn test_prefix_each() {
         let mut builder: FstBuilder<u64> = FstBuilder::new();

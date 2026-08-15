@@ -476,7 +476,7 @@ fn bench_single_lookup(c: &mut Criterion) {
     for size in [10_000, 100_000, 1_000_000, 10_000_000] {
         let paths = generate_paths(size);
         let fst_data = build_fst(&paths);
-        let fst = Fst::new(&fst_data).unwrap();
+        let fst: Fst<_, u64> = Fst::new(&fst_data).unwrap();
         let hashmap = build_hashmap(&paths);
 
         // Pick a realistic deep path from the middle of the dataset
@@ -500,7 +500,7 @@ fn bench_get_children(c: &mut Criterion) {
     for size in [10_000, 100_000, 1_000_000, 10_000_000] {
         let paths = generate_paths(size);
         let fst_data = build_fst(&paths);
-        let fst = Fst::new(&fst_data).unwrap();
+        let fst: Fst<_, u64> = Fst::new(&fst_data).unwrap();
         let hashmap = build_hashmap(&paths);
 
         // Realistic: get all children under "src/" (a common directory)
@@ -622,7 +622,7 @@ fn bench_high_fanout(c: &mut Criterion) {
         let total_files = paths.len();
 
         let fst_data = build_fst(&paths);
-        let fst = Fst::new(&fst_data).unwrap();
+        let fst: Fst<_, u64> = Fst::new(&fst_data).unwrap();
 
         // Pick a path from the middle for lookup benchmark
         let target_path = &paths[total_files / 2].0;
