@@ -15,3 +15,6 @@ box-format = { workspace = true }
 cffi = { workspace = true }
 libc = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread"] }
+
+[dev-dependencies]
+tempfile.workspace = true
