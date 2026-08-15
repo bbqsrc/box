@@ -22,6 +22,7 @@ pub struct ArchiveHandle {
 ///
 /// Uses composite indices: `(archive_id << 64) | local_record_index`
 /// to uniquely identify records across all mounted archives.
+// [spec:box:sem:multi-archive.root]
 pub struct MultiArchive {
     /// Per-archive readers, keyed by archive_id
     pub archives: HashMap<u64, ArchiveHandle>,
@@ -46,6 +47,7 @@ impl MultiArchive {
 
     /// Pack archive_id and local_index into a composite index.
     #[inline]
+    // [spec:box:sem:multi-archive.root]
     pub fn pack_index(archive_id: u64, local_index: u64) -> u128 {
         ((archive_id as u128) << 64) | (local_index as u128)
     }
@@ -66,6 +68,7 @@ impl MultiArchive {
     /// - Files use last-wins (newer archive shadows older)
     ///
     /// Returns the assigned archive ID.
+    // [spec:box:sem:multi-archive.root.precedence]
     pub fn add_archive(&mut self, reader: BoxReader) -> u64 {
         let archive_id = self.next_archive_id;
         self.next_archive_id += 1;
@@ -164,6 +167,7 @@ impl MultiArchive {
     }
 
     /// Find a child record by name within a directory.
+    // [spec:box:sem:multi-archive.root.navigation]
     pub fn find_child(&self, parent_composite: u128, name: &str) -> Option<u128> {
         // Get parent path from merged FST
         if let Some(parent_path) = self.path_for_index(parent_composite) {
@@ -208,6 +212,7 @@ impl MultiArchive {
 
     /// Get direct children of a directory from merged FST.
     /// Merges children from all archives for directories that exist in multiple.
+    // [spec:box:sem:multi-archive.root.navigation]
     pub fn children(&self, dir_composite: u128) -> Vec<(u128, &Record<'static>)> {
         let mut result = Vec::new();
         let mut seen_names: HashMap<&str, usize> = HashMap::new();
@@ -251,6 +256,7 @@ impl MultiArchive {
     }
 
     /// Get root children (merged from all archives).
+    // [spec:box:sem:multi-archive.root.navigation]
     pub fn root_children(&self) -> Vec<(u128, &Record<'static>)> {
         let mut result = Vec::new();
         let mut seen_names: HashMap<&str, usize> = HashMap::new();
@@ -288,6 +294,7 @@ impl MultiArchive {
     }
 
     /// Get total record count across all archives.
+    // [spec:box:sem:multi-archive.root.navigation]
     pub fn record_count(&self) -> u64 {
         self.archives
             .values()
@@ -296,6 +303,7 @@ impl MultiArchive {
     }
 
     /// Get total decompressed size across all archives.
+    // [spec:box:sem:multi-archive.root.navigation]
     pub fn total_size(&self) -> u64 {
         self.archives
             .values()

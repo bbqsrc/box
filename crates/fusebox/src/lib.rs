@@ -58,6 +58,7 @@ impl LruCache {
         self.inner.contains(key)
     }
 
+    // [spec:box:req:fuse-mount.root.file-data]
     fn insert(&mut self, key: CacheKey, value: Vec<u8>) {
         let size = value.len();
 
@@ -189,6 +190,7 @@ trait RecordExt {
     fn parse_time_attr(&self, meta: &BoxMetadata, name: &str) -> Option<SystemTime>;
 }
 
+// [spec:box:req:fuse-mount.root.read-only-and-attributes]
 impl RecordExt for box_format::Record<'_> {
     fn fuse_file_type(&self) -> FileType {
         use box_format::Record::*;
@@ -339,6 +341,7 @@ impl RecordExt for box_format::Record<'_> {
 ///
 /// FUSE uses u64 inodes, so we pack the composite index using:
 /// `(archive_id << 48) | local_index` for the inode.
+// [spec:box:sem:multi-archive.root]
 fn ino_to_composite(ino: u64) -> Option<u128> {
     if ino <= 1 {
         None
@@ -355,6 +358,7 @@ fn ino_to_composite(ino: u64) -> Option<u128> {
 ///
 /// FUSE uses u64 inodes, so we pack the composite index using:
 /// `(archive_id << 48) | local_index` + 1 for the inode.
+// [spec:box:sem:multi-archive.root]
 fn composite_to_ino(composite: u128) -> u64 {
     let (archive_id, local_index) = MultiArchive::unpack_index(composite);
     // Pack into u64 using 48-bit scheme for FUSE compatibility
@@ -362,6 +366,7 @@ fn composite_to_ino(composite: u128) -> u64 {
     ((archive_id << 48) | (local_index & 0xFFFF_FFFF_FFFF)) + 1
 }
 
+// [spec:box:req:fuse-mount.root]
 impl Filesystem for BoxFs {
     fn lookup(&mut self, _req: &Request, parent: u64, name: &OsStr, reply: ReplyEntry) {
         let name = match name.to_str() {
@@ -393,6 +398,7 @@ impl Filesystem for BoxFs {
         }
     }
 
+    // [spec:box:req:fuse-mount.root.read-only-and-attributes]
     fn open(&mut self, _req: &Request<'_>, ino: u64, _flags: i32, reply: ReplyOpen) {
         // FOPEN_KEEP_CACHE tells the kernel to keep file data cached across open/close.
         // This is safe for a read-only filesystem where files never change.
@@ -401,6 +407,7 @@ impl Filesystem for BoxFs {
         reply.opened(0, FOPEN_KEEP_CACHE);
     }
 
+    // [spec:box:req:fuse-mount.root.file-data]
     fn read(
         &mut self,
         _req: &Request<'_>,
@@ -601,6 +608,7 @@ impl Filesystem for BoxFs {
         }
     }
 
+    // [spec:box:req:fuse-mount.root.file-data]
     fn release(
         &mut self,
         _req: &Request<'_>,
@@ -712,6 +720,7 @@ impl Filesystem for BoxFs {
         reply.ok();
     }
 
+    // [spec:box:req:fuse-mount.root.links-and-xattrs]
     fn readlink(&mut self, _req: &Request<'_>, ino: u64, reply: ReplyData) {
         tracing::trace!(ino, "readlink");
         let composite = match ino_to_composite(ino) {
@@ -799,6 +808,7 @@ impl Filesystem for BoxFs {
         );
     }
 
+    // [spec:box:req:fuse-mount.root.links-and-xattrs]
     fn getxattr(
         &mut self,
         _req: &Request<'_>,
@@ -862,6 +872,7 @@ impl Filesystem for BoxFs {
         }
     }
 
+    // [spec:box:req:fuse-mount.root.links-and-xattrs]
     fn listxattr(&mut self, _req: &Request<'_>, ino: u64, size: u32, reply: ReplyXattr) {
         tracing::trace!(ino, "listxattr");
         // Collect all xattr names for this inode
@@ -919,6 +930,7 @@ impl Filesystem for BoxFs {
         }
     }
 
+    // [spec:box:req:fuse-mount.root.read-only-and-attributes]
     fn access(&mut self, req: &Request<'_>, ino: u64, mask: i32, reply: ReplyEmpty) {
         tracing::trace!(ino, mask, "access");
         // F_OK (existence check) is always successful if we got here

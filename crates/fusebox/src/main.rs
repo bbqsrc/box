@@ -27,6 +27,7 @@ struct Options {
     cache_size: usize,
 }
 
+// [spec:box:req:fuse-mount.root]
 fn main() {
     tracing_subscriber::fmt::init();
     let opts = Options::parse();
