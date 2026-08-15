@@ -25,6 +25,7 @@ const WRITE_BUFFER_SIZE: usize = 8 * 1024 * 1024;
 ///
 /// This is a frontend that wraps the sans-IO [`ArchiveWriter`] core,
 /// providing sync I/O operations for writing archives.
+// [spec:box:sem:sync-io.root]
 pub struct BoxWriter {
     /// The sans-IO core that manages archive metadata
     pub(crate) core: ArchiveWriter,
@@ -37,6 +38,84 @@ pub struct BoxWriter {
     finished: bool,
 }
 
+#[cfg(test)]
+mod writer_tests {
+    use super::*;
+    use crate::sync::BoxReader;
+
+    // [spec:box:req:sans-io.root.hierarchy/test]
+    #[test]
+    fn mkdir_all_rejects_an_existing_file() {
+        let temp = tempfile::tempdir().unwrap();
+        let archive = temp.path().join("mkdir-all-existing-file.box");
+        let mut writer = BoxWriter::create(&archive).unwrap();
+        let file_path = BoxPath::new("existing").unwrap();
+        writer
+            .insert(
+                &CompressionConfig::new(Compression::Stored),
+                file_path.clone(),
+                std::io::Cursor::new(b"file contents"),
+                HashMap::new(),
+            )
+            .unwrap();
+        let record_count = writer.core.record_count();
+        let attr_key_count = writer.metadata().attr_keys().len();
+        let mut attrs = HashMap::new();
+        attrs.insert("invalid-attempt-only".to_string(), vec![1]);
+
+        let error = writer.mkdir_all(file_path.clone(), attrs).unwrap_err();
+
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(error.to_string().contains("not a directory"));
+        assert_eq!(writer.core.record_count(), record_count);
+        assert_eq!(writer.metadata().attr_keys().len(), attr_key_count);
+        assert!(
+            writer
+                .metadata()
+                .record(writer.metadata().index(&file_path).unwrap())
+                .unwrap()
+                .as_file()
+                .is_some()
+        );
+
+        writer.finish().unwrap();
+        let reader = BoxReader::open(&archive).unwrap();
+        assert!(
+            reader
+                .metadata()
+                .record(reader.metadata().index(&file_path).unwrap())
+                .unwrap()
+                .as_file()
+                .is_some()
+        );
+    }
+
+    // [spec:box:sem:sync-io.root.open/test/unit]
+    #[test]
+    fn open_rejects_payload_offsets_outside_the_existing_trailer() {
+        let temp = tempfile::tempdir().unwrap();
+        let archive = temp.path().join("hostile-resume-cursor.box");
+        let mut writer = BoxWriter::create(&archive).unwrap();
+        let index = writer.core.meta.insert_record(Record::File(FileRecord {
+            compression: Compression::Stored,
+            length: 0,
+            decompressed_length: 0,
+            name: Cow::Borrowed("hostile"),
+            data: NonZeroU64::new(u64::MAX).unwrap(),
+            attrs: Default::default(),
+        }));
+        writer.core.meta.root.push(index);
+        writer.finish().unwrap();
+
+        let error = BoxWriter::open(&archive)
+            .err()
+            .expect("payload start after the trailer must be rejected");
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        assert!(error.to_string().contains("pre-trailer payload envelope"));
+    }
+}
+
+// [spec:box:sem:sync-io.root.write]
 impl Drop for BoxWriter {
     fn drop(&mut self) {
         if !self.finished {
@@ -58,6 +137,7 @@ impl BoxWriter {
         Ok(())
     }
 
+    // [spec:box:sem:sync-io.root.write]
     fn finish_inner(&mut self) -> std::io::Result<u64> {
         self.file.flush()?;
 
@@ -88,11 +168,13 @@ impl BoxWriter {
     }
 
     /// This will open an existing `.box` file for writing, and error if the file is not valid.
+    // [spec:box:sem:sync-io.root.open]
     pub fn open<P: AsRef<Path>>(path: P) -> std::io::Result<BoxWriter> {
         let file = std::fs::OpenOptions::new()
             .read(true)
             .write(true)
             .open(path.as_ref())?;
+        let file_len = file.metadata()?.len();
 
         let mut reader = std::io::BufReader::new(file);
 
@@ -129,23 +211,19 @@ impl BoxWriter {
             }
         };
 
-        let file = reader.into_inner();
+        let mut file = reader.into_inner();
 
-        let next_write_pos = meta
-            .records
-            .iter()
-            .rev()
-            .find_map(|r| r.as_file())
-            .map(|r| r.data.get() + r.length)
-            .unwrap_or(BoxHeader::SIZE as u64);
+        let next_write_pos = ArchiveWriter::existing_data_end_for_append(&header, &meta, file_len)?;
 
-        let core = ArchiveWriter::from_existing(header, meta, next_write_pos);
+        let core = ArchiveWriter::from_existing(header, meta, next_write_pos)?;
+        let file_pos = core.next_write_addr().get();
+        file.seek(SeekFrom::Start(file_pos))?;
 
         Ok(BoxWriter {
             core,
             file: std::io::BufWriter::with_capacity(WRITE_BUFFER_SIZE, file),
             path: std::fs::canonicalize(path.as_ref())?,
-            file_pos: 0,
+            file_pos,
             finished: false,
         })
     }
@@ -181,6 +259,7 @@ impl BoxWriter {
         )
     }
 
+    // [spec:box:sem:sync-io.root.write]
     fn create_inner<P: AsRef<Path>>(path: P, header: BoxHeader) -> std::io::Result<BoxWriter> {
         let file = std::fs::OpenOptions::new()
             .write(true)
@@ -189,7 +268,7 @@ impl BoxWriter {
             .open(path.as_ref())?;
 
         let core =
-            ArchiveWriter::from_existing(header, BoxMetadata::default(), BoxHeader::SIZE as u64);
+            ArchiveWriter::from_existing(header, BoxMetadata::default(), BoxHeader::SIZE as u64)?;
 
         let mut boxfile = BoxWriter {
             core,
@@ -320,6 +399,7 @@ impl BoxWriter {
         self.insert_inner_with_parent(path, record, None)
     }
 
+    // [spec:box:req:sans-io.root.hierarchy]
     fn insert_inner_with_parent(
         &mut self,
         path: BoxPath<'_>,
@@ -331,21 +411,43 @@ impl BoxWriter {
                 let parent_index = match cached_parent {
                     Some(idx) => idx,
                     None => self.core.meta.index(&parent_path).ok_or_else(|| {
-                        std::io::Error::other(format!(
-                            "No record found for path: {:?}",
-                            parent_path
-                        ))
+                        std::io::Error::new(
+                            std::io::ErrorKind::InvalidInput,
+                            format!("No record found for path: {:?}", parent_path),
+                        )
                     })?,
                 };
 
+                let parent_record = self.core.meta.record(parent_index).ok_or_else(|| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        format!(
+                            "Parent record index {} for path {:?} does not exist",
+                            parent_index.get(),
+                            parent_path
+                        ),
+                    )
+                })?;
+                if parent_record.as_directory().is_none() {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        format!("Parent path {:?} is not a directory", parent_path),
+                    ));
+                }
+
                 let new_index = self.core.meta.insert_record(record);
-                let parent = self
+                let Some(parent) = self
                     .core
                     .meta
                     .record_mut(parent_index)
-                    .unwrap()
-                    .as_directory_mut()
-                    .unwrap();
+                    .and_then(Record::as_directory_mut)
+                else {
+                    self.core.meta.records.pop();
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "validated parent record changed during insertion",
+                    ));
+                };
                 parent.entries.push(new_index);
                 Ok(new_index)
             }
@@ -383,13 +485,26 @@ impl BoxWriter {
             self.mkdir_all(parent.into_owned(), HashMap::new())?;
         }
 
-        if self.core.meta.index(&path).is_none() {
+        if let Some(index) = self.core.meta.index(&path) {
+            if self
+                .core
+                .meta
+                .record(index)
+                .is_none_or(|record| record.as_directory().is_none())
+            {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!("Path {:?} exists and is not a directory", path),
+                ));
+            }
+        } else {
             self.mkdir(path, attrs)?;
         }
 
         Ok(())
     }
 
+    // [spec:box:req:records.root.references.insertion-target]
     pub fn link(
         &mut self,
         path: BoxPath<'_>,
@@ -415,6 +530,7 @@ impl BoxWriter {
         self.insert_inner(path, record.into())
     }
 
+    // [spec:box:req:records.root.references.external-header-flag]
     pub fn external_link(
         &mut self,
         path: BoxPath<'_>,
@@ -432,6 +548,7 @@ impl BoxWriter {
         self.insert_inner(path, record.into())
     }
 
+    // [spec:box:sem:sync-io.root.write]
     pub fn insert<R: BufRead>(
         &mut self,
         config: &CompressionConfig,
@@ -443,7 +560,7 @@ impl BoxWriter {
         let next_addr = self.next_write_addr();
         let byte_count = self.write_data(config, next_addr.get(), value)?;
 
-        self.core.advance_position(byte_count.write);
+        self.core.advance_position(byte_count.write)?;
 
         let record = FileRecord {
             compression: config.compression,

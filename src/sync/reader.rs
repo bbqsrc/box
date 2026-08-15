@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -9,7 +10,7 @@ use mmap_io::segment::Segment;
 use crate::compression::xz::XzDecompressor;
 #[cfg(feature = "zstd")]
 use crate::compression::zstd::ZstdDecompressor;
-use crate::core::{ArchiveReader, AttrValue, BoxMetadata, RecordIndex, Records};
+use crate::core::{ArchiveReader, AttrValue, BoxMetadata, RecordIndex};
 use crate::path::BoxPath;
 use crate::record::{ChunkedFileRecord, FileRecord, Record};
 use crate::{
@@ -24,6 +25,7 @@ use crate::aio::{ExtractError, ExtractOptions, ExtractStats, OpenError, Validate
 ///
 /// This is a frontend that wraps the sans-IO [`ArchiveReader`] core,
 /// providing sync I/O operations for reading archives.
+// [spec:box:sem:sync-io.root]
 pub struct BoxReader {
     /// The sans-IO core that manages archive state
     pub(crate) core: ArchiveReader<'static>,
@@ -62,8 +64,55 @@ fn read_header_sync<R: Read + Seek>(file: &mut R, offset: u64) -> std::io::Resul
     })
 }
 
+fn invalid_chunked_metadata(message: impl Into<String>) -> std::io::Error {
+    std::io::Error::new(std::io::ErrorKind::InvalidData, message.into())
+}
+
+fn chunked_data_end(record: &ChunkedFileRecord<'_>) -> std::io::Result<u64> {
+    record
+        .data
+        .get()
+        .checked_add(record.length)
+        .ok_or_else(|| invalid_chunked_metadata("chunked file data range overflows u64"))
+}
+
+fn checked_chunked_block<'a>(
+    record: &ChunkedFileRecord<'_>,
+    all_data: &'a [u8],
+    physical_offset: u64,
+    compressed_end: u64,
+) -> std::io::Result<&'a [u8]> {
+    let data_start = record.data.get();
+    let data_end = chunked_data_end(record)?;
+
+    if physical_offset < data_start || physical_offset >= data_end {
+        return Err(invalid_chunked_metadata(format!(
+            "chunked block offset {physical_offset} is outside data range [{data_start}, {data_end})"
+        )));
+    }
+    if compressed_end <= physical_offset || compressed_end > data_end {
+        return Err(invalid_chunked_metadata(format!(
+            "chunked block end {compressed_end} does not follow offset {physical_offset} within data range [{data_start}, {data_end})"
+        )));
+    }
+
+    let block_start = usize::try_from(physical_offset - data_start)
+        .map_err(|_| invalid_chunked_metadata("chunked block offset does not fit in usize"))?;
+    let block_end = usize::try_from(compressed_end - data_start)
+        .map_err(|_| invalid_chunked_metadata("chunked block end does not fit in usize"))?;
+
+    all_data.get(block_start..block_end).ok_or_else(|| {
+        invalid_chunked_metadata(format!(
+            "chunked block byte range [{block_start}, {block_end}) exceeds mapped data length {}",
+            all_data.len()
+        ))
+    })
+}
+
 impl BoxReader {
     /// This will open an existing `.box` file for reading and error if the file is not valid.
+    // [spec:box:sem:sync-io.root.open]
+    // [spec:box:req:wire.root.bounds]
     pub fn open_at_offset<P: AsRef<Path>>(path: P, offset: u64) -> Result<BoxReader, OpenError> {
         let path = path.as_ref().to_path_buf();
         let path = std::fs::canonicalize(&path)
@@ -235,6 +284,7 @@ impl BoxReader {
         self.core.get_mode(record)
     }
 
+    // [spec:box:sem:sync-io.root.read]
     pub fn decompress<W: Write>(
         &self,
         record: &FileRecord<'_>,
@@ -313,10 +363,12 @@ impl BoxReader {
                 ));
             }
         }
+        dest.flush()?;
         Ok(())
     }
 
     /// Decompress a chunked file by decompressing each block separately.
+    // [spec:box:sem:chunked-io.root.block-decompression]
     pub fn decompress_chunked<W: Write>(
         &self,
         record: &ChunkedFileRecord<'_>,
@@ -334,6 +386,7 @@ impl BoxReader {
 
         let segment = self.memory_map_chunked(record)?;
         let all_data = segment.as_slice().map_err(std::io::Error::other)?;
+        let data_end = chunked_data_end(record)?;
 
         for i in 0..blocks.len() {
             let (_logical_offset, physical_offset) = blocks[i];
@@ -341,12 +394,10 @@ impl BoxReader {
             let compressed_end = if i + 1 < blocks.len() {
                 blocks[i + 1].1
             } else {
-                record.data.get() + record.length
+                data_end
             };
-            let compressed_size = (compressed_end - physical_offset) as usize;
-
-            let block_offset = (physical_offset - record.data.get()) as usize;
-            let block_data = &all_data[block_offset..block_offset + compressed_size];
+            let block_data =
+                checked_chunked_block(record, all_data, physical_offset, compressed_end)?;
 
             let block_output = self.core.decompress_chunked_block(record, block_data)?;
             dest.write_all(&block_output)?;
@@ -361,6 +412,7 @@ impl BoxReader {
     /// This is optimized for random access patterns - instead of decompressing
     /// the entire file, only the blocks that contain the requested range are
     /// decompressed. Returns exactly the bytes from start_byte to end_byte.
+    // [spec:box:sem:chunked-io.root.sync-range]
     pub fn decompress_chunked_range(
         &self,
         record: &ChunkedFileRecord<'_>,
@@ -378,10 +430,8 @@ impl BoxReader {
             return Ok(Vec::new());
         }
 
-        let block_size = record.block_size as u64;
-
         // Find the first block containing start_byte
-        let first_block = self
+        let (first_physical_offset, first_logical_offset) = self
             .core
             .find_block(record_index, start_byte)
             .ok_or_else(|| {
@@ -392,30 +442,37 @@ impl BoxReader {
             })?;
 
         // Get all blocks we need to decompress
-        let mut blocks_needed = vec![first_block];
-        let mut current_logical = first_block.0;
+        let mut blocks_needed = vec![(first_logical_offset, first_physical_offset)];
+        let mut current_logical = first_logical_offset;
 
         // Keep getting next blocks until we've covered end_byte
-        while current_logical + block_size < end_byte {
-            if let Some(next) = self.core.next_block(record_index, current_logical) {
-                current_logical = next.0;
-                blocks_needed.push(next);
-            } else {
+        while let Some((next_logical, next_physical)) =
+            self.core.next_block(record_index, current_logical)
+        {
+            if next_logical >= end_byte {
                 break;
             }
+
+            current_logical = next_logical;
+            blocks_needed.push((next_logical, next_physical));
         }
 
         // Memory map the chunked file data
         let segment = self.memory_map_chunked(record)?;
         let all_data = segment.as_slice().map_err(std::io::Error::other)?;
-        let data_start = record.data.get();
+        let data_end = chunked_data_end(record)?;
 
-        // Pre-calculate total output size
         let first_block_logical = blocks_needed[0].0;
         let total_blocks = blocks_needed.len();
-
-        // Calculate expected decompressed size for our blocks
-        let mut output = Vec::with_capacity((total_blocks as u64 * block_size) as usize);
+        let requested_len = usize::try_from(end_byte - start_byte).map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "requested chunked range does not fit in usize",
+            )
+        })?;
+        // The logical length is archive metadata, so do not use it to drive an
+        // eager allocation before the compressed block envelopes are checked.
+        let mut output = Vec::new();
 
         for (i, &(logical_offset, physical_offset)) in blocks_needed.iter().enumerate() {
             // Calculate compressed size for this block
@@ -427,31 +484,43 @@ impl BoxReader {
                 self.core
                     .next_block(record_index, logical_offset)
                     .map(|(_, phys)| phys)
-                    .unwrap_or(data_start + record.length)
+                    .unwrap_or(data_end)
             };
 
-            let compressed_size = (compressed_end - physical_offset) as usize;
-            let block_offset = (physical_offset - data_start) as usize;
-            let block_data = &all_data[block_offset..block_offset + compressed_size];
+            let block_data =
+                checked_chunked_block(record, all_data, physical_offset, compressed_end)?;
 
             let block_output = self.core.decompress_chunked_block(record, block_data)?;
             output.extend_from_slice(&block_output);
         }
 
         // Slice to exact requested range
-        let offset_in_output = (start_byte - first_block_logical) as usize;
-        let end_in_output = offset_in_output + (end_byte - start_byte) as usize;
+        let offset_in_output = start_byte
+            .checked_sub(first_block_logical)
+            .and_then(|offset| usize::try_from(offset).ok())
+            .ok_or_else(|| {
+                invalid_chunked_metadata(
+                    "block FST logical offset lies after the requested range start",
+                )
+            })?;
+        let end_in_output = offset_in_output
+            .checked_add(requested_len)
+            .ok_or_else(|| invalid_chunked_metadata("requested chunked range overflows usize"))?;
+        let requested = output.get(offset_in_output..end_in_output).ok_or_else(|| {
+            invalid_chunked_metadata(format!(
+                "decompressed blocks produced {} bytes, too few for requested range [{offset_in_output}, {end_in_output})",
+                output.len()
+            ))
+        })?;
 
-        // Handle case where last block may be partial (smaller than block_size)
-        let end_in_output = end_in_output.min(output.len());
-
-        Ok(output[offset_in_output..end_in_output].to_vec())
+        Ok(requested.to_vec())
     }
 
     /// Decompress a single block from a chunked file by block index.
     ///
     /// Returns the decompressed block data. Block indices are 0-based.
     /// This is useful for caching individual blocks.
+    // [spec:box:sem:chunked-io.root.sync-range]
     pub fn decompress_chunked_block(
         &self,
         record: &ChunkedFileRecord<'_>,
@@ -459,9 +528,14 @@ impl BoxReader {
         block_index: u64,
     ) -> std::io::Result<Vec<u8>> {
         let block_size = record.block_size as u64;
-        let logical_offset = block_index * block_size;
+        let logical_offset = block_index.checked_mul(block_size).ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "chunked block index overflows the logical offset range",
+            )
+        })?;
 
-        let (block_logical, physical_offset) = self
+        let (physical_offset, block_logical) = self
             .core
             .find_block(record_index, logical_offset)
             .ok_or_else(|| {
@@ -483,20 +557,17 @@ impl BoxReader {
         }
 
         // Find the end of this block's compressed data
-        let data_start = record.data.get();
         let compressed_end = self
             .core
             .next_block(record_index, logical_offset)
             .map(|(_, phys)| phys)
-            .unwrap_or(data_start + record.length);
-
-        let compressed_size = (compressed_end - physical_offset) as usize;
+            .map(Ok)
+            .unwrap_or_else(|| chunked_data_end(record))?;
 
         // Memory map and decompress
         let segment = self.memory_map_chunked(record)?;
         let all_data = segment.as_slice().map_err(std::io::Error::other)?;
-        let block_offset = (physical_offset - data_start) as usize;
-        let block_data = &all_data[block_offset..block_offset + compressed_size];
+        let block_data = checked_chunked_block(record, all_data, physical_offset, compressed_end)?;
 
         self.core.decompress_chunked_block(record, block_data)
     }
@@ -507,6 +578,17 @@ impl BoxReader {
             .ok_or_else(|| ExtractError::NotFoundInArchive(path.to_path_buf()))
     }
 
+    fn validate_materialization_path(
+        &self,
+        path: &BoxPath<'_>,
+        index: RecordIndex,
+    ) -> Result<(), ExtractError> {
+        self.core
+            .validate_extraction_path(path, index)
+            .map_err(|error| ExtractError::InvalidArchiveHierarchy(error, path.to_path_buf()))
+    }
+
+    // [spec:box:req:paths.root.extraction-gates+1]
     pub fn extract<P: AsRef<Path>>(
         &self,
         path: &BoxPath<'_>,
@@ -546,6 +628,8 @@ impl BoxReader {
     }
 
     /// Extract all files with options, returning extraction statistics.
+    // [spec:box:req:paths.root.extraction-gates+1]
+    // [spec:box:sem:sync-io.root.extraction-validation+2]
     pub fn extract_all_with_options<P: AsRef<Path>>(
         &self,
         output_path: P,
@@ -575,6 +659,7 @@ impl BoxReader {
     }
 
     /// Extract a path and all children with options, returning extraction statistics.
+    // [spec:box:req:paths.root.extraction-gates+1]
     pub fn extract_recursive_with_options<P: AsRef<Path>>(
         &self,
         path: &BoxPath<'_>,
@@ -596,20 +681,55 @@ impl BoxReader {
             .index(path)
             .ok_or_else(|| ExtractError::NotFoundInArchive(path.to_path_buf()))?;
 
-        for item in Records::new(self.core.metadata(), &[index], None) {
+        let mut pending = vec![(path.clone().into_owned(), index)];
+        let mut visited = HashSet::new();
+        while let Some((item_path, item_index)) = pending.pop() {
+            if !visited.insert(item_index) {
+                return Err(ExtractError::InvalidArchiveHierarchy(
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!(
+                            "record index {} appears more than once in the recursive hierarchy",
+                            item_index.get()
+                        ),
+                    ),
+                    item_path.to_path_buf(),
+                ));
+            }
+            let record = self
+                .core
+                .record(item_index)
+                .ok_or_else(|| ExtractError::NotFoundInArchive(item_path.to_path_buf()))?;
+            let children = if matches!(record, Record::Directory(_)) {
+                self.core
+                    .extraction_children_by_index(item_index, &item_path)
+                    .map_err(|error| {
+                        ExtractError::InvalidArchiveHierarchy(error, item_path.to_path_buf())
+                    })?
+                    .into_iter()
+                    .rev()
+                    .collect()
+            } else {
+                Vec::new()
+            };
+
             self.extract_inner_with_options(
-                &item.path,
-                item.record,
-                item.index,
+                &item_path,
+                record,
+                item_index,
                 output_path,
                 &options,
                 &mut stats,
             )?;
+            pending.extend(children);
         }
         Ok(stats)
     }
 
     /// Validate all files by checking their checksums.
+    // [spec:box:req:checksums.root.verification]
+    // [spec:box:sem:checksums.root.verification.checksum-less]
+    // [spec:box:sem:sync-io.root.extraction-validation+2]
     pub fn validate_all(&self) -> std::io::Result<ValidateStats> {
         let mut stats = ValidateStats::default();
         let mut out_buf = Vec::new();
@@ -665,12 +785,17 @@ impl BoxReader {
     }
 
     /// Memory-map the file and return a segment for the record's data.
+    // [spec:box:sem:sync-io.root.read]
     pub fn memory_map(&self, record: &FileRecord<'_>) -> std::io::Result<Segment> {
         let mmap = MemoryMappedFile::builder(&self.path)
             .huge_pages(true)
             .open()
             .map_err(std::io::Error::other)?;
-        let offset = self.core.offset + record.data.get();
+        let offset = self
+            .core
+            .offset
+            .checked_add(record.data.get())
+            .ok_or_else(|| invalid_chunked_metadata("archive and record data offsets overflow"))?;
         Segment::new(mmap.into(), offset, record.length).map_err(std::io::Error::other)
     }
 
@@ -680,7 +805,11 @@ impl BoxReader {
             .huge_pages(true)
             .open()
             .map_err(std::io::Error::other)?;
-        let offset = self.core.offset + record.data.get();
+        let offset = self
+            .core
+            .offset
+            .checked_add(record.data.get())
+            .ok_or_else(|| invalid_chunked_metadata("archive and chunked data offsets overflow"))?;
         Segment::new(mmap.into(), offset, record.length).map_err(std::io::Error::other)
     }
 
@@ -702,6 +831,11 @@ impl BoxReader {
         )
     }
 
+    // [spec:box:req:checksums.root.verification]
+    // [spec:box:sem:checksums.root.verification.extraction-statistics]
+    // [spec:box:req:records.root.references.resolution]
+    // [spec:box:sem:sync-io.root.extraction-validation+2]
+    // [spec:box:sem:chunked-io.root.slice-extraction]
     fn extract_inner_with_options(
         &self,
         path: &BoxPath<'_>,
@@ -711,6 +845,7 @@ impl BoxReader {
         options: &ExtractOptions,
         stats: &mut ExtractStats,
     ) -> Result<(), ExtractError> {
+        self.validate_materialization_path(path, record_index)?;
         match record {
             Record::Directory(_) => {
                 std::fs::create_dir_all(output_path)
@@ -829,13 +964,21 @@ impl BoxReader {
             }
             Record::Link(link) => {
                 let target_idx = link.target;
-                let target = self.core.record(target_idx).ok_or_else(|| {
+                self.core.record(target_idx).ok_or_else(|| {
                     ExtractError::ResolveLinkFailed(
                         std::io::Error::new(std::io::ErrorKind::NotFound, "link target not found"),
                         link.clone().into_owned(),
                     )
                 })?;
-                let target_path = target.name();
+                let target_path =
+                    self.core
+                        .extraction_path_for_index(target_idx)
+                        .map_err(|error| {
+                            ExtractError::ResolveLinkFailed(error, link.clone().into_owned())
+                        })?;
+                let relative_target = self
+                    .core
+                    .compute_relative_symlink_target(path, &target_path);
                 let new_file = output_path.join(path.to_path_buf());
                 if let Some(parent) = new_file.parent() {
                     std::fs::create_dir_all(parent)
@@ -843,8 +986,8 @@ impl BoxReader {
                 }
                 #[cfg(unix)]
                 {
-                    std::os::unix::fs::symlink(target_path, &new_file).map_err(|e| {
-                        ExtractError::CreateLinkFailed(e, new_file, target_path.into())
+                    std::os::unix::fs::symlink(&relative_target, &new_file).map_err(|e| {
+                        ExtractError::CreateLinkFailed(e, new_file, relative_target)
                     })?;
                 }
                 #[cfg(not(unix))]
@@ -855,10 +998,13 @@ impl BoxReader {
                             "symlinks not supported",
                         ),
                         new_file,
-                        target_path.into(),
+                        relative_target,
                     ));
                 }
-                stats.links_created += 1;
+                #[cfg(unix)]
+                {
+                    stats.links_created += 1;
+                }
             }
             Record::ExternalLink(link) => {
                 let new_file = output_path.join(path.to_path_buf());
@@ -883,7 +1029,10 @@ impl BoxReader {
                         target_path,
                     ));
                 }
-                stats.links_created += 1;
+                #[cfg(unix)]
+                {
+                    stats.links_created += 1;
+                }
             }
         }
         Ok(())
