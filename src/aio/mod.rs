@@ -1,12 +1,16 @@
 //! Async (tokio) frontends for reading and writing Box archives.
 
 #[cfg(feature = "reader")]
+mod chunked;
+#[cfg(feature = "reader")]
 mod reader;
 #[cfg(test)]
 mod tests;
 #[cfg(feature = "writer")]
 mod writer;
 
+#[cfg(feature = "reader")]
+pub use chunked::{BlockCache, ChunkedReader, ChunkedSlice};
 #[cfg(feature = "reader")]
 pub use reader::{
     BoxFileReader, ExtractError, ExtractOptions, ExtractProgress, ExtractStats, ExtractTiming,

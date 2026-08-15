@@ -15,6 +15,7 @@ async fn create_test_archive() -> (TempDir, std::path::PathBuf) {
 }
 
 /// Test basic symlink: link and target in same directory
+// [spec:box:req:extraction.root/test/integration]
 #[tokio::test]
 async fn test_symlink_same_directory() {
     let (temp_dir, archive_path) = create_test_archive().await;
@@ -349,6 +350,7 @@ async fn test_symlink_to_directory() {
 
 /// Test the real-world case: compiler-rt symlinks like LLVM uses
 /// lib/clang/21/lib/linux/libclang_rt.builtins-x86_64.a -> ../x86_64-unknown-linux-musl/libclang_rt.builtins.a
+// [spec:box:req:extraction.root.internal-symlink/test/integration]
 #[tokio::test]
 async fn test_llvm_style_symlinks() {
     let (temp_dir, archive_path) = create_test_archive().await;

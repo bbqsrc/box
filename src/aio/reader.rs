@@ -1,13 +1,10 @@
+use std::collections::HashSet;
 use std::io::SeekFrom;
 use std::num::NonZeroU64;
-use std::ops::{AddAssign, Deref};
+use std::ops::{AddAssign, Range};
 use std::path::{Path, PathBuf};
-use std::pin::Pin;
 use std::sync::Arc;
-use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
-
-use lru::LruCache;
 
 use mmap_io::MemoryMappedFile;
 use mmap_io::segment::Segment;
@@ -18,7 +15,7 @@ use tokio::io::{AsyncReadExt, AsyncSeekExt, BufReader};
 use crate::compression::xz::XzDecompressor;
 #[cfg(feature = "zstd")]
 use crate::compression::zstd::ZstdDecompressor;
-use crate::core::{ArchiveReader, AttrValue, BoxMetadata, RecordIndex, Records, RecordsItem};
+use crate::core::{ArchiveReader, AttrValue, BoxMetadata, RecordIndex, RecordsItem};
 use crate::path::IntoBoxPathError;
 use crate::{
     compression::{Compression, constants::DEFAULT_BLOCK_SIZE},
@@ -28,10 +25,15 @@ use crate::{
     record::{ChunkedFileRecord, FileRecord, LinkRecord, Record},
 };
 
+#[cfg(test)]
+use super::chunked::checked_seek_position;
+use super::chunked::{ChunkedReader, ChunkedSlice};
+
 /// Async reader for Box archives.
 ///
 /// This is a frontend that wraps the sans-IO [`ArchiveReader`] core,
 /// providing async I/O operations for reading archives.
+// [spec:box:sem:async-io.root]
 pub struct BoxFileReader {
     /// The sans-IO core that manages archive state
     pub(crate) core: ArchiveReader<'static>,
@@ -41,6 +43,89 @@ pub struct BoxFileReader {
     /// This must not be dropped before `core.meta` is dropped.
     #[allow(dead_code)]
     pub(crate) trailer_segment: Segment,
+}
+
+pub(super) fn invalid_chunked_data(message: impl Into<String>) -> std::io::Error {
+    std::io::Error::new(std::io::ErrorKind::InvalidData, message.into())
+}
+
+fn checked_archive_data_offset(archive_offset: u64, record_offset: u64) -> std::io::Result<u64> {
+    archive_offset
+        .checked_add(record_offset)
+        .ok_or_else(|| invalid_chunked_data("archive and record data offsets overflow u64"))
+}
+
+pub(super) fn logical_file_buffer(length: u64) -> std::io::Result<Vec<u8>> {
+    let capacity = usize::try_from(length).map_err(|_| {
+        invalid_chunked_data(format!(
+            "logical file length {length} does not fit in memory"
+        ))
+    })?;
+    let mut buffer = Vec::new();
+    buffer.try_reserve_exact(capacity).map_err(|error| {
+        std::io::Error::new(
+            std::io::ErrorKind::OutOfMemory,
+            format!("cannot reserve {capacity} bytes for logical file data: {error}"),
+        )
+    })?;
+    Ok(buffer)
+}
+
+pub(super) fn chunked_data_end(record: &ChunkedFileRecord<'_>) -> std::io::Result<u64> {
+    record
+        .data
+        .get()
+        .checked_add(record.length)
+        .ok_or_else(|| invalid_chunked_data("chunked file data range overflows u64"))
+}
+
+/// Convert a pair of absolute block-FST offsets into a checked range within
+/// the mapped record payload.
+pub(super) fn chunked_block_data_range(
+    record: &ChunkedFileRecord<'_>,
+    mapped_len: usize,
+    block_index: usize,
+    physical_start: u64,
+    physical_end: u64,
+) -> std::io::Result<Range<usize>> {
+    let data_start = record.data.get();
+    let data_end = chunked_data_end(record)?;
+
+    let relative_start = physical_start.checked_sub(data_start).ok_or_else(|| {
+        invalid_chunked_data(format!(
+            "chunked file block {block_index} starts before the record data"
+        ))
+    })?;
+    let relative_end = physical_end.checked_sub(data_start).ok_or_else(|| {
+        invalid_chunked_data(format!(
+            "chunked file block {block_index} ends before the record data"
+        ))
+    })?;
+
+    if physical_end > data_end || relative_end <= relative_start {
+        return Err(invalid_chunked_data(format!(
+            "chunked file block {block_index} has an invalid compressed-data range"
+        )));
+    }
+
+    let relative_start = usize::try_from(relative_start).map_err(|_| {
+        invalid_chunked_data(format!(
+            "chunked file block {block_index} start does not fit in memory"
+        ))
+    })?;
+    let relative_end = usize::try_from(relative_end).map_err(|_| {
+        invalid_chunked_data(format!(
+            "chunked file block {block_index} end does not fit in memory"
+        ))
+    })?;
+
+    if relative_end > mapped_len {
+        return Err(invalid_chunked_data(format!(
+            "chunked file block {block_index} is outside the mapped record data"
+        )));
+    }
+
+    Ok(relative_start..relative_end)
 }
 
 impl std::fmt::Debug for BoxFileReader {
@@ -82,7 +167,8 @@ pub(super) async fn read_trailer<R: tokio::io::AsyncRead + tokio::io::AsyncSeek 
     version: u8,
 ) -> std::io::Result<BoxMetadata<'static>> {
     use tokio::io::AsyncReadExt;
-    reader.seek(SeekFrom::Start(offset + ptr.get())).await?;
+    let trailer_offset = checked_archive_data_offset(offset, ptr.get())?;
+    reader.seek(SeekFrom::Start(trailer_offset)).await?;
 
     // Read all remaining data and parse using sans-IO parser
     let mut buf = Vec::new();
@@ -221,6 +307,9 @@ pub enum ExtractError {
     #[error("Verification failed. Path: '{}'", .1.display())]
     VerificationFailed(#[source] std::io::Error, PathBuf),
 
+    #[error("Archive hierarchy is invalid. Path: '{}'", .1.display())]
+    InvalidArchiveHierarchy(#[source] std::io::Error, PathBuf),
+
     #[error("Archive has escaped paths but allow_escapes was not set in ExtractOptions")]
     AllowEscapesRequired,
 
@@ -349,8 +438,18 @@ pub enum ValidateProgress {
     Finished,
 }
 
+enum ValidationRecord {
+    File(FileRecord<'static>),
+    Chunked {
+        record: ChunkedFileRecord<'static>,
+        blocks: Vec<(u64, u64)>,
+    },
+}
+
 impl BoxFileReader {
     /// This will open an existing `.box` file for reading and error if the file is not valid.
+    // [spec:box:sem:async-io.root.open]
+    // [spec:box:req:wire.root.bounds]
     pub async fn open_at_offset<P: AsRef<Path>>(
         path: P,
         offset: u64,
@@ -537,6 +636,7 @@ impl BoxFileReader {
         self.core.get_mode(record)
     }
 
+    // [spec:box:sem:async-io.root.read]
     pub async fn decompress<W: tokio::io::AsyncWrite + Unpin>(
         &self,
         record: &FileRecord<'_>,
@@ -617,6 +717,7 @@ impl BoxFileReader {
                 ));
             }
         }
+        dest.flush().await?;
         Ok(())
     }
 
@@ -624,6 +725,7 @@ impl BoxFileReader {
     ///
     /// Each block is independently compressed, so we must decompress them
     /// one at a time and concatenate the output.
+    // [spec:box:sem:chunked-io.root.block-decompression]
     pub async fn decompress_chunked<W: tokio::io::AsyncWrite + Unpin>(
         &self,
         record: &ChunkedFileRecord<'_>,
@@ -645,28 +747,70 @@ impl BoxFileReader {
         // Memory-map the entire chunked file data region
         let segment = self.memory_map_chunked(record)?;
         let all_data = segment.as_slice().map_err(std::io::Error::other)?;
+        let data_end = chunked_data_end(record)?;
+        let mut decompressed_length = 0u64;
 
         // Decompress each block
-        for i in 0..blocks.len() {
-            let (_logical_offset, physical_offset) = blocks[i];
+        for (i, &(logical_offset, physical_offset)) in blocks.iter().enumerate() {
+            if logical_offset != decompressed_length {
+                return Err(invalid_chunked_data(format!(
+                    "chunked file block {i} starts at logical offset {logical_offset}, expected {decompressed_length}"
+                )));
+            }
 
             // Determine block's compressed size from next block's offset (or end of data)
             let compressed_end = if i + 1 < blocks.len() {
                 blocks[i + 1].1 // Next block's physical offset
             } else {
-                record.data.get() + record.length // End of all compressed data
+                data_end
             };
-            let compressed_size = (compressed_end - physical_offset) as usize;
 
             // Get slice of compressed block data (relative to start of chunked file data)
-            let block_offset = (physical_offset - record.data.get()) as usize;
-            let block_data = &all_data[block_offset..block_offset + compressed_size];
+            let block_range = chunked_block_data_range(
+                record,
+                all_data.len(),
+                i,
+                physical_offset,
+                compressed_end,
+            )?;
+            let block_data = all_data.get(block_range).ok_or_else(|| {
+                invalid_chunked_data(format!(
+                    "chunked file block {i} is outside the mapped record data"
+                ))
+            })?;
 
             // Decompress this block using the core's decompress method
             let block_output = self.core.decompress_chunked_block(record, block_data)?;
+            let block_output_len = u64::try_from(block_output.len()).map_err(|_| {
+                invalid_chunked_data(format!(
+                    "chunked file block {i} decompressed length does not fit in u64"
+                ))
+            })?;
+            decompressed_length = decompressed_length
+                .checked_add(block_output_len)
+                .ok_or_else(|| {
+                    invalid_chunked_data("chunked file decompressed length overflows u64")
+                })?;
+
+            let expected_end = blocks
+                .get(i + 1)
+                .map(|(next_logical, _)| *next_logical)
+                .unwrap_or(record.decompressed_length);
+            if decompressed_length != expected_end {
+                return Err(invalid_chunked_data(format!(
+                    "chunked file block {i} ends at logical offset {decompressed_length}, expected {expected_end}"
+                )));
+            }
 
             // Write decompressed block to destination
             dest.write_all(&block_output).await?;
+        }
+
+        if decompressed_length != record.decompressed_length {
+            return Err(invalid_chunked_data(format!(
+                "chunked file decompressed to {decompressed_length} bytes, expected {}",
+                record.decompressed_length
+            )));
         }
 
         dest.flush().await?;
@@ -679,6 +823,25 @@ impl BoxFileReader {
             .ok_or_else(|| ExtractError::NotFoundInArchive(path.to_path_buf()))
     }
 
+    fn validate_materialization_path(
+        &self,
+        path: &BoxPath<'_>,
+        index: RecordIndex,
+    ) -> Result<(), ExtractError> {
+        self.core
+            .validate_extraction_path(path, index)
+            .map_err(|error| ExtractError::InvalidArchiveHierarchy(error, path.to_path_buf()))
+    }
+
+    fn checked_link_target(&self, link: &LinkRecord<'_>) -> Result<BoxPath<'static>, ExtractError> {
+        self.core
+            .extraction_path_for_index(link.target)
+            .map_err(|error| ExtractError::ResolveLinkFailed(error, link.clone().into_owned()))
+    }
+
+    // [spec:box:req:paths.root.extraction-gates+1]
+    // [spec:box:req:extraction.root.safety-options]
+    // [spec:box:sem:extraction.root.selection+2]
     pub async fn extract<P: AsRef<Path>>(
         &self,
         path: &BoxPath<'_>,
@@ -721,6 +884,10 @@ impl BoxFileReader {
     }
 
     /// Extract all files with options, returning extraction statistics.
+    // [spec:box:req:paths.root.extraction-gates+1]
+    // [spec:box:req:extraction.root]
+    // [spec:box:req:extraction.root.safety-options]
+    // [spec:box:sem:extraction.root.selection+2]
     pub async fn extract_all_with_options<P: AsRef<Path>>(
         &self,
         output_path: P,
@@ -752,6 +919,9 @@ impl BoxFileReader {
     }
 
     /// Extract a path and all children with options, returning extraction statistics.
+    // [spec:box:req:paths.root.extraction-gates+1]
+    // [spec:box:req:extraction.root.safety-options]
+    // [spec:box:sem:extraction.root.selection+2]
     pub async fn extract_recursive_with_options<P: AsRef<Path>>(
         &self,
         path: &BoxPath<'_>,
@@ -773,16 +943,48 @@ impl BoxFileReader {
             .index(path)
             .ok_or_else(|| ExtractError::NotFoundInArchive(path.to_path_buf()))?;
 
-        for item in Records::new(self.core.metadata(), &[index], None) {
+        let mut pending = vec![(path.clone().into_owned(), index)];
+        let mut visited = HashSet::new();
+        while let Some((item_path, item_index)) = pending.pop() {
+            if !visited.insert(item_index) {
+                return Err(ExtractError::InvalidArchiveHierarchy(
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!(
+                            "record index {} appears more than once in the recursive hierarchy",
+                            item_index.get()
+                        ),
+                    ),
+                    item_path.to_path_buf(),
+                ));
+            }
+            let record = self
+                .core
+                .record(item_index)
+                .ok_or_else(|| ExtractError::NotFoundInArchive(item_path.to_path_buf()))?;
+            let children = if matches!(record, Record::Directory(_)) {
+                self.core
+                    .extraction_children_by_index(item_index, &item_path)
+                    .map_err(|error| {
+                        ExtractError::InvalidArchiveHierarchy(error, item_path.to_path_buf())
+                    })?
+                    .into_iter()
+                    .rev()
+                    .collect()
+            } else {
+                Vec::new()
+            };
+
             self.extract_inner_with_options(
-                &item.path,
-                item.record,
-                item.index,
+                &item_path,
+                record,
+                item_index,
                 output_path,
                 &options,
                 &mut stats,
             )
             .await?;
+            pending.extend(children);
         }
         Ok(stats)
     }
@@ -804,6 +1006,15 @@ impl BoxFileReader {
     }
 
     /// Extract all files with parallel decompression and progress reporting.
+    // [spec:box:req:paths.root.extraction-gates+1]
+    // [spec:box:req:checksums.root.verification]
+    // [spec:box:sem:checksums.root.verification.extraction-statistics]
+    // [spec:box:req:extraction.root.safety-options]
+    // [spec:box:req:extraction.root.internal-symlink]
+    // [spec:box:req:extraction.root.external-symlink]
+    // [spec:box:sem:extraction.root.parallel-ordering]
+    // [spec:box:req:extraction.root.checksum-verification]
+    // [spec:box:sem:extraction.root.progress]
     pub async fn extract_all_parallel_with_progress<P: AsRef<Path>>(
         &self,
         output_path: P,
@@ -828,6 +1039,7 @@ impl BoxFileReader {
         let mut symlinks = Vec::new();
 
         for item in self.core.iter() {
+            self.validate_materialization_path(&item.path, item.index)?;
             match item.record {
                 Record::Directory(_) => directories.push((item.path.clone(), item.record.clone())),
                 Record::File(f) => {
@@ -897,7 +1109,9 @@ impl BoxFileReader {
             }
         }
 
-        let total_files = (files.len() + chunked_files.len()) as u64;
+        let work_items = files.len().saturating_add(chunked_files.len());
+        let concurrency = concurrency.max(1).min(work_items.max(1));
+        let total_files = work_items as u64;
         let total_dirs = directories.len() as u64;
         let total_links = symlinks.len() as u64;
         timing.collect = collect_start.elapsed();
@@ -912,7 +1126,7 @@ impl BoxFileReader {
 
         let mut stats = ExtractStats::default();
 
-        // Phase 1: Create directories (sequential)
+        // Create directories sequentially before dependent entries.
         let dirs_start = Instant::now();
         for (path, record) in directories {
             fs::create_dir_all(output_path)
@@ -953,7 +1167,7 @@ impl BoxFileReader {
         }
         timing.directories = dirs_start.elapsed();
 
-        // Phase 2: Extract files (parallel) with pipelined validation
+        // Extract files in parallel with pipelined validation.
         let decompress_start = Instant::now();
         // Open mmap once and share across all tasks
         let mmap: Arc<MemoryMappedFile> = MemoryMappedFile::builder(&self.path)
@@ -1168,13 +1382,7 @@ impl BoxFileReader {
                         )
                     })?;
 
-                    if let Ok(matches) = result {
-                        if !matches {
-                            stats.checksum_failures += 1;
-                        }
-                    } else if let Err(e) = result {
-                        // Log but don't fail extraction for validation errors
-                        tracing::error!("Validation error: {}", e);
+                    if !result? {
                         stats.checksum_failures += 1;
                     }
                 }
@@ -1182,7 +1390,7 @@ impl BoxFileReader {
         }
         timing.decompress = decompress_start.elapsed();
 
-        // Phase 3: Create symlinks (sequential)
+        // Create symlinks sequentially after their targets.
         let symlinks_start = Instant::now();
         for (path, record) in symlinks {
             if let Record::Link(link) = &record {
@@ -1196,15 +1404,7 @@ impl BoxFileReader {
                 }
 
                 // Resolve target index to path and compute relative symlink target
-                let target_path = self.core.path_for_index(link.target).ok_or_else(|| {
-                    ExtractError::ResolveLinkFailed(
-                        std::io::Error::new(
-                            std::io::ErrorKind::NotFound,
-                            format!("No path for target index: {}", link.target.get()),
-                        ),
-                        link.clone().into_owned(),
-                    )
-                })?;
+                let target_path = self.checked_link_target(link)?;
                 let target = self.compute_relative_symlink_target(&path, &target_path);
 
                 #[cfg(unix)]
@@ -1286,56 +1486,101 @@ impl BoxFileReader {
     }
 
     /// Validate all file checksums without extracting.
+    // [spec:box:req:checksums.root.verification]
+    // [spec:box:sem:checksums.root.verification.checksum-less]
+    // [spec:box:req:validation.root]
+    // [spec:box:sem:validation.root.payload-hash]
+    // [spec:box:sem:validation.root.results]
     pub async fn validate_all(&self) -> Result<ValidateStats, ExtractError> {
         let mut stats = ValidateStats::default();
 
         for item in self.core.iter() {
-            if let Record::File(file) = item.record {
-                stats.files_checked += 1;
+            match item.record {
+                Record::File(file) => {
+                    stats.files_checked += 1;
 
-                let expected_hash: [u8; 32] = match item
-                    .record
-                    .attr_value(self.metadata(), crate::attrs::BLAKE3)
-                {
-                    Some(AttrValue::U256(h)) => *h,
-                    _ => {
-                        stats.files_without_checksum += 1;
-                        continue;
+                    let expected_hash: [u8; 32] = match item
+                        .record
+                        .attr_value(self.metadata(), crate::attrs::BLAKE3)
+                    {
+                        Some(AttrValue::U256(h)) => *h,
+                        _ => {
+                            stats.files_without_checksum += 1;
+                            continue;
+                        }
+                    };
+
+                    // Decompress to compute hash
+                    let mut hasher = blake3::Hasher::new();
+                    let segment = self.memory_map(file).map_err(|e| {
+                        ExtractError::VerificationFailed(e, item.path.to_path_buf())
+                    })?;
+                    let data = segment.as_slice().map_err(|e| {
+                        ExtractError::VerificationFailed(
+                            std::io::Error::other(e),
+                            item.path.to_path_buf(),
+                        )
+                    })?;
+                    // Decompress and hash using sans-IO
+                    let dict = self.core.dictionary();
+                    let decompressed =
+                        crate::compression::decompress_bytes_sync(data, file.compression, dict)
+                            .map_err(|e| {
+                                ExtractError::VerificationFailed(e, item.path.to_path_buf())
+                            })?;
+
+                    // Feed decompressed data to hasher
+                    hasher.update(&decompressed);
+
+                    let actual_hash = hasher.finalize();
+                    if actual_hash.as_bytes() != &expected_hash {
+                        tracing::warn!(
+                            "Checksum mismatch for {}: expected {}, got {}",
+                            item.path,
+                            hex::encode(expected_hash),
+                            hex::encode(actual_hash.as_bytes())
+                        );
+                        stats.checksum_failures += 1;
                     }
-                };
-
-                // Decompress to compute hash
-                let mut hasher = blake3::Hasher::new();
-                let segment = self
-                    .memory_map(file)
-                    .map_err(|e| ExtractError::VerificationFailed(e, item.path.to_path_buf()))?;
-                let data = segment.as_slice().map_err(|e| {
-                    ExtractError::VerificationFailed(
-                        std::io::Error::other(e),
-                        item.path.to_path_buf(),
-                    )
-                })?;
-                // Decompress and hash using sans-IO
-                let dict = self.core.dictionary();
-                let decompressed =
-                    crate::compression::decompress_bytes_sync(data, file.compression, dict)
-                        .map_err(|e| {
-                            ExtractError::VerificationFailed(e, item.path.to_path_buf())
-                        })?;
-
-                // Feed decompressed data to hasher
-                hasher.update(&decompressed);
-
-                let actual_hash = hasher.finalize();
-                if actual_hash.as_bytes() != &expected_hash {
-                    tracing::warn!(
-                        "Checksum mismatch for {}: expected {}, got {}",
-                        item.path,
-                        hex::encode(expected_hash),
-                        hex::encode(actual_hash.as_bytes())
-                    );
-                    stats.checksum_failures += 1;
                 }
+                Record::ChunkedFile(file) => {
+                    stats.files_checked += 1;
+
+                    let expected_hash: [u8; 32] = match item
+                        .record
+                        .attr_value(self.metadata(), crate::attrs::BLAKE3)
+                    {
+                        Some(AttrValue::U256(h)) => *h,
+                        _ => {
+                            stats.files_without_checksum += 1;
+                            continue;
+                        }
+                    };
+
+                    let segment = self.memory_map_chunked(file).map_err(|e| {
+                        ExtractError::VerificationFailed(e, item.path.to_path_buf())
+                    })?;
+                    let data = segment.as_slice().map_err(|e| {
+                        ExtractError::VerificationFailed(
+                            std::io::Error::other(e),
+                            item.path.to_path_buf(),
+                        )
+                    })?;
+                    let blocks = self.core.blocks_for_record(item.index);
+                    let matches = validate_chunked_file_data(
+                        data,
+                        &item.path,
+                        file,
+                        &blocks,
+                        &expected_hash,
+                        self.core.dictionary(),
+                    )?;
+
+                    if !matches {
+                        stats.checksum_failures += 1;
+                    }
+                }
+                _ => {}
             }
         }
 
@@ -1352,6 +1597,11 @@ impl BoxFileReader {
     }
 
     /// Validate all file checksums in parallel with progress reporting.
+    // [spec:box:req:checksums.root.verification]
+    // [spec:box:sem:checksums.root.verification.checksum-less]
+    // [spec:box:req:validation.root]
+    // [spec:box:sem:validation.root.results]
+    // [spec:box:sem:validation.root.parallel]
     pub async fn validate_all_parallel_with_progress(
         &self,
         concurrency: usize,
@@ -1365,29 +1615,43 @@ impl BoxFileReader {
         let mut files_without_checksum = 0u64;
 
         for item in self.core.iter() {
-            if let Record::File(f) = item.record {
-                match item
-                    .record
-                    .attr_value(self.metadata(), crate::attrs::BLAKE3)
-                {
-                    Some(AttrValue::U256(h)) => {
-                        files.push((item.path.clone(), f.clone(), *h));
-                    }
-                    _ => {
-                        files_without_checksum += 1;
-                    }
+            let validation_record = match item.record {
+                Record::File(record) => ValidationRecord::File(record.clone()),
+                Record::ChunkedFile(record) => ValidationRecord::Chunked {
+                    record: record.clone(),
+                    blocks: self.core.blocks_for_record(item.index),
+                },
+                _ => continue,
+            };
+
+            match item
+                .record
+                .attr_value(self.metadata(), crate::attrs::BLAKE3)
+            {
+                Some(AttrValue::U256(h)) => {
+                    files.push((item.path.clone(), validation_record, *h));
+                }
+                _ => {
+                    files_without_checksum += 1;
                 }
             }
         }
 
         let total_files = files.len() as u64;
+        // Keep the library API total for computed or hostile worker counts:
+        // Tokio rejects zero-capacity channels and semaphores above its limit.
+        let concurrency = concurrency
+            .max(1)
+            .min(files.len().max(1))
+            .min(Semaphore::MAX_PERMITS);
 
         if let Some(ref p) = progress {
             let _ = p.send(ValidateProgress::Started { total_files });
         }
 
         let semaphore = Arc::new(Semaphore::new(concurrency));
-        let (tx, mut rx) = mpsc::channel::<Result<(BoxPath, bool), ExtractError>>(concurrency * 2);
+        let channel_capacity = concurrency.saturating_mul(2);
+        let (tx, mut rx) = mpsc::channel::<Result<(BoxPath, bool), ExtractError>>(channel_capacity);
 
         // Open mmap once and share across all tasks
         let mmap: Arc<MemoryMappedFile> = MemoryMappedFile::builder(&self.path)
@@ -1418,15 +1682,31 @@ impl BoxFileReader {
                     });
                 }
 
-                let result = validate_single_file_from_mmap(
-                    mmap,
-                    archive_offset,
-                    &box_path,
-                    &record,
-                    &expected_hash,
-                    dictionary,
-                )
-                .await
+                let result = match record {
+                    ValidationRecord::File(record) => {
+                        validate_single_file_from_mmap(
+                            mmap,
+                            archive_offset,
+                            &box_path,
+                            &record,
+                            &expected_hash,
+                            dictionary,
+                        )
+                        .await
+                    }
+                    ValidationRecord::Chunked { record, blocks } => {
+                        validate_single_chunked_file_from_mmap(
+                            mmap,
+                            archive_offset,
+                            &box_path,
+                            &record,
+                            &blocks,
+                            &expected_hash,
+                            dictionary,
+                        )
+                        .await
+                    }
+                }
                 .map(|success| (box_path, success));
 
                 let _ = tx.send(result).await;
@@ -1437,14 +1717,20 @@ impl BoxFileReader {
 
         // Collect results
         let mut stats = ValidateStats {
-            files_checked: 0,
+            // Keep the public counter consistent with sequential validation: it
+            // includes file records skipped because they have no checksum.
+            files_checked: files_without_checksum,
             files_without_checksum,
             checksum_failures: 0,
         };
+        // Progress only covers checksum-bearing validation jobs, matching the
+        // `total_files` announced above.
+        let mut validations_completed = 0u64;
 
         while let Some(result) = rx.recv().await {
             let (path, success) = result?;
             stats.files_checked += 1;
+            validations_completed += 1;
 
             if !success {
                 stats.checksum_failures += 1;
@@ -1453,7 +1739,7 @@ impl BoxFileReader {
             if let Some(ref p) = progress {
                 let _ = p.send(ValidateProgress::Validated {
                     path,
-                    files_checked: stats.files_checked,
+                    files_checked: validations_completed,
                     total_files,
                     success,
                 });
@@ -1467,6 +1753,7 @@ impl BoxFileReader {
         Ok(stats)
     }
 
+    // [spec:box:req:records.root.references.resolution]
     pub fn resolve_link(&self, link: &LinkRecord<'_>) -> std::io::Result<RecordsItem<'_, 'static>> {
         let index = link.target;
         let record = self.core.record(index).ok_or_else(|| {
@@ -1475,12 +1762,7 @@ impl BoxFileReader {
                 format!("No record for link target index: {}", index.get()),
             )
         })?;
-        let path = self.core.path_for_index(index).ok_or_else(|| {
-            std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                format!("Could not find path for link target index: {}", index.get()),
-            )
-        })?;
+        let path = self.core.extraction_path_for_index(index)?;
         Ok(RecordsItem {
             index,
             path,
@@ -1507,24 +1789,26 @@ impl BoxFileReader {
         pathdiff::diff_paths(&target, &link_parent).unwrap_or(target)
     }
 
+    // [spec:box:sem:async-io.root.read]
     pub async fn read_bytes(
         &self,
         record: &FileRecord<'_>,
     ) -> std::io::Result<tokio::io::Take<File>> {
         let mut file = OpenOptions::new().read(true).open(&self.path).await?;
 
-        file.seek(SeekFrom::Start(self.core.offset + record.data.get()))
-            .await?;
+        let offset = checked_archive_data_offset(self.core.offset, record.data.get())?;
+        file.seek(SeekFrom::Start(offset)).await?;
         Ok(file.take(record.length))
     }
 
     /// Memory-map the file and return a segment for the record's data.
+    // [spec:box:sem:async-io.root.read]
     pub fn memory_map(&self, record: &FileRecord<'_>) -> std::io::Result<Segment> {
         let mmap = MemoryMappedFile::builder(&self.path)
             .huge_pages(true)
             .open()
             .map_err(std::io::Error::other)?;
-        let offset = self.core.offset + record.data.get();
+        let offset = checked_archive_data_offset(self.core.offset, record.data.get())?;
         Segment::new(mmap.into(), offset, record.length).map_err(std::io::Error::other)
     }
 
@@ -1534,7 +1818,7 @@ impl BoxFileReader {
             .huge_pages(true)
             .open()
             .map_err(std::io::Error::other)?;
-        let offset = self.core.offset + record.data.get();
+        let offset = checked_archive_data_offset(self.core.offset, record.data.get())?;
         Segment::new(mmap.into(), offset, record.length).map_err(std::io::Error::other)
     }
 
@@ -1551,6 +1835,7 @@ impl BoxFileReader {
     ///
     /// # Errors
     /// Returns an error if the range exceeds the file size or if decompression fails.
+    // [spec:box:sem:chunked-io.root.async-range]
     pub async fn read_chunked_range(
         &self,
         record: &ChunkedFileRecord<'_>,
@@ -1559,14 +1844,24 @@ impl BoxFileReader {
         len: usize,
     ) -> std::io::Result<Vec<u8>> {
         // Validate range
-        if offset + len as u64 > record.decompressed_length {
+        let len_u64 = u64::try_from(len).map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "requested chunked-file range length does not fit in u64",
+            )
+        })?;
+        let range_end = offset.checked_add(len_u64).ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "requested chunked-file range overflows u64",
+            )
+        })?;
+        if range_end > record.decompressed_length {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
                 format!(
                     "read range [{}, {}) exceeds file size {}",
-                    offset,
-                    offset + len as u64,
-                    record.decompressed_length
+                    offset, range_end, record.decompressed_length
                 ),
             ));
         }
@@ -1588,27 +1883,46 @@ impl BoxFileReader {
         // Memory-map the archive
         let segment = self.memory_map_chunked(record)?;
         let all_data = segment.as_slice().map_err(std::io::Error::other)?;
+        let data_end = chunked_data_end(record)?;
 
-        let mut result = Vec::with_capacity(len);
+        let mut result = Vec::new();
+        result.try_reserve_exact(len).map_err(|error| {
+            std::io::Error::new(
+                std::io::ErrorKind::OutOfMemory,
+                format!("cannot allocate chunked-file range buffer: {error}"),
+            )
+        })?;
         let mut remaining = len;
         let mut current_offset = offset;
         let mut current_block_logical = block_logical_offset;
         let mut current_block_physical = block_physical_offset;
+        let mut block_index = self
+            .core
+            .blocks_for_record(record_index)
+            .iter()
+            .position(|entry| *entry == (block_logical_offset, block_physical_offset))
+            .ok_or_else(|| invalid_chunked_data("starting block is not in the block FST"))?;
 
         while remaining > 0 {
             // Calculate compressed block size from next block's offset or end of data
-            let compressed_end = if let Some((_, next_physical)) =
-                self.core.next_block(record_index, current_block_logical)
-            {
-                next_physical
-            } else {
-                record.data.get() + record.length
-            };
-            let compressed_size = (compressed_end - current_block_physical) as usize;
+            let next_block = self.core.next_block(record_index, current_block_logical);
+            let compressed_end = next_block
+                .map(|(_, next_physical)| next_physical)
+                .unwrap_or(data_end);
 
             // Get slice of compressed block data
-            let block_data_offset = (current_block_physical - record.data.get()) as usize;
-            let block_data = &all_data[block_data_offset..block_data_offset + compressed_size];
+            let block_range = chunked_block_data_range(
+                record,
+                all_data.len(),
+                block_index,
+                current_block_physical,
+                compressed_end,
+            )?;
+            let block_data = all_data.get(block_range).ok_or_else(|| {
+                invalid_chunked_data(format!(
+                    "chunked file block {block_index} is outside the mapped record data"
+                ))
+            })?;
 
             // Decompress the block using sans-IO
             let dict = self.core.dictionary();
@@ -1616,25 +1930,58 @@ impl BoxFileReader {
                 crate::compression::decompress_bytes_sync(block_data, record.compression, dict)?;
 
             // Calculate slice within this block
-            let start_in_block = (current_offset - current_block_logical) as usize;
-            let available = decompressed.len() - start_in_block;
+            let start_in_block = current_offset
+                .checked_sub(current_block_logical)
+                .and_then(|value| usize::try_from(value).ok())
+                .ok_or_else(|| {
+                    invalid_chunked_data(format!(
+                        "requested offset is before chunked file block {block_index}"
+                    ))
+                })?;
+            let available = decompressed
+                .len()
+                .checked_sub(start_in_block)
+                .ok_or_else(|| {
+                    invalid_chunked_data(format!(
+                        "requested offset is outside chunked file block {block_index}"
+                    ))
+                })?;
+            if available == 0 {
+                return Err(invalid_chunked_data(format!(
+                    "chunked file block {block_index} does not cover the requested range"
+                )));
+            }
             let to_copy = remaining.min(available);
 
-            result.extend_from_slice(&decompressed[start_in_block..start_in_block + to_copy]);
+            let block_slice = decompressed
+                .get(start_in_block..start_in_block + to_copy)
+                .ok_or_else(|| {
+                    invalid_chunked_data(format!(
+                        "requested range is outside chunked file block {block_index}"
+                    ))
+                })?;
+            result.extend_from_slice(block_slice);
             remaining -= to_copy;
-            current_offset += to_copy as u64;
+            current_offset = current_offset
+                .checked_add(to_copy as u64)
+                .ok_or_else(|| invalid_chunked_data("chunked-file read offset overflows u64"))?;
 
             // Move to next block if needed
             if remaining > 0 {
-                if let Some((next_logical, next_physical)) =
-                    self.core.next_block(record_index, current_block_logical)
-                {
+                if let Some((next_logical, next_physical)) = next_block {
+                    if next_logical <= current_block_logical || next_logical != current_offset {
+                        return Err(invalid_chunked_data(format!(
+                            "chunked file block {} starts at logical offset {next_logical}, expected {current_offset}",
+                            block_index + 1
+                        )));
+                    }
                     current_block_logical = next_logical;
                     current_block_physical = next_physical;
+                    block_index += 1;
                 } else {
-                    // No more blocks but still have bytes to read - shouldn't happen
-                    // if the range validation was correct
-                    break;
+                    return Err(invalid_chunked_data(
+                        "chunked file ends before the requested logical range",
+                    ));
                 }
             }
         }
@@ -1673,12 +2020,15 @@ impl BoxFileReader {
         record_index: RecordIndex,
         output_path: &Path,
     ) -> Result<(), ExtractError> {
+        self.validate_materialization_path(path, record_index)?;
         match record {
             Record::File(file) => {
-                fs::create_dir_all(output_path)
-                    .await
-                    .map_err(|e| ExtractError::CreateDirFailed(e, output_path.to_path_buf()))?;
                 let out_path = output_path.join(path.to_path_buf());
+                if let Some(parent) = out_path.parent() {
+                    fs::create_dir_all(parent)
+                        .await
+                        .map_err(|e| ExtractError::CreateDirFailed(e, parent.to_path_buf()))?;
+                }
 
                 let out_file = fs::File::create(&out_path)
                     .await
@@ -1700,11 +2050,8 @@ impl BoxFileReader {
                 Ok(())
             }
             Record::Directory(_dir) => {
-                fs::create_dir_all(output_path)
-                    .await
-                    .map_err(|e| ExtractError::CreateDirFailed(e, output_path.to_path_buf()))?;
                 let new_dir = output_path.join(path.to_path_buf());
-                fs::create_dir(&new_dir)
+                fs::create_dir_all(&new_dir)
                     .await
                     .map_err(|e| ExtractError::CreateDirFailed(e, new_dir))
             }
@@ -1720,15 +2067,7 @@ impl BoxFileReader {
                 }
 
                 // Resolve target index to path and compute relative symlink target
-                let target_path = self.core.path_for_index(link.target).ok_or_else(|| {
-                    ExtractError::ResolveLinkFailed(
-                        std::io::Error::new(
-                            std::io::ErrorKind::NotFound,
-                            format!("No path for target index: {}", link.target.get()),
-                        ),
-                        link.clone().into_owned(),
-                    )
-                })?;
+                let target_path = self.checked_link_target(link)?;
                 let target = self.compute_relative_symlink_target(path, &target_path);
 
                 tokio::fs::symlink(&target, &link_path)
@@ -1747,15 +2086,7 @@ impl BoxFileReader {
                 }
 
                 // Resolve target index to path and compute relative symlink target
-                let target_path = self.core.path_for_index(link.target).ok_or_else(|| {
-                    ExtractError::ResolveLinkFailed(
-                        std::io::Error::new(
-                            std::io::ErrorKind::NotFound,
-                            format!("No path for target index: {}", link.target.get()),
-                        ),
-                        link.clone().into_owned(),
-                    )
-                })?;
+                let target_path = self.checked_link_target(link)?;
                 let target = self.compute_relative_symlink_target(path, &target_path);
 
                 // On Windows, we need to know if it's a dir or file symlink
@@ -1812,10 +2143,12 @@ impl BoxFileReader {
                     .map_err(|e| ExtractError::CreateLinkFailed(e, link_path, target))
             }
             Record::ChunkedFile(file) => {
-                fs::create_dir_all(output_path)
-                    .await
-                    .map_err(|e| ExtractError::CreateDirFailed(e, output_path.to_path_buf()))?;
                 let out_path = output_path.join(path.to_path_buf());
+                if let Some(parent) = out_path.parent() {
+                    fs::create_dir_all(parent)
+                        .await
+                        .map_err(|e| ExtractError::CreateDirFailed(e, parent.to_path_buf()))?;
+                }
 
                 let out_file = fs::File::create(&out_path)
                     .await
@@ -1839,6 +2172,14 @@ impl BoxFileReader {
         }
     }
 
+    // [spec:box:req:checksums.root.verification]
+    // [spec:box:sem:checksums.root.verification.extraction-statistics]
+    // [spec:box:req:records.root.references.resolution]
+    // [spec:box:req:extraction.root.materialization]
+    // [spec:box:req:extraction.root.internal-symlink]
+    // [spec:box:req:extraction.root.external-symlink]
+    // [spec:box:req:extraction.root.checksum-verification]
+    // [spec:box:sem:chunked-io.root.slice-extraction]
     async fn extract_inner_with_options(
         &self,
         path: &BoxPath<'_>,
@@ -1848,12 +2189,15 @@ impl BoxFileReader {
         options: &ExtractOptions,
         stats: &mut ExtractStats,
     ) -> Result<(), ExtractError> {
+        self.validate_materialization_path(path, record_index)?;
         match record {
             Record::File(file) => {
-                fs::create_dir_all(output_path)
-                    .await
-                    .map_err(|e| ExtractError::CreateDirFailed(e, output_path.to_path_buf()))?;
                 let out_path = output_path.join(path.to_path_buf());
+                if let Some(parent) = out_path.parent() {
+                    fs::create_dir_all(parent)
+                        .await
+                        .map_err(|e| ExtractError::CreateDirFailed(e, parent.to_path_buf()))?;
+                }
 
                 let out_file = fs::File::create(&out_path)
                     .await
@@ -1907,11 +2251,8 @@ impl BoxFileReader {
                 Ok(())
             }
             Record::Directory(_dir) => {
-                fs::create_dir_all(output_path)
-                    .await
-                    .map_err(|e| ExtractError::CreateDirFailed(e, output_path.to_path_buf()))?;
                 let new_dir = output_path.join(path.to_path_buf());
-                fs::create_dir(&new_dir)
+                fs::create_dir_all(&new_dir)
                     .await
                     .map_err(|e| ExtractError::CreateDirFailed(e, new_dir))?;
                 stats.dirs_created += 1;
@@ -1929,15 +2270,7 @@ impl BoxFileReader {
                 }
 
                 // Resolve target index to path and compute relative symlink target
-                let target_path = self.core.path_for_index(link.target).ok_or_else(|| {
-                    ExtractError::ResolveLinkFailed(
-                        std::io::Error::new(
-                            std::io::ErrorKind::NotFound,
-                            format!("No path for target index: {}", link.target.get()),
-                        ),
-                        link.clone().into_owned(),
-                    )
-                })?;
+                let target_path = self.checked_link_target(link)?;
                 let target = self.compute_relative_symlink_target(path, &target_path);
 
                 tokio::fs::symlink(&target, &link_path)
@@ -1958,15 +2291,7 @@ impl BoxFileReader {
                 }
 
                 // Resolve target index to path and compute relative symlink target
-                let target_path = self.core.path_for_index(link.target).ok_or_else(|| {
-                    ExtractError::ResolveLinkFailed(
-                        std::io::Error::new(
-                            std::io::ErrorKind::NotFound,
-                            format!("No path for target index: {}", link.target.get()),
-                        ),
-                        link.clone().into_owned(),
-                    )
-                })?;
+                let target_path = self.checked_link_target(link)?;
                 let target = self.compute_relative_symlink_target(path, &target_path);
 
                 // On Windows, we need to know if it's a dir or file symlink
@@ -2029,10 +2354,12 @@ impl BoxFileReader {
                 Ok(())
             }
             Record::ChunkedFile(file) => {
-                fs::create_dir_all(output_path)
-                    .await
-                    .map_err(|e| ExtractError::CreateDirFailed(e, output_path.to_path_buf()))?;
                 let out_path = output_path.join(path.to_path_buf());
+                if let Some(parent) = out_path.parent() {
+                    fs::create_dir_all(parent)
+                        .await
+                        .map_err(|e| ExtractError::CreateDirFailed(e, parent.to_path_buf()))?;
+                }
 
                 let out_file = fs::File::create(&out_path)
                     .await
@@ -2086,484 +2413,6 @@ impl BoxFileReader {
                 Ok(())
             }
         }
-    }
-}
-
-// ============================================================================
-// BLOCK CACHE
-// ============================================================================
-
-/// LRU cache for decompressed blocks.
-///
-/// Caches decompressed block data keyed by (record_index, block_logical_offset).
-/// This significantly speeds up sequential reads and repeated access patterns.
-pub struct BlockCache {
-    cache: LruCache<(u64, u64), Box<[u8]>>,
-}
-
-impl BlockCache {
-    /// Create a new block cache with the specified capacity.
-    ///
-    /// Capacity is the number of blocks to cache, not bytes.
-    /// With 2MB blocks, 8 blocks = 16MB cache.
-    pub fn new(capacity: usize) -> Self {
-        Self {
-            cache: LruCache::new(
-                std::num::NonZeroUsize::new(capacity).expect("capacity must be > 0"),
-            ),
-        }
-    }
-
-    /// Get a cached block if present.
-    pub fn get(&mut self, record_index: u64, block_offset: u64) -> Option<&[u8]> {
-        self.cache.get(&(record_index, block_offset)).map(|b| &**b)
-    }
-
-    /// Insert a decompressed block into the cache.
-    pub fn insert(&mut self, record_index: u64, block_offset: u64, data: Box<[u8]>) {
-        self.cache.put((record_index, block_offset), data);
-    }
-
-    /// Check if a block is in the cache without updating LRU order.
-    #[allow(dead_code)]
-    pub fn contains(&self, record_index: u64, block_offset: u64) -> bool {
-        self.cache.contains(&(record_index, block_offset))
-    }
-
-    /// Clear all cached blocks.
-    #[allow(dead_code)]
-    pub fn clear(&mut self) {
-        self.cache.clear();
-    }
-
-    /// Number of blocks currently cached.
-    #[allow(dead_code)]
-    pub fn len(&self) -> usize {
-        self.cache.len()
-    }
-
-    /// Check if cache is empty.
-    #[allow(dead_code)]
-    pub fn is_empty(&self) -> bool {
-        self.cache.is_empty()
-    }
-}
-
-impl Default for BlockCache {
-    fn default() -> Self {
-        // Default: 8 blocks (16MB with 2MB blocks)
-        Self::new(8)
-    }
-}
-
-// ============================================================================
-// CHUNKED READER (AsyncRead + AsyncSeek)
-// ============================================================================
-
-/// Currently loaded block for the chunked reader.
-struct CurrentBlock {
-    /// Logical offset where this block starts
-    logical_offset: u64,
-    /// Decompressed block data
-    data: Vec<u8>,
-}
-
-/// Async reader for chunked files with seek support.
-///
-/// Implements `AsyncRead` and `AsyncSeek` for random access to chunked file contents.
-/// Includes an LRU block cache for efficient sequential and repeated access patterns.
-///
-/// Uses synchronous decompression (sans-IO) internally, making it suitable for
-/// contexts where async runtimes are not available or blocking is acceptable.
-///
-/// # Example
-/// ```ignore
-/// let mut reader = bf.chunked_reader(&record, record_index)?;
-/// let mut buf = vec![0u8; 1024];
-/// reader.read(&mut buf).await?;
-/// reader.seek(SeekFrom::Start(1000)).await?;
-/// ```
-pub struct ChunkedReader<'a> {
-    reader: &'a BoxFileReader,
-    record: &'a ChunkedFileRecord<'a>,
-    record_index: RecordIndex,
-    position: u64,
-    cache: BlockCache,
-    segment: Segment,
-    blocks: Vec<(u64, u64)>,
-    current_block: Option<CurrentBlock>,
-}
-
-impl<'a> ChunkedReader<'a> {
-    /// Create a new chunked file reader.
-    pub fn new(
-        reader: &'a BoxFileReader,
-        record: &'a ChunkedFileRecord<'a>,
-        record_index: RecordIndex,
-    ) -> std::io::Result<Self> {
-        let segment = reader.memory_map_chunked(record)?;
-        let blocks = reader.core.blocks_for_record(record_index);
-
-        if blocks.is_empty() {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "chunked file has no block FST entries",
-            ));
-        }
-
-        Ok(Self {
-            reader,
-            record,
-            record_index,
-            position: 0,
-            cache: BlockCache::default(),
-            segment,
-            blocks,
-            current_block: None,
-        })
-    }
-
-    /// Create a new chunked file reader with a custom cache capacity.
-    pub fn with_cache_capacity(
-        reader: &'a BoxFileReader,
-        record: &'a ChunkedFileRecord<'a>,
-        record_index: RecordIndex,
-        cache_capacity: usize,
-    ) -> std::io::Result<Self> {
-        let mut r = Self::new(reader, record, record_index)?;
-        r.cache = BlockCache::new(cache_capacity);
-        Ok(r)
-    }
-
-    /// Get the current position within the file.
-    pub fn position(&self) -> u64 {
-        self.position
-    }
-
-    /// Get the total decompressed file size.
-    pub fn len(&self) -> u64 {
-        self.record.decompressed_length
-    }
-
-    /// Check if the file is empty.
-    pub fn is_empty(&self) -> bool {
-        self.record.decompressed_length == 0
-    }
-
-    /// Get the block size used for this chunked file.
-    pub fn block_size(&self) -> u32 {
-        self.record.block_size
-    }
-
-    /// Read bytes at a specific offset without changing the reader's position.
-    ///
-    /// This is the primary random access method - like `pread(2)` or indexing a memory map.
-    /// Uses the block cache for efficiency on repeated/nearby accesses.
-    ///
-    /// # Arguments
-    /// * `offset` - Byte offset within the decompressed file
-    /// * `buf` - Buffer to read into
-    ///
-    /// # Returns
-    /// Number of bytes read (may be less than buf.len() at EOF)
-    pub async fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> std::io::Result<usize> {
-        if buf.is_empty() || offset >= self.record.decompressed_length {
-            return Ok(0);
-        }
-
-        // Clamp read to file size
-        let available = (self.record.decompressed_length - offset) as usize;
-        let to_read = buf.len().min(available);
-        let mut total_read = 0;
-        let mut current_offset = offset;
-
-        while total_read < to_read {
-            // Find block containing current_offset
-            let Some(block_idx) = find_block_index(&self.blocks, current_offset) else {
-                break;
-            };
-
-            let (block_logical, block_physical) = self.blocks[block_idx];
-
-            // Get decompressed block (from cache or decompress)
-            let block_data = self
-                .get_block(block_idx, block_logical, block_physical)
-                .await?;
-
-            // Calculate how much to copy from this block
-            let offset_in_block = (current_offset - block_logical) as usize;
-            let block_remaining = block_data.len() - offset_in_block;
-            let copy_len = (to_read - total_read).min(block_remaining);
-
-            buf[total_read..total_read + copy_len]
-                .copy_from_slice(&block_data[offset_in_block..offset_in_block + copy_len]);
-
-            total_read += copy_len;
-            current_offset += copy_len as u64;
-        }
-
-        Ok(total_read)
-    }
-
-    /// Get a decompressed block, using cache if available.
-    ///
-    /// Uses synchronous decompression (sans-IO) for simplicity and portability.
-    fn get_block_sync(
-        &mut self,
-        block_idx: usize,
-        block_logical: u64,
-        block_physical: u64,
-    ) -> std::io::Result<Vec<u8>> {
-        // Check cache first
-        if let Some(cached) = self.cache.get(self.record_index.get(), block_logical) {
-            return Ok(cached.to_vec());
-        }
-
-        // Extract compressed block data
-        let all_data = self.segment.as_slice().map_err(std::io::Error::other)?;
-
-        let compressed_end = if block_idx + 1 < self.blocks.len() {
-            self.blocks[block_idx + 1].1
-        } else {
-            self.record.data.get() + self.record.length
-        };
-
-        let block_start = (block_physical - self.record.data.get()) as usize;
-        let block_end = (compressed_end - self.record.data.get()) as usize;
-        let block_data = &all_data[block_start..block_end];
-
-        // Use sync decompression (sans-IO)
-        let decompressed = crate::compression::decompress_bytes_sync(
-            block_data,
-            self.record.compression,
-            self.reader.core.dictionary(),
-        )?;
-
-        // Cache it
-        self.cache.insert(
-            self.record_index.get(),
-            block_logical,
-            decompressed.clone().into_boxed_slice(),
-        );
-
-        Ok(decompressed)
-    }
-
-    /// Get a decompressed block, using cache if available (async wrapper).
-    async fn get_block(
-        &mut self,
-        block_idx: usize,
-        block_logical: u64,
-        block_physical: u64,
-    ) -> std::io::Result<Vec<u8>> {
-        self.get_block_sync(block_idx, block_logical, block_physical)
-    }
-}
-
-/// Find the block index that contains the given logical offset.
-fn find_block_index(blocks: &[(u64, u64)], offset: u64) -> Option<usize> {
-    // Binary search for the block containing this offset
-    match blocks.binary_search_by(|(logical, _)| logical.cmp(&offset)) {
-        Ok(idx) => Some(idx),
-        Err(0) => None, // offset is before first block
-        Err(idx) => Some(idx - 1),
-    }
-}
-
-/// Read bytes from current block at the given position.
-fn read_from_block(current_block: &Option<CurrentBlock>, position: u64, buf: &mut [u8]) -> usize {
-    let Some(block) = current_block else {
-        return 0;
-    };
-
-    // Check if current position is within this block
-    if position < block.logical_offset {
-        return 0;
-    }
-
-    let offset_in_block = (position - block.logical_offset) as usize;
-    if offset_in_block >= block.data.len() {
-        return 0;
-    }
-
-    let available = block.data.len() - offset_in_block;
-    let to_copy = buf.len().min(available);
-
-    buf[..to_copy].copy_from_slice(&block.data[offset_in_block..offset_in_block + to_copy]);
-    to_copy
-}
-
-impl tokio::io::AsyncRead for ChunkedReader<'_> {
-    fn poll_read(
-        self: Pin<&mut Self>,
-        _cx: &mut Context<'_>,
-        buf: &mut tokio::io::ReadBuf<'_>,
-    ) -> Poll<std::io::Result<()>> {
-        let this = self.get_mut();
-
-        // Check if we're at EOF
-        if this.position >= this.record.decompressed_length {
-            return Poll::Ready(Ok(()));
-        }
-
-        // Try to read from current block
-        if this.current_block.is_some() {
-            let slice = buf.initialize_unfilled();
-            let n = read_from_block(&this.current_block, this.position, slice);
-            if n > 0 {
-                buf.advance(n);
-                this.position += n as u64;
-                return Poll::Ready(Ok(()));
-            }
-        }
-
-        // Need new block
-        let Some(block_idx) = find_block_index(&this.blocks, this.position) else {
-            return Poll::Ready(Ok(())); // EOF
-        };
-
-        let (logical_offset, physical_offset) = this.blocks[block_idx];
-
-        // Get decompressed block (from cache or decompress synchronously)
-        let data = match this.get_block_sync(block_idx, logical_offset, physical_offset) {
-            Ok(d) => d,
-            Err(e) => return Poll::Ready(Err(e)),
-        };
-
-        this.current_block = Some(CurrentBlock {
-            logical_offset,
-            data,
-        });
-
-        // Read from the newly loaded block
-        let slice = buf.initialize_unfilled();
-        let n = read_from_block(&this.current_block, this.position, slice);
-        buf.advance(n);
-        this.position += n as u64;
-        Poll::Ready(Ok(()))
-    }
-}
-
-impl tokio::io::AsyncSeek for ChunkedReader<'_> {
-    fn start_seek(self: Pin<&mut Self>, position: SeekFrom) -> std::io::Result<()> {
-        let this = self.get_mut();
-
-        let new_pos = match position {
-            SeekFrom::Start(pos) => pos as i64,
-            SeekFrom::End(offset) => this.record.decompressed_length as i64 + offset,
-            SeekFrom::Current(offset) => this.position as i64 + offset,
-        };
-
-        if new_pos < 0 {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "cannot seek to negative position",
-            ));
-        }
-
-        let new_pos = new_pos as u64;
-        if new_pos > this.record.decompressed_length {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                format!(
-                    "cannot seek past end of file ({} > {})",
-                    new_pos, this.record.decompressed_length
-                ),
-            ));
-        }
-
-        this.position = new_pos;
-
-        // Invalidate current block if position is outside it
-        if let Some(block) = &this.current_block {
-            let block_end = block.logical_offset + block.data.len() as u64;
-            if new_pos < block.logical_offset || new_pos >= block_end {
-                this.current_block = None;
-            }
-        }
-
-        Ok(())
-    }
-
-    fn poll_complete(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<u64>> {
-        Poll::Ready(Ok(self.get_mut().position))
-    }
-}
-
-// ============================================================================
-// CHUNKED SLICE (Deref to &[u8])
-// ============================================================================
-
-/// Transparent slice access to chunked file data.
-///
-/// This struct decompresses the entire chunked file into memory and provides
-/// direct `&[u8]` access via `Deref`. Useful when you need to access the file
-/// contents as a contiguous slice.
-///
-/// # Example
-/// ```ignore
-/// let slice = bf.chunked_slice(&record, record_index).await?;
-/// let data: &[u8] = &*slice;
-/// println!("First byte: {}", data[0]);
-/// ```
-pub struct ChunkedSlice {
-    data: Box<[u8]>,
-}
-
-impl ChunkedSlice {
-    /// Create a new ChunkedSlice by decompressing the entire chunked file.
-    pub async fn new(
-        reader: &BoxFileReader,
-        record: &ChunkedFileRecord<'_>,
-        record_index: RecordIndex,
-    ) -> std::io::Result<Self> {
-        let mut data = Vec::with_capacity(record.decompressed_length as usize);
-        reader
-            .decompress_chunked(record, record_index, &mut data)
-            .await?;
-        Ok(Self {
-            data: data.into_boxed_slice(),
-        })
-    }
-
-    /// Get the length of the decompressed data.
-    pub fn len(&self) -> usize {
-        self.data.len()
-    }
-
-    /// Check if the data is empty.
-    pub fn is_empty(&self) -> bool {
-        self.data.is_empty()
-    }
-
-    /// Consume self and return the underlying boxed slice.
-    pub fn into_boxed_slice(self) -> Box<[u8]> {
-        self.data
-    }
-
-    /// Consume self and return the data as a Vec.
-    pub fn into_vec(self) -> Vec<u8> {
-        self.data.into_vec()
-    }
-}
-
-impl Deref for ChunkedSlice {
-    type Target = [u8];
-
-    fn deref(&self) -> &Self::Target {
-        &self.data
-    }
-}
-
-impl AsRef<[u8]> for ChunkedSlice {
-    fn as_ref(&self) -> &[u8] {
-        &self.data
-    }
-}
-
-impl std::borrow::Borrow<[u8]> for ChunkedSlice {
-    fn borrow(&self) -> &[u8] {
-        &self.data
     }
 }
 
@@ -2594,6 +2443,7 @@ struct ExtractFileResult {
 /// This is a standalone function so it can be spawned as a task.
 /// Does NOT perform checksum verification - that happens separately in the validation pipeline.
 #[allow(clippy::too_many_arguments)]
+// [spec:box:req:extraction.root.materialization]
 async fn extract_single_file_from_mmap(
     mmap: Arc<MemoryMappedFile>,
     archive_offset: u64,
@@ -2616,7 +2466,17 @@ async fn extract_single_file_from_mmap(
     }
 
     // Create segment from shared mmap
-    let offset = archive_offset + record.data.get();
+    let offset = archive_offset
+        .checked_add(record.data.get())
+        .ok_or_else(|| {
+            ExtractError::DecompressionFailed(
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "file archive offset overflows u64",
+                ),
+                box_path.to_path_buf(),
+            )
+        })?;
     let segment = Segment::new(mmap, offset, record.length).map_err(|e| {
         ExtractError::DecompressionFailed(std::io::Error::other(e), box_path.to_path_buf())
     })?;
@@ -2781,6 +2641,8 @@ async fn extract_single_file_from_mmap(
 /// Chunked files contain independently-compressed blocks that decompress sequentially.
 /// Does NOT perform checksum verification - that happens separately in the validation pipeline.
 #[allow(clippy::too_many_arguments)]
+// [spec:box:req:extraction.root.materialization]
+// [spec:box:sem:chunked-io.root.slice-extraction]
 async fn extract_single_chunked_file_from_mmap(
     mmap: Arc<MemoryMappedFile>,
     archive_offset: u64,
@@ -2819,7 +2681,14 @@ async fn extract_single_chunked_file_from_mmap(
         .map_err(|e| ExtractError::CreateFileFailed(e, out_path.to_path_buf()))?;
 
     // Create segment for the entire chunked file data
-    let offset = archive_offset + record.data.get();
+    let offset = archive_offset
+        .checked_add(record.data.get())
+        .ok_or_else(|| {
+            ExtractError::DecompressionFailed(
+                invalid_chunked_data("chunked file archive offset overflows u64"),
+                box_path.to_path_buf(),
+            )
+        })?;
     let segment = Segment::new(mmap, offset, record.length).map_err(|e| {
         ExtractError::DecompressionFailed(std::io::Error::other(e), box_path.to_path_buf())
     })?;
@@ -2829,24 +2698,46 @@ async fn extract_single_chunked_file_from_mmap(
 
     // Size buffer based on file size, capped at 8MB
     const MAX_BUFFER_SIZE: usize = 8 * 1024 * 1024;
-    let write_buf_size = (record.decompressed_length as usize).min(MAX_BUFFER_SIZE);
+    let write_buf_size = usize::try_from(record.decompressed_length)
+        .unwrap_or(usize::MAX)
+        .min(MAX_BUFFER_SIZE);
     let mut out_file = tokio::io::BufWriter::with_capacity(write_buf_size, out_file);
+    let data_end = chunked_data_end(record)
+        .map_err(|error| ExtractError::DecompressionFailed(error, box_path.to_path_buf()))?;
+    let mut decompressed_length = 0u64;
 
     // Decompress each block separately
-    for i in 0..blocks.len() {
-        let (_logical_offset, physical_offset) = blocks[i];
+    for (i, &(logical_offset, physical_offset)) in blocks.iter().enumerate() {
+        if logical_offset != decompressed_length {
+            return Err(ExtractError::DecompressionFailed(
+                invalid_chunked_data(format!(
+                    "chunked file block {i} starts at logical offset {logical_offset}, expected {decompressed_length}"
+                )),
+                box_path.to_path_buf(),
+            ));
+        }
 
         // Determine block's compressed size from next block's offset (or end of data)
         let compressed_end = if i + 1 < blocks.len() {
             blocks[i + 1].1 // Next block's physical offset
         } else {
-            record.data.get() + record.length // End of all compressed data
+            data_end
         };
-        let compressed_size = (compressed_end - physical_offset) as usize;
 
         // Get slice of compressed block data (relative to start of chunked file data)
-        let block_offset = (physical_offset - record.data.get()) as usize;
-        let block_data = &all_data[block_offset..block_offset + compressed_size];
+        let block_range =
+            chunked_block_data_range(record, all_data.len(), i, physical_offset, compressed_end)
+                .map_err(|error| {
+                    ExtractError::DecompressionFailed(error, box_path.to_path_buf())
+                })?;
+        let block_data = all_data.get(block_range).ok_or_else(|| {
+            ExtractError::DecompressionFailed(
+                invalid_chunked_data(format!(
+                    "chunked file block {i} is outside the mapped record data"
+                )),
+                box_path.to_path_buf(),
+            )
+        })?;
 
         // Decompress this block using sans-IO
         let dict = dictionary.as_deref();
@@ -2854,10 +2745,41 @@ async fn extract_single_chunked_file_from_mmap(
             crate::compression::decompress_bytes_sync(block_data, record.compression, dict)
                 .map_err(|e| ExtractError::DecompressionFailed(e, box_path.to_path_buf()))?;
 
+        decompressed_length = decompressed_length
+            .checked_add(block_output.len() as u64)
+            .ok_or_else(|| {
+                ExtractError::DecompressionFailed(
+                    invalid_chunked_data("chunked file decompressed length overflows u64"),
+                    box_path.to_path_buf(),
+                )
+            })?;
+        let expected_end = blocks
+            .get(i + 1)
+            .map(|(next_logical, _)| *next_logical)
+            .unwrap_or(record.decompressed_length);
+        if decompressed_length != expected_end {
+            return Err(ExtractError::DecompressionFailed(
+                invalid_chunked_data(format!(
+                    "chunked file block {i} ends at logical offset {decompressed_length}, expected {expected_end}"
+                )),
+                box_path.to_path_buf(),
+            ));
+        }
+
         out_file
             .write_all(&block_output)
             .await
             .map_err(|e| ExtractError::DecompressionFailed(e, box_path.to_path_buf()))?;
+    }
+
+    if decompressed_length != record.decompressed_length {
+        return Err(ExtractError::DecompressionFailed(
+            invalid_chunked_data(format!(
+                "chunked file decompressed to {decompressed_length} bytes, expected {}",
+                record.decompressed_length
+            )),
+            box_path.to_path_buf(),
+        ));
     }
 
     out_file
@@ -2918,6 +2840,8 @@ fn validate_file_checksum(path: &Path, expected_hash: &[u8; 32]) -> Result<bool,
 /// Validate a single file's checksum using a shared mmap.
 ///
 /// Returns `true` if checksum matches, `false` if mismatch.
+// [spec:box:sem:validation.root.payload-hash]
+// [spec:box:def:checksums.root.logical-content-domain]
 async fn validate_single_file_from_mmap(
     mmap: Arc<MemoryMappedFile>,
     archive_offset: u64,
@@ -2927,7 +2851,8 @@ async fn validate_single_file_from_mmap(
     dictionary: Option<Arc<[u8]>>,
 ) -> Result<bool, ExtractError> {
     // Create segment from shared mmap
-    let offset = archive_offset + record.data.get();
+    let offset = checked_archive_data_offset(archive_offset, record.data.get())
+        .map_err(|error| ExtractError::VerificationFailed(error, box_path.to_path_buf()))?;
     let segment = Segment::new(mmap, offset, record.length).map_err(|e| {
         ExtractError::VerificationFailed(std::io::Error::other(e), box_path.to_path_buf())
     })?;
@@ -2956,4 +2881,246 @@ async fn validate_single_file_from_mmap(
     }
 
     Ok(matches)
+}
+
+/// Validate a chunked file's checksum using a shared mmap.
+///
+/// Each independently-compressed block is fed to one hasher in logical order,
+/// so the checksum covers the same bytes as the fully materialized file.
+// [spec:box:req:checksums.root.verification]
+// [spec:box:def:checksums.root.logical-content-domain]
+// [spec:box:sem:validation.root.payload-hash]
+async fn validate_single_chunked_file_from_mmap(
+    mmap: Arc<MemoryMappedFile>,
+    archive_offset: u64,
+    box_path: &BoxPath<'_>,
+    record: &ChunkedFileRecord<'_>,
+    blocks: &[(u64, u64)],
+    expected_hash: &[u8; 32],
+    dictionary: Option<Arc<[u8]>>,
+) -> Result<bool, ExtractError> {
+    let offset = archive_offset
+        .checked_add(record.data.get())
+        .ok_or_else(|| {
+            ExtractError::VerificationFailed(
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "chunked file data offset overflows u64",
+                ),
+                box_path.to_path_buf(),
+            )
+        })?;
+    let segment = Segment::new(mmap, offset, record.length).map_err(|e| {
+        ExtractError::VerificationFailed(std::io::Error::other(e), box_path.to_path_buf())
+    })?;
+    let data = segment.as_slice().map_err(|e| {
+        ExtractError::VerificationFailed(std::io::Error::other(e), box_path.to_path_buf())
+    })?;
+
+    validate_chunked_file_data(
+        data,
+        box_path,
+        record,
+        blocks,
+        expected_hash,
+        dictionary.as_deref(),
+    )
+}
+
+fn validate_chunked_file_data(
+    data: &[u8],
+    box_path: &BoxPath<'_>,
+    record: &ChunkedFileRecord<'_>,
+    blocks: &[(u64, u64)],
+    expected_hash: &[u8; 32],
+    dictionary: Option<&[u8]>,
+) -> Result<bool, ExtractError> {
+    let invalid_data = |message: String| {
+        ExtractError::VerificationFailed(
+            std::io::Error::new(std::io::ErrorKind::InvalidData, message),
+            box_path.to_path_buf(),
+        )
+    };
+
+    if blocks.is_empty() {
+        return Err(invalid_data(
+            "chunked file has no block FST entries".to_string(),
+        ));
+    }
+
+    let data_start = record.data.get();
+    let data_end = data_start
+        .checked_add(record.length)
+        .ok_or_else(|| invalid_data("chunked file data range overflows u64".to_string()))?;
+    let mut hasher = blake3::Hasher::new();
+    let mut decompressed_length = 0u64;
+
+    for (index, &(logical_offset, physical_offset)) in blocks.iter().enumerate() {
+        if logical_offset != decompressed_length {
+            return Err(invalid_data(format!(
+                "chunked file block {index} starts at logical offset {logical_offset}, expected {decompressed_length}"
+            )));
+        }
+
+        let compressed_end = blocks
+            .get(index + 1)
+            .map(|(_, next_physical_offset)| *next_physical_offset)
+            .unwrap_or(data_end);
+        let block_range =
+            chunked_block_data_range(record, data.len(), index, physical_offset, compressed_end)
+                .map_err(|error| ExtractError::VerificationFailed(error, box_path.to_path_buf()))?;
+        let block_data = data.get(block_range).ok_or_else(|| {
+            invalid_data(format!(
+                "chunked file block {index} is outside the mapped record data"
+            ))
+        })?;
+        let block_output =
+            crate::compression::decompress_bytes_sync(block_data, record.compression, dictionary)
+                .map_err(|e| ExtractError::VerificationFailed(e, box_path.to_path_buf()))?;
+
+        hasher.update(&block_output);
+        decompressed_length = decompressed_length
+            .checked_add(block_output.len() as u64)
+            .ok_or_else(|| {
+                invalid_data("chunked file decompressed length overflows u64".to_string())
+            })?;
+    }
+
+    if decompressed_length != record.decompressed_length {
+        return Err(invalid_data(format!(
+            "chunked file decompressed to {decompressed_length} bytes, expected {}",
+            record.decompressed_length
+        )));
+    }
+
+    let actual_hash = hasher.finalize();
+    let matches = actual_hash.as_bytes() == expected_hash;
+
+    if !matches {
+        tracing::warn!(
+            "Checksum mismatch for {}: expected {}, got {}",
+            box_path,
+            hex::encode(expected_hash),
+            hex::encode(actual_hash.as_bytes())
+        );
+    }
+
+    Ok(matches)
+}
+
+#[cfg(test)]
+mod chunked_metadata_tests {
+    use std::borrow::Cow;
+
+    use super::*;
+
+    fn record(data_start: u64, length: u64) -> ChunkedFileRecord<'static> {
+        ChunkedFileRecord {
+            compression: Compression::Stored,
+            block_size: 8,
+            length,
+            decompressed_length: 8,
+            data: NonZeroU64::new(data_start).expect("test data offset is nonzero"),
+            name: Cow::Borrowed("hostile.bin"),
+            attrs: Default::default(),
+        }
+    }
+
+    // [spec:box:sem:chunked-io.root.block-decompression/test/unit]
+    #[test]
+    fn hostile_block_ranges_return_errors() {
+        let valid_record = record(100, 20);
+        assert_eq!(
+            chunked_block_data_range(&valid_record, 20, 0, 100, 110).unwrap(),
+            0..10
+        );
+
+        for result in [
+            chunked_block_data_range(&valid_record, 20, 0, 99, 105),
+            chunked_block_data_range(&valid_record, 20, 0, 110, 105),
+            chunked_block_data_range(&valid_record, 20, 0, 110, 121),
+            chunked_block_data_range(&valid_record, 19, 0, 100, 120),
+            chunked_block_data_range(&valid_record, 20, 0, 110, 110),
+        ] {
+            assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::InvalidData);
+        }
+
+        let overflowing_record = record(u64::MAX - 4, 10);
+        assert_eq!(
+            chunked_block_data_range(&overflowing_record, 10, 0, u64::MAX - 4, u64::MAX)
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::InvalidData
+        );
+
+        assert!(matches!(
+            logical_file_buffer(u64::MAX).unwrap_err().kind(),
+            std::io::ErrorKind::InvalidData | std::io::ErrorKind::OutOfMemory
+        ));
+    }
+
+    // [spec:box:sem:async-io.root.read/test/unit]
+    // [spec:box:sem:validation.root.payload-hash/test/unit]
+    #[test]
+    fn regular_and_chunked_offsets_reject_hostile_bounds() {
+        assert_eq!(checked_archive_data_offset(7, 11).unwrap(), 18);
+        assert_eq!(
+            checked_archive_data_offset(1, u64::MAX).unwrap_err().kind(),
+            std::io::ErrorKind::InvalidData
+        );
+
+        let path = BoxPath::new("hostile.bin").unwrap();
+        let expected = *blake3::hash(b"").as_bytes();
+        let mut empty_record = record(100, 0);
+        empty_record.decompressed_length = 0;
+
+        for error in [
+            validate_chunked_file_data(&[], &path, &empty_record, &[], &expected, None)
+                .unwrap_err(),
+            validate_chunked_file_data(&[], &path, &empty_record, &[(0, 100)], &expected, None)
+                .unwrap_err(),
+        ] {
+            match error {
+                ExtractError::VerificationFailed(source, _) => {
+                    assert_eq!(source.kind(), std::io::ErrorKind::InvalidData)
+                }
+                other => panic!("expected verification error, got {other:?}"),
+            }
+        }
+
+        let valid_record = record(100, 20);
+        let error = validate_chunked_file_data(
+            &[0; 20],
+            &path,
+            &valid_record,
+            &[(0, 120)],
+            &expected,
+            None,
+        )
+        .unwrap_err();
+        assert!(matches!(error, ExtractError::VerificationFailed(_, _)));
+    }
+
+    // [spec:box:sem:chunked-io.root.seek-reader/test/unit]
+    #[test]
+    fn seek_arithmetic_handles_u64_boundaries() {
+        assert_eq!(
+            checked_seek_position(SeekFrom::Start(u64::MAX), 0, u64::MAX).unwrap(),
+            u64::MAX
+        );
+        assert_eq!(
+            checked_seek_position(SeekFrom::End(-1), 0, u64::MAX).unwrap(),
+            u64::MAX - 1
+        );
+
+        for error in [
+            checked_seek_position(SeekFrom::End(1), 0, u64::MAX).unwrap_err(),
+            checked_seek_position(SeekFrom::Current(i64::MAX), u64::MAX, u64::MAX).unwrap_err(),
+            checked_seek_position(SeekFrom::Start(i64::MAX as u64 + 1), 0, i64::MAX as u64)
+                .unwrap_err(),
+            checked_seek_position(SeekFrom::End(i64::MIN), 0, 0).unwrap_err(),
+        ] {
+            assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+        }
+    }
 }
