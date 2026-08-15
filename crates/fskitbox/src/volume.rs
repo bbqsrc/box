@@ -38,6 +38,8 @@ impl Default for BoxVolumeIvars {
 
 define_class! {
     /// Volume implementation for Box archives.
+    // [spec:box:req:fskit-extension.root]
+    // [spec:box:req:fskit-extension.root.read-only-volume]
     #[unsafe(super(FSVolume, NSObject))]
     #[name = "BoxVolume"]
     #[ivars = BoxVolumeIvars]
@@ -101,6 +103,7 @@ define_class! {
         }
 
         #[unsafe(method(lookupItemNamed:inDirectory:replyHandler:))]
+        // [spec:box:req:fskit-extension.root.record-mapping-and-cache]
         fn lookup_item(
             &self,
             name: *mut FSFileName,
@@ -179,6 +182,7 @@ define_class! {
         }
 
         #[unsafe(method(reclaimItem:replyHandler:))]
+        // [spec:box:req:fskit-extension.root.record-mapping-and-cache]
         fn reclaim_item(&self, item: *mut FSItem, reply: *const std::ffi::c_void) {
             tracing::debug!("BoxVolume: reclaimItem called");
 
@@ -217,6 +221,7 @@ define_class! {
         // FSVolumeReadWriteOperations
 
         #[unsafe(method(readFromItem:offset:length:intoBuffer:replyHandler:))]
+        // [spec:box:req:fskit-extension.root.record-mapping-and-cache]
         fn read_from_item(
             &self,
             item: *mut FSItem,
@@ -386,6 +391,7 @@ impl BoxVolume {
     }
 
     /// Create FSItemAttributes from a Box record.
+    // [spec:box:req:fskit-extension.root.record-mapping-and-cache]
     fn make_attributes(
         &self,
         record: &Record<'_>,
@@ -403,6 +409,11 @@ impl BoxVolume {
         attrs.set_alloc_size(BoxItem::size(record));
         attrs.set_link_count(1);
         attrs.set_flags(0);
+        let created = BoxItem::ctime(record, meta);
+        attrs.set_birth_time(created);
+        attrs.set_change_time(created);
+        attrs.set_modify_time(BoxItem::mtime(record, meta));
+        attrs.set_access_time(BoxItem::atime(record, meta));
 
         attrs
     }

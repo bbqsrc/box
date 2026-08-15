@@ -14,6 +14,7 @@ use crate::filesystem::BoxFS;
 ///
 /// This ensures the class is available when FSKit looks for it
 /// via the NSExtensionPrincipalClass key in Info.plist.
+// [spec:box:req:fskit-extension.root]
 pub fn register_filesystem() -> Option<Retained<BoxFS>> {
     if !is_fskit_available() {
         tracing::error!("FSKit is not available on this system (requires macOS 15.4+)");
@@ -32,6 +33,7 @@ pub fn register_filesystem() -> Option<Retained<BoxFS>> {
 /// This is called by the extension host when the extension is loaded.
 /// It should set up logging and register the filesystem class.
 #[unsafe(no_mangle)]
+// [spec:box:req:fskit-extension.root]
 pub extern "C" fn fskitbox_extension_main() {
     tracing::info!("fskitbox extension starting");
 

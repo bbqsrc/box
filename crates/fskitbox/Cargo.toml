@@ -26,3 +26,6 @@ block2.workspace = true
 
 [build-dependencies]
 # For linking FSKit.framework
+
+[dev-dependencies]
+tempfile.workspace = true

@@ -48,6 +48,7 @@ define_class! {
     ///
     /// Implements FSUnaryFileSystemOperations to handle probing,
     /// loading, and unloading of Box archive files.
+    // [spec:box:req:fskit-extension.root]
     #[unsafe(super(FSUnaryFileSystem, NSObject))]
     #[name = "BoxFS"]
     #[ivars = BoxFSIvars]
@@ -57,6 +58,7 @@ define_class! {
         // FSUnaryFileSystemOperations
 
         #[unsafe(method(probeResource:replyHandler:))]
+        // [spec:box:req:fskit-extension.root.probe-load-lifecycle]
         fn probe_resource(
             &self,
             resource: *mut FSResource,
@@ -109,6 +111,7 @@ define_class! {
         }
 
         #[unsafe(method(loadResource:options:replyHandler:))]
+        // [spec:box:req:fskit-extension.root.probe-load-lifecycle]
         fn load_resource(
             &self,
             resource: *mut FSResource,
@@ -178,6 +181,7 @@ define_class! {
         }
 
         #[unsafe(method(unloadResource:options:replyHandler:))]
+        // [spec:box:req:fskit-extension.root.probe-load-lifecycle]
         fn unload_resource(
             &self,
             _resource: *mut FSResource,

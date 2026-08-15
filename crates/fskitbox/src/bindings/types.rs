@@ -6,6 +6,18 @@ use objc2::runtime::NSObject;
 use objc2::{extern_class, extern_methods};
 use objc2_foundation::{NSData, NSString, NSUUID};
 
+/// Rust representation of Darwin's `struct timespec` for FSKit selectors.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct FSKitTimeSpec {
+    pub tv_sec: i64,
+    pub tv_nsec: i64,
+}
+
+unsafe impl Encode for FSKitTimeSpec {
+    const ENCODING: Encoding = Encoding::Struct("timespec", &[<i64>::ENCODING, <i64>::ENCODING]);
+}
+
 // MARK: - FSFileName
 
 extern_class!(
@@ -138,6 +150,18 @@ impl FSItemAttributes {
 
         #[unsafe(method(setParentID:))]
         pub fn set_parent_id(&self, parent_id: FSItemIdentifier);
+
+        #[unsafe(method(setModifyTime:))]
+        pub fn set_modify_time(&self, time: FSKitTimeSpec);
+
+        #[unsafe(method(setChangeTime:))]
+        pub fn set_change_time(&self, time: FSKitTimeSpec);
+
+        #[unsafe(method(setAccessTime:))]
+        pub fn set_access_time(&self, time: FSKitTimeSpec);
+
+        #[unsafe(method(setBirthTime:))]
+        pub fn set_birth_time(&self, time: FSKitTimeSpec);
 
         // Getters
         #[unsafe(method(uid))]
