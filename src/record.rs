@@ -384,10 +384,10 @@ impl ChunkedFileRecord<'_> {
 
     /// Returns the number of blocks in this chunked file.
     pub fn block_count(&self) -> u64 {
-        if self.decompressed_length == 0 {
+        if self.decompressed_length == 0 || self.block_size == 0 {
             0
         } else {
-            (self.decompressed_length + self.block_size as u64 - 1) / self.block_size as u64
+            1 + (self.decompressed_length - 1) / u64::from(self.block_size)
         }
     }
 
