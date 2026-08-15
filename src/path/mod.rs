@@ -26,10 +26,12 @@ pub const PATH_PLATFORM_SEP: &str = "\\";
 /// `FileRecord` and `DirectoryRecord` fields.
 pub const PATH_BOX_SEP: &str = "\x1f";
 
+// [spec:box:def:paths.root.encoding]
 #[derive(Debug, Clone, PartialOrd, Ord, PartialEq, Eq, Hash)]
 #[repr(transparent)]
 pub struct BoxPath<'a>(pub(crate) Cow<'a, str>);
 
+// [spec:box:req:paths.root.normalization]
 #[cfg(feature = "std")]
 pub fn sanitize<P: AsRef<Path>>(path: P) -> Option<Vec<String>> {
     use std::path::Component;
@@ -115,6 +117,7 @@ fn validate_component_with_escapes(s: &str) -> bool {
 
 /// Sanitize a path, allowing `\xNN` escape sequences.
 /// Used when the archive has the allow_escapes flag set.
+// [spec:box:req:paths.root.normalization]
 #[cfg(feature = "std")]
 pub fn sanitize_with_escapes<P: AsRef<Path>>(path: P) -> Option<Vec<String>> {
     use std::path::Component;
@@ -185,6 +188,7 @@ impl<'a> BoxPath<'a> {
     /// - No `/` or `\` characters within components
     ///
     /// For full validation including control character checks, use `validate()` (std only).
+    // [spec:box:req:paths.root]
     pub fn validate_basic(&self) -> Result<(), &'static str> {
         if self.0.is_empty() {
             return Err("empty path");
@@ -224,8 +228,18 @@ impl<'a> BoxPath<'a> {
     /// - No `.` or `..` components
     /// - No `/` or `\` characters within components
     /// - No control characters within components (except separators)
+    // [spec:box:req:paths.root]
     #[cfg(feature = "std")]
     pub fn validate(&self) -> std::io::Result<()> {
+        self.validate_for_extraction(false)
+    }
+
+    /// Validate an untrusted archive path without normalizing it before
+    /// filesystem materialization. Escapes are accepted only as complete
+    /// `\xNN` spellings whose decoded byte is valid in a filename.
+    // [spec:box:req:paths.root.extraction-gates+1]
+    #[cfg(feature = "std")]
+    pub(crate) fn validate_for_extraction(&self, allow_escapes: bool) -> std::io::Result<()> {
         if self.0.is_empty() {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
@@ -258,23 +272,57 @@ impl<'a> BoxPath<'a> {
                 ));
             }
 
-            // Check each character
-            for c in component.chars() {
-                if c == '/' || c == '\\' {
+            if allow_escapes {
+                if !validate_component_with_escapes(component) {
                     return Err(std::io::Error::new(
                         std::io::ErrorKind::InvalidData,
-                        "path component contains slash or backslash",
+                        "path component contains an invalid escape or filename character",
                     ));
                 }
-
-                let cat = GeneralCategory::of(c);
-                if cat == GeneralCategory::Control {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::InvalidData,
-                        "path component contains control character",
-                    ));
-                }
+            } else if component.chars().any(|c| !is_char_allowed(c)) {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "path component contains slash, backslash, control, or separator character",
+                ));
             }
+        }
+
+        if self
+            .to_path_buf()
+            .components()
+            .any(|component| !matches!(component, std::path::Component::Normal(_)))
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "archive path does not remain relative normal components on this platform",
+            ));
+        }
+
+        Ok(())
+    }
+
+    /// Validate both an indexed path and the record name it claims to locate.
+    /// Record names are single components; the path's final component must be
+    /// byte-for-byte identical to that name.
+    #[cfg(feature = "std")]
+    pub(crate) fn validate_indexed_for_extraction(
+        &self,
+        record_name: &str,
+        allow_escapes: bool,
+    ) -> std::io::Result<()> {
+        self.validate_for_extraction(allow_escapes)?;
+
+        let record_component = BoxPath(Cow::Borrowed(record_name));
+        record_component.validate_for_extraction(allow_escapes)?;
+        if record_component.depth() != 0 || self.filename() != record_name {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "indexed path final component {:?} does not match record name {:?}",
+                    self.filename(),
+                    record_name
+                ),
+            ));
         }
 
         Ok(())
@@ -333,6 +381,7 @@ impl<'a> BoxPath<'a> {
     }
 }
 
+// [spec:box:def:paths.root.encoding]
 impl fmt::Display for BoxPath<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let mut iter = self.0.split(PATH_BOX_SEP);
@@ -351,6 +400,8 @@ impl fmt::Display for BoxPath<'_> {
 mod tests {
     use super::*;
 
+    // [spec:box:def:paths.root.encoding/test]
+    // [spec:box:req:paths.root.normalization/test]
     #[test]
     fn sanitisation() {
         let box_path = BoxPath::new("/something/../somethingelse/./foo.txt").unwrap();
@@ -373,6 +424,7 @@ mod tests {
         assert_eq!(box_path.unwrap().0, "somethingelse\x1ffoodir");
     }
 
+    // [spec:box:req:paths.root/test]
     #[test]
     fn sanitisation2() {
         // Null is a sassy fellow
@@ -434,14 +486,19 @@ mod tests {
 
     // Escape sequence tests
 
+    // [spec:box:req:paths.root.normalization/test]
     #[test]
     fn escape_dash_allowed() {
         // \x2d is dash, which is allowed
         let box_path = BoxPath::new_with_escapes(r"foo\x2dbar");
         assert!(box_path.is_ok());
-        assert_eq!(box_path.unwrap().0, r"foo\x2dbar");
+        let box_path = box_path.unwrap();
+        assert_eq!(box_path.0, r"foo\x2dbar");
+        assert!(box_path.validate_for_extraction(true).is_ok());
+        assert!(box_path.validate_for_extraction(false).is_err());
     }
 
+    // [spec:box:req:paths.root.normalization/test]
     #[test]
     fn escape_slash_rejected() {
         // \x2f is forward slash, not allowed in filenames
