@@ -276,12 +276,14 @@ dependencies = [
  "num_cpus",
  "serde",
  "serde_json",
+ "tempfile",
  "textwrap",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
  "tracing-subscriber",
  "wild",
+ "xattr",
 ]
 
 [[package]]
@@ -291,6 +293,7 @@ dependencies = [
  "box-format",
  "cffi",
  "libc",
+ "tempfile",
  "tokio",
 ]
 
@@ -780,6 +783,7 @@ dependencies = [
  "libc",
  "objc2",
  "objc2-foundation",
+ "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "tracing",

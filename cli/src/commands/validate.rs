@@ -4,6 +4,8 @@ use crate::cli::ValidateArgs;
 use crate::error::{Error, Result};
 use crate::util::{create_progress_bar, create_spinner};
 
+// [spec:box:req:cli-commands.root.validate]
+// [spec:box:req:cli-safety.root.failure-status]
 pub async fn run(args: ValidateArgs) -> Result<()> {
     let bf = BoxFileReader::open(&args.archive)
         .await
@@ -102,6 +104,7 @@ pub async fn run(args: ValidateArgs) -> Result<()> {
         );
     }
 
+    // [spec:box:req:checksums.root.verification.cli-failure]
     if stats.checksum_failures > 0 {
         std::process::exit(1);
     }

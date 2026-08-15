@@ -9,6 +9,7 @@ use miette::Diagnostic;
 pub type Result<T> = std::result::Result<T, Error>;
 
 #[derive(Debug, thiserror::Error, Diagnostic)]
+// [spec:box:req:cli-safety.root.failure-status]
 pub enum Error {
     #[error("Cannot handle path `{}`", .path.display())]
     InvalidPath {
@@ -23,13 +24,6 @@ pub enum Error {
         path: PathBuf,
         #[source]
         source: box_format::OpenError,
-    },
-
-    #[error("Cannot open file `{}`", path.display())]
-    OpenFile {
-        path: PathBuf,
-        #[source]
-        source: std::io::Error,
     },
 
     #[error("Cannot create directory `{path}`")]

@@ -69,6 +69,7 @@ fn format_attr(key: &str, value: &AttrValue<'_>) -> String {
     }
 }
 
+// [spec:box:req:cli-commands.root.inspect]
 pub async fn run(args: InfoArgs) -> Result<()> {
     let bf = BoxFileReader::open(&args.archive)
         .await

@@ -24,6 +24,7 @@ struct JsonEntry {
     target: Option<String>,
 }
 
+// [spec:box:req:cli-commands.root.inspect]
 pub async fn run(args: ListArgs) -> Result<()> {
     let bf = BoxFileReader::open(&args.archive)
         .await

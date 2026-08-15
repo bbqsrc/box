@@ -2,6 +2,16 @@ use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
 
+fn parse_positive_usize(value: &str) -> Result<usize, String> {
+    let value = value
+        .parse::<usize>()
+        .map_err(|error| format!("invalid worker count: {error}"))?;
+    if value == 0 {
+        return Err("worker count must be at least 1".to_string());
+    }
+    Ok(value)
+}
+
 const CLI_VERSION: &str = concat!(
     env!("CARGO_PKG_VERSION"),
     " (build ",
@@ -24,7 +34,7 @@ pub struct Cli {
 
 #[cfg(test)]
 mod tests {
-    use clap::CommandFactory;
+    use clap::{CommandFactory, Parser, error::ErrorKind};
 
     use super::Cli;
 
@@ -46,9 +56,31 @@ mod tests {
                 .all(|(index, byte)| matches!(index, 4 | 7) || byte.is_ascii_digit())
         );
     }
+
+    #[test]
+    fn validate_rejects_zero_jobs_during_argument_parsing() {
+        let error =
+            Cli::try_parse_from(["box", "validate", "archive.box", "--jobs", "0"]).unwrap_err();
+
+        assert_eq!(error.kind(), ErrorKind::ValueValidation);
+    }
+
+    #[test]
+    fn extract_rejects_zero_jobs_during_argument_parsing() {
+        let error =
+            Cli::try_parse_from(["box", "extract", "archive.box", "--jobs", "0"]).unwrap_err();
+
+        assert_eq!(error.kind(), ErrorKind::ValueValidation);
+
+        let error =
+            Cli::try_parse_from(["box", "create", "archive.box", "--jobs", "0", "input.txt"])
+                .unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::ValueValidation);
+    }
 }
 
 #[derive(Debug, Subcommand)]
+// [spec:box:req:cli-commands.root]
 pub enum Commands {
     #[command(visible_alias = "c", about = "Create a new archive")]
     Create(CreateArgs),
@@ -140,7 +172,7 @@ pub struct CreateArgs {
     pub serial: bool,
 
     /// Number of parallel compression tasks (default: CPU count)
-    #[arg(short = 'j', long = "jobs")]
+    #[arg(short = 'j', long = "jobs", value_parser = parse_positive_usize)]
     pub jobs: Option<usize>,
 
     /// Allow \xNN escape sequences in paths (for systemd-style filenames)
@@ -186,7 +218,7 @@ pub struct ExtractArgs {
     pub serial: bool,
 
     /// Number of parallel extraction tasks (default: CPU count)
-    #[arg(short = 'j', long = "jobs")]
+    #[arg(short = 'j', long = "jobs", value_parser = parse_positive_usize)]
     pub jobs: Option<usize>,
 
     /// Show timing breakdown
@@ -246,6 +278,10 @@ pub struct ValidateArgs {
     pub serial: bool,
 
     /// Number of parallel validation tasks (default: CPU count)
-    #[arg(short = 'j', long = "jobs")]
+    #[arg(
+        short = 'j',
+        long = "jobs",
+        value_parser = parse_positive_usize
+    )]
     pub jobs: Option<usize>,
 }

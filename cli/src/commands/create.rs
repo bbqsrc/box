@@ -37,15 +37,14 @@ enum EntryKind {
     File(CollectedEntry),
 }
 
+// [spec:box:req:cli-commands.root.create+1]
+// [spec:box:req:cli-safety.root]
+// [spec:box:req:cli-safety.root.output-integrity]
+// [spec:box:req:chunked-io.root.automatic-creation]
 pub async fn run(args: CreateArgs) -> Result<()> {
     let archive_path = &args.archive;
 
-    // Check if archive exists
-    if archive_path.exists() && !args.force {
-        return Err(Error::ArchiveExists {
-            path: archive_path.clone(),
-        });
-    }
+    reject_existing_archive(archive_path, args.force)?;
 
     // Parse exclude patterns
     let exclude_patterns: Vec<glob::Pattern> = args
@@ -223,77 +222,6 @@ pub async fn run(args: CreateArgs) -> Result<()> {
 
     timing.directories = dirs_start.elapsed();
 
-    // Process symlinks (must be sequential)
-    let symlinks_start = Instant::now();
-    for (link, _is_dir) in symlinks {
-        let raw_target = tokio::fs::read_link(&link.fs_path)
-            .await
-            .map_err(|source| Error::ReadLink {
-                path: link.fs_path.clone(),
-                source,
-            })?;
-
-        let parent_path = link.fs_path.parent().unwrap_or(Path::new(""));
-        let resolved_target = parent_path.join(&raw_target);
-
-        // Ensure parent directory exists
-        if let Some(parent) = link.box_path.parent()
-            && !created_dirs.contains(&parent)
-            && bf.metadata().index(&parent).is_none()
-        {
-            let parent_owned = parent.into_owned();
-            bf.mkdir_all(parent_owned.clone(), Default::default())
-                .map_err(|source| Error::CreateDirectory {
-                    path: parent_owned.clone(),
-                    source,
-                })?;
-            created_dirs.insert(parent_owned);
-        }
-
-        let mut link_meta = fs::metadata_to_attrs(&link.meta, timestamps, ownership);
-        if args.xattrs {
-            if let Ok(xattrs) = fs::read_xattrs(&link.fs_path) {
-                link_meta.extend(xattrs);
-            }
-        }
-
-        // Try to resolve as internal link first
-        let target_box_path = BoxPath::new(&resolved_target).ok();
-        let target_index = target_box_path
-            .as_ref()
-            .and_then(|p| bf.metadata().index(p));
-
-        if let Some(target_index) = target_index {
-            // Internal symlink - target exists in archive
-            bf.link(link.box_path.clone(), target_index, link_meta)
-                .map_err(|source| Error::CreateLink {
-                    path: link.box_path,
-                    source,
-                })?;
-        } else {
-            // External symlink - target not in archive
-            if !args.allow_external_symlinks {
-                return Err(Error::ExternalSymlinkDetected {
-                    link_path: link.box_path.to_path_buf(),
-                    target: raw_target.to_string_lossy().to_string(),
-                });
-            }
-
-            // Use the raw target path (preserving relative components like ../)
-            let target_str = raw_target.to_string_lossy();
-            // Normalize path separators to forward slashes
-            let normalized_target = target_str.replace('\\', "/");
-
-            bf.external_link(link.box_path.clone(), &normalized_target, link_meta)
-                .map_err(|source| Error::CreateLink {
-                    path: link.box_path,
-                    source,
-                })?;
-        }
-    }
-
-    timing.symlinks = symlinks_start.elapsed();
-
     // Process files
     let files_start = Instant::now();
     let (files_added, bytes_original, bytes_compressed) = if args.serial {
@@ -321,13 +249,6 @@ pub async fn run(args: CreateArgs) -> Result<()> {
                 created_dirs.insert(parent_owned);
             }
 
-            let f = tokio::fs::File::open(&file.fs_path)
-                .await
-                .map_err(|source| Error::OpenFile {
-                    path: file.fs_path.clone(),
-                    source,
-                })?;
-
             let mut file_meta = fs::metadata_to_attrs(&file.meta, timestamps, ownership);
             if args.xattrs {
                 if let Ok(xattrs) = fs::read_xattrs(&file.fs_path) {
@@ -335,31 +256,28 @@ pub async fn run(args: CreateArgs) -> Result<()> {
                 }
             }
 
-            let record = if !args.no_checksum {
-                bf.insert_streaming::<_, blake3::Hasher>(
-                    &file.config,
-                    file.box_path.clone(),
-                    f,
-                    file_meta,
+            let stats = bf
+                .add_paths_parallel(
+                    [FileJob {
+                        fs_path: file.fs_path.clone(),
+                        box_path: file.box_path.clone(),
+                        config: file.config,
+                        attrs: file_meta,
+                    }],
+                    !args.no_checksum,
+                    timestamps,
+                    ownership,
+                    1,
                 )
                 .await
                 .map_err(|source| Error::AddFile {
                     path: file.fs_path.clone(),
                     source,
-                })?
-            } else {
-                let buf_reader = tokio::io::BufReader::new(f);
-                bf.insert(&file.config, file.box_path.clone(), buf_reader, file_meta)
-                    .await
-                    .map_err(|source| Error::AddFile {
-                        path: file.fs_path.clone(),
-                        source,
-                    })?
-            };
+                })?;
 
-            files_added += 1;
-            bytes_original += record.decompressed_length;
-            bytes_compressed += record.length;
+            files_added += stats.files_added;
+            bytes_original += stats.bytes_original;
+            bytes_compressed += stats.bytes_compressed;
 
             if let Some(ref pb) = progress {
                 pb.set_message(format!("Adding: {}", file.box_path));
@@ -391,11 +309,19 @@ pub async fn run(args: CreateArgs) -> Result<()> {
         // Convert to FileJob items
         let file_jobs: Vec<FileJob> = files
             .into_iter()
-            .map(|f| FileJob {
-                fs_path: f.fs_path,
-                box_path: f.box_path,
-                config: f.config,
-                attrs: Default::default(),
+            .map(|f| {
+                let mut file_meta = fs::metadata_to_attrs(&f.meta, timestamps, ownership);
+                if args.xattrs {
+                    if let Ok(xattrs) = fs::read_xattrs(&f.fs_path) {
+                        file_meta.extend(xattrs);
+                    }
+                }
+                FileJob {
+                    fs_path: f.fs_path,
+                    box_path: f.box_path,
+                    config: f.config,
+                    attrs: file_meta,
+                }
             })
             .collect();
 
@@ -478,6 +404,68 @@ pub async fn run(args: CreateArgs) -> Result<()> {
         )
     };
 
+    // File records must exist before internal symlinks can resolve their target indices.
+    let symlinks_start = Instant::now();
+    for (link, _is_dir) in symlinks {
+        let raw_target = tokio::fs::read_link(&link.fs_path)
+            .await
+            .map_err(|source| Error::ReadLink {
+                path: link.fs_path.clone(),
+                source,
+            })?;
+
+        let parent_path = link.fs_path.parent().unwrap_or(Path::new(""));
+        let resolved_target = parent_path.join(&raw_target);
+
+        if let Some(parent) = link.box_path.parent()
+            && !created_dirs.contains(&parent)
+            && bf.metadata().index(&parent).is_none()
+        {
+            let parent_owned = parent.into_owned();
+            bf.mkdir_all(parent_owned.clone(), Default::default())
+                .map_err(|source| Error::CreateDirectory {
+                    path: parent_owned.clone(),
+                    source,
+                })?;
+            created_dirs.insert(parent_owned);
+        }
+
+        let mut link_meta = fs::metadata_to_attrs(&link.meta, timestamps, ownership);
+        if args.xattrs {
+            if let Ok(xattrs) = fs::read_xattrs(&link.fs_path) {
+                link_meta.extend(xattrs);
+            }
+        }
+
+        let target_box_path = BoxPath::new(&resolved_target).ok();
+        let target_index = target_box_path
+            .as_ref()
+            .and_then(|path| bf.metadata().index(path));
+
+        if let Some(target_index) = target_index {
+            bf.link(link.box_path.clone(), target_index, link_meta)
+                .map_err(|source| Error::CreateLink {
+                    path: link.box_path,
+                    source,
+                })?;
+        } else {
+            if !args.allow_external_symlinks {
+                return Err(Error::ExternalSymlinkDetected {
+                    link_path: link.box_path.to_path_buf(),
+                    target: raw_target.to_string_lossy().to_string(),
+                });
+            }
+
+            let normalized_target = raw_target.to_string_lossy().replace('\\', "/");
+            bf.external_link(link.box_path.clone(), &normalized_target, link_meta)
+                .map_err(|source| Error::CreateLink {
+                    path: link.box_path,
+                    source,
+                })?;
+        }
+    }
+    timing.symlinks = symlinks_start.elapsed();
+
     // Finish the archive
     let finalize_start = Instant::now();
     let archive_path = bf.path().to_path_buf();
@@ -527,7 +515,17 @@ pub async fn run(args: CreateArgs) -> Result<()> {
     Ok(())
 }
 
+fn reject_existing_archive(archive_path: &Path, force: bool) -> Result<()> {
+    if archive_path.exists() && !force {
+        return Err(Error::ArchiveExists {
+            path: archive_path.to_path_buf(),
+        });
+    }
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
+// [spec:box:sem:cli-selection.root.collection]
 async fn collect_path(
     path: &Path,
     config: &CompressionConfig,

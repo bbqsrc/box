@@ -15,6 +15,7 @@ use clap::Parser;
 use cli::{Cli, Commands};
 
 #[tokio::main]
+// [spec:box:req:cli-commands.root]
 async fn main() -> miette::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())

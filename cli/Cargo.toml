@@ -42,3 +42,9 @@ default = ["mimalloc"]
 # symbols at static link.
 mimalloc = ["dep:mimalloc"]
 selfextract = []
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+xattr.workspace = true

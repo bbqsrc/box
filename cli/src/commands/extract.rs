@@ -8,6 +8,9 @@ use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use crate::cli::ExtractArgs;
 use crate::error::{Error, Result};
 
+// [spec:box:req:cli-commands.root.extract]
+// [spec:box:req:cli-safety.root]
+// [spec:box:req:cli-safety.root.failure-status]
 pub async fn run(args: ExtractArgs) -> Result<()> {
     let bf = BoxFileReader::open(&args.archive)
         .await

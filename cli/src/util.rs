@@ -14,6 +14,7 @@ pub struct PathWithCompression {
 /// Parse the trailing arguments into paths with compression settings.
 /// Compression flags are position-sensitive: they apply to all subsequent paths.
 /// Use -O key=value to set compression options.
+// [spec:box:sem:cli-selection.root]
 pub fn parse_paths_with_compression(args: &[String]) -> Vec<PathWithCompression> {
     let mut result = Vec::new();
     let mut current_config = CompressionConfig::new(Compression::Zstd); // Default
