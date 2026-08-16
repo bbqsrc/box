@@ -1,13 +1,17 @@
+use std::collections::HashSet;
 use std::ffi::OsStr;
 use std::num::NonZeroUsize;
+use std::sync::mpsc;
+use std::sync::{Arc, Condvar, Mutex};
+use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use lru::LruCache as LruCacheImpl;
 
 use fastvint::ReadVintExt;
 use fuser::{
-    FileAttr, FileType, Filesystem, ReplyAttr, ReplyData, ReplyDirectory, ReplyDirectoryPlus,
-    ReplyEmpty, ReplyEntry, ReplyOpen, ReplyStatfs, ReplyXattr, Request,
+    FileAttr, FileType, Filesystem, KernelConfig, ReplyAttr, ReplyData, ReplyDirectory,
+    ReplyDirectoryPlus, ReplyEmpty, ReplyEntry, ReplyOpen, ReplyStatfs, ReplyXattr, Request,
 };
 use libc::{EACCES, ENODATA, ENOENT, ERANGE};
 
@@ -106,18 +110,71 @@ impl LruCache {
 }
 
 pub struct BoxFs {
-    archives: MultiArchive,
-    cache: LruCache,
+    archives: Arc<MultiArchive>,
+    cache: Arc<Mutex<LruCache>>,
+    pending: Arc<PendingBlocks>,
+    workers: Arc<ReadPool>,
+}
+
+/// Blocks being decoded right now. The first reader to miss decodes; every
+/// other reader of the same block waits here instead of duplicating the
+/// work — sixteen 128K reads land in one 2MiB block, and without this they
+/// would decode it sixteen times.
+#[derive(Default)]
+struct PendingBlocks {
+    decoding: Mutex<HashSet<CacheKey>>,
+    done: Condvar,
 }
 
 impl BoxFs {
     pub fn new(archives: MultiArchive, cache: LruCache) -> Self {
-        Self { archives, cache }
+        let threads = thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4);
+        Self {
+            archives: Arc::new(archives),
+            cache: Arc::new(Mutex::new(cache)),
+            pending: Arc::new(PendingBlocks::default()),
+            workers: Arc::new(ReadPool::new(threads)),
+        }
     }
 
     /// Add an archive to the multi-archive container.
     pub fn add_archive(&mut self, reader: BoxReader) -> u64 {
-        self.archives.add_archive(reader)
+        Arc::get_mut(&mut self.archives)
+            .expect("archives are added before the filesystem is mounted")
+            .add_archive(reader)
+    }
+}
+
+/// The read workers. fuser dispatches requests on one thread, so replying
+/// from a pool is what lets concurrent reads — and the kernel's own
+/// readahead — decompress in parallel instead of serialising on dispatch.
+struct ReadPool {
+    queue: mpsc::Sender<Box<dyn FnOnce() + Send>>,
+}
+
+impl ReadPool {
+    fn new(threads: usize) -> Self {
+        let (queue, jobs) = mpsc::channel::<Box<dyn FnOnce() + Send>>();
+        let jobs = Arc::new(Mutex::new(jobs));
+        for _ in 0..threads.max(1) {
+            let jobs = Arc::clone(&jobs);
+            thread::spawn(move || {
+                loop {
+                    let job = jobs.lock().unwrap().recv();
+                    match job {
+                        Ok(job) => job(),
+                        Err(_) => break,
+                    }
+                }
+            });
+        }
+        Self { queue }
+    }
+
+    fn run(&self, job: impl FnOnce() + Send + 'static) {
+        let _ = self.queue.send(Box::new(job));
     }
 }
 
@@ -407,6 +464,14 @@ impl Filesystem for BoxFs {
         reply.opened(0, FOPEN_KEEP_CACHE);
     }
 
+    fn init(&mut self, _req: &Request<'_>, config: &mut KernelConfig) -> Result<(), libc::c_int> {
+        // Deep readahead keeps the worker pool fed on sequential reads: the
+        // kernel issues the lookahead requests concurrently, and each becomes
+        // an independent block decode.
+        let _ = config.set_max_readahead(4 * 1024 * 1024);
+        Ok(())
+    }
+
     // [spec:box:req:fuse-mount.root.file-data]
     fn read(
         &mut self,
@@ -428,183 +493,45 @@ impl Filesystem for BoxFs {
             }
         };
 
-        let offset = offset as u64;
-        let size = size as u64;
-
-        let record = match self.archives.get_record(composite) {
-            Some(r) => r,
-            None => {
-                tracing::warn!(ino, "read: record not found");
-                reply.error(ENOENT);
-                return;
-            }
-        };
-
-        // Get local index for decompression
-        let (_, local_idx) = MultiArchive::unpack_index(composite);
-        let local_index = match RecordIndex::try_new(local_idx) {
-            Some(idx) => idx,
-            None => {
-                tracing::warn!(ino, "read: invalid local index");
-                reply.error(ENOENT);
-                return;
-            }
-        };
-
-        match record {
-            Record::File(f) => {
-                // Regular files: cache entire decompressed content with key (composite, 0)
-                let cache_key = (composite, 0u64);
-                if let Some(cached) = self.cache.get(&cache_key) {
-                    let end = (offset as usize + size as usize).min(cached.len());
-                    let start = (offset as usize).min(end);
-                    tracing::debug!(ino, offset, size, "read: cache hit (file)");
-                    reply.data(&cached[start..end]);
-                    return;
-                }
-
-                // Get the archive reader for decompression
-                let archive = match self.archives.get_archive(composite) {
-                    Some(a) => a,
-                    None => {
-                        tracing::warn!(ino, "read: archive not found");
-                        reply.error(ENOENT);
-                        return;
-                    }
-                };
-
-                let mut buf = Vec::new();
-                match archive.reader.decompress(f, &mut buf) {
-                    Ok(_) => {
-                        tracing::debug!(
-                            ino,
-                            offset,
-                            size,
-                            decompressed_size = buf.len(),
-                            "read: cache miss, decompressed (file)"
-                        );
-                        let end = (offset as usize + size as usize).min(buf.len());
-                        let start = (offset as usize).min(end);
-                        reply.data(&buf[start..end]);
-                        self.cache.insert(cache_key, buf);
-                    }
-                    Err(e) => {
-                        tracing::error!(ino, error = %e, "read: decompression failed");
-                        reply.error(ENOENT);
-                    }
-                }
-            }
-            Record::ChunkedFile(f) => {
-                // Chunked files: use block-level caching for efficient random access
-                let block_size = f.block_size as u64;
-                let file_size = f.decompressed_length;
-
-                // Clamp to file size
-                let start_byte = offset.min(file_size);
-                let end_byte = (offset + size).min(file_size);
-
-                if start_byte >= end_byte {
-                    reply.data(&[]);
-                    return;
-                }
-
-                // Calculate which blocks we need
-                let first_block_idx = start_byte / block_size;
-                let last_block_idx = (end_byte.saturating_sub(1)) / block_size;
-
-                tracing::debug!(
+        // Chunked reads go to the pool, where concurrent requests — and the
+        // prefetcher — decode in parallel. Plain file records are small by
+        // construction (anything past one block is chunked), so they are
+        // served inline: a pool hop costs more than their decode, and it is
+        // the per-file hop that a many-small-files stream would pay 28k
+        // times over.
+        if matches!(
+            self.archives.get_record(composite),
+            Some(Record::ChunkedFile(_))
+        ) {
+            let archives = Arc::clone(&self.archives);
+            let cache = Arc::clone(&self.cache);
+            let pending = Arc::clone(&self.pending);
+            let workers = Arc::clone(&self.workers);
+            self.workers.run(move || {
+                serve_read(
+                    &archives,
+                    &cache,
+                    &pending,
+                    &workers,
                     ino,
-                    offset,
-                    size,
-                    first_block = first_block_idx,
-                    last_block = last_block_idx,
-                    "read: chunked file"
-                );
-
-                // Collect blocks - check cache first, decompress missing ones
-                let mut output = Vec::with_capacity((end_byte - start_byte) as usize);
-                let mut cache_hits = 0u64;
-                let mut cache_misses = 0u64;
-
-                for block_idx in first_block_idx..=last_block_idx {
-                    let cache_key = (composite, block_idx);
-
-                    // Check if block needs decompression (without updating LRU order)
-                    if !self.cache.contains(&cache_key) {
-                        cache_misses += 1;
-                        // Decompress this single block
-                        let archive = match self.archives.get_archive(composite) {
-                            Some(a) => a,
-                            None => {
-                                tracing::error!(
-                                    ino,
-                                    "read: archive not found for block decompression"
-                                );
-                                reply.error(ENOENT);
-                                return;
-                            }
-                        };
-                        match archive
-                            .reader
-                            .decompress_chunked_block(f, local_index, block_idx)
-                        {
-                            Ok(data) => {
-                                self.cache.insert(cache_key, data);
-                            }
-                            Err(e) => {
-                                tracing::error!(
-                                    ino,
-                                    block = block_idx,
-                                    error = %e,
-                                    "read: block decompression failed"
-                                );
-                                reply.error(ENOENT);
-                                return;
-                            }
-                        }
-                    } else {
-                        cache_hits += 1;
-                    }
-
-                    // Get from cache (updates LRU order) and slice directly - no clone needed
-                    let block_data = self
-                        .cache
-                        .get(&cache_key)
-                        .expect("block should be in cache");
-
-                    // Calculate the slice of this block we need
-                    let block_start_byte = block_idx * block_size;
-
-                    // Offset within this block where our data starts
-                    let slice_start = if block_idx == first_block_idx {
-                        (start_byte - block_start_byte) as usize
-                    } else {
-                        0
-                    };
-
-                    // Offset within this block where our data ends
-                    let slice_end = if block_idx == last_block_idx {
-                        ((end_byte - block_start_byte) as usize).min(block_data.len())
-                    } else {
-                        block_data.len()
-                    };
-
-                    output.extend_from_slice(&block_data[slice_start..slice_end]);
-                }
-
-                tracing::debug!(
-                    ino,
-                    cache_hits,
-                    cache_misses,
-                    output_size = output.len(),
-                    "read: chunked complete"
-                );
-                reply.data(&output);
-            }
-            _ => {
-                tracing::warn!(ino, "read: not a file");
-                reply.error(ENOENT);
-            }
+                    composite,
+                    offset as u64,
+                    u64::from(size),
+                    reply,
+                )
+            });
+        } else {
+            serve_read(
+                &self.archives,
+                &self.cache,
+                &self.pending,
+                &self.workers,
+                ino,
+                composite,
+                offset as u64,
+                u64::from(size),
+                reply,
+            );
         }
     }
 
@@ -1009,5 +936,282 @@ impl Filesystem for BoxFs {
         } else {
             reply.error(EACCES);
         }
+    }
+}
+
+/// One read request, executed on the worker pool.
+///
+/// Concurrent misses of the same block may decompress it twice; the second
+/// insert wins and both replies are correct, which costs less than holding
+/// the cache lock across a decode.
+// [spec:box:req:fuse-mount.root.file-data]
+#[allow(clippy::too_many_arguments)]
+fn serve_read(
+    archives: &Arc<MultiArchive>,
+    cache: &Arc<Mutex<LruCache>>,
+    pending: &Arc<PendingBlocks>,
+    workers: &Arc<ReadPool>,
+    ino: u64,
+    composite: u128,
+    offset: u64,
+    size: u64,
+    reply: ReplyData,
+) {
+    let record = match archives.get_record(composite) {
+        Some(r) => r,
+        None => {
+            tracing::warn!(ino, "read: record not found");
+            reply.error(ENOENT);
+            return;
+        }
+    };
+
+    let (_, local_idx) = MultiArchive::unpack_index(composite);
+    let local_index = match RecordIndex::try_new(local_idx) {
+        Some(idx) => idx,
+        None => {
+            tracing::warn!(ino, "read: invalid local index");
+            reply.error(ENOENT);
+            return;
+        }
+    };
+
+    match record {
+        Record::File(f) => {
+            let cache_key = (composite, 0u64);
+            {
+                let mut cache = cache.lock().unwrap();
+                if let Some(cached) = cache.get(&cache_key) {
+                    let end = (offset as usize + size as usize).min(cached.len());
+                    let start = (offset as usize).min(end);
+                    tracing::debug!(ino, offset, size, "read: cache hit (file)");
+                    reply.data(&cached[start..end]);
+                    return;
+                }
+            }
+
+            let archive = match archives.get_archive(composite) {
+                Some(a) => a,
+                None => {
+                    tracing::warn!(ino, "read: archive not found");
+                    reply.error(ENOENT);
+                    return;
+                }
+            };
+
+            let mut buf = Vec::new();
+            match archive.reader.decompress(f, &mut buf) {
+                Ok(_) => {
+                    tracing::debug!(
+                        ino,
+                        offset,
+                        size,
+                        decompressed_size = buf.len(),
+                        "read: cache miss, decompressed (file)"
+                    );
+                    let end = (offset as usize + size as usize).min(buf.len());
+                    let start = (offset as usize).min(end);
+                    reply.data(&buf[start..end]);
+                    cache.lock().unwrap().insert(cache_key, buf);
+                }
+                Err(e) => {
+                    tracing::error!(ino, error = %e, "read: decompression failed");
+                    reply.error(ENOENT);
+                }
+            }
+        }
+        Record::ChunkedFile(f) => {
+            let block_size = f.block_size as u64;
+            let file_size = f.decompressed_length;
+
+            let start_byte = offset.min(file_size);
+            let end_byte = (offset + size).min(file_size);
+
+            if start_byte >= end_byte {
+                reply.data(&[]);
+                return;
+            }
+
+            let first_block_idx = start_byte / block_size;
+            let last_block_idx = (end_byte.saturating_sub(1)) / block_size;
+
+            tracing::debug!(
+                ino,
+                offset,
+                size,
+                first_block = first_block_idx,
+                last_block = last_block_idx,
+                "read: chunked file"
+            );
+
+            let mut output = Vec::with_capacity((end_byte - start_byte) as usize);
+            let mut cache_hits = 0u64;
+            let mut cache_misses = 0u64;
+
+            for block_idx in first_block_idx..=last_block_idx {
+                let cache_key = (composite, block_idx);
+                let block_start_byte = block_idx * block_size;
+                let slice_start = if block_idx == first_block_idx {
+                    (start_byte - block_start_byte) as usize
+                } else {
+                    0
+                };
+                let slice_end_for = |len: usize| {
+                    if block_idx == last_block_idx {
+                        ((end_byte - block_start_byte) as usize).min(len)
+                    } else {
+                        len
+                    }
+                };
+
+                let copied = {
+                    let mut cache = ensure_block(
+                        archives,
+                        cache,
+                        pending,
+                        composite,
+                        f,
+                        local_index,
+                        block_idx,
+                    );
+                    match cache.get(&cache_key) {
+                        Some(block) => {
+                            let slice_end = slice_end_for(block.len());
+                            output.extend_from_slice(&block[slice_start..slice_end]);
+                            true
+                        }
+                        None => false,
+                    }
+                };
+                if copied {
+                    cache_hits += 1;
+                    continue;
+                }
+                cache_misses += 1;
+
+                // Decoded but did not fit the cache; decode straight into
+                // the reply instead.
+                let archive = match archives.get_archive(composite) {
+                    Some(a) => a,
+                    None => {
+                        tracing::error!(ino, "read: archive not found for block decompression");
+                        reply.error(ENOENT);
+                        return;
+                    }
+                };
+                match archive
+                    .reader
+                    .decompress_chunked_block(f, local_index, block_idx)
+                {
+                    Ok(data) => {
+                        let slice_end = slice_end_for(data.len());
+                        output.extend_from_slice(&data[slice_start..slice_end]);
+                    }
+                    Err(e) => {
+                        tracing::error!(
+                            ino,
+                            block = block_idx,
+                            error = %e,
+                            "read: block decompression failed"
+                        );
+                        reply.error(ENOENT);
+                        return;
+                    }
+                }
+            }
+
+            // Sequential pipelining: while these bytes travel back, the pool
+            // decodes ahead, so a single-stream reader never waits on a cold
+            // block.
+            let total_blocks = file_size.div_ceil(block_size);
+            for ahead in last_block_idx + 1..(last_block_idx + 3).min(total_blocks) {
+                if cache.lock().unwrap().contains(&(composite, ahead)) {
+                    continue;
+                }
+                let archives = Arc::clone(archives);
+                let cache = Arc::clone(cache);
+                let pending = Arc::clone(pending);
+                workers.run(move || {
+                    if let Some(Record::ChunkedFile(f)) = archives.get_record(composite) {
+                        let (_, local_idx) = MultiArchive::unpack_index(composite);
+                        if let Some(local_index) = RecordIndex::try_new(local_idx) {
+                            drop(ensure_block(
+                                &archives,
+                                &cache,
+                                &pending,
+                                composite,
+                                f,
+                                local_index,
+                                ahead,
+                            ));
+                        }
+                    }
+                });
+            }
+
+            tracing::debug!(
+                ino,
+                cache_hits,
+                cache_misses,
+                output_size = output.len(),
+                "read: chunked complete"
+            );
+            reply.data(&output);
+        }
+        _ => {
+            tracing::warn!(ino, "read: not a file");
+            reply.error(ENOENT);
+        }
+    }
+}
+
+/// Make sure a block is cached, decoding it at most once across all
+/// concurrent readers, and hand back the cache lock so the caller reads the
+/// block before eviction can race it. A block the cache refused (larger
+/// than the cache itself) comes back absent, and the caller decodes into
+/// its own reply.
+fn ensure_block<'a>(
+    archives: &Arc<MultiArchive>,
+    cache: &'a Arc<Mutex<LruCache>>,
+    pending: &Arc<PendingBlocks>,
+    composite: u128,
+    f: &box_format::ChunkedFileRecord<'_>,
+    local_index: RecordIndex,
+    block_idx: u64,
+) -> std::sync::MutexGuard<'a, LruCache> {
+    let cache_key = (composite, block_idx);
+    loop {
+        {
+            let cache_guard = cache.lock().unwrap();
+            if cache_guard.contains(&cache_key) {
+                return cache_guard;
+            }
+        }
+
+        let mut decoding = pending.decoding.lock().unwrap();
+        if decoding.contains(&cache_key) {
+            // Wait for the decoder, then look in the cache again.
+            let _woken = pending.done.wait(decoding).unwrap();
+            continue;
+        }
+        decoding.insert(cache_key);
+        drop(decoding);
+
+        let data = archives.get_archive(composite).and_then(|archive| {
+            archive
+                .reader
+                .decompress_chunked_block(f, local_index, block_idx)
+                .ok()
+        });
+
+        let mut cache_guard = cache.lock().unwrap();
+        if let Some(data) = data {
+            cache_guard.insert(cache_key, data);
+        }
+        let mut decoding = pending.decoding.lock().unwrap();
+        decoding.remove(&cache_key);
+        pending.done.notify_all();
+        drop(decoding);
+        return cache_guard;
     }
 }
