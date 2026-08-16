@@ -125,6 +125,9 @@ pub struct FsStats {
     pub cache_hits: std::sync::atomic::AtomicU64,
     pub blocks_decoded: std::sync::atomic::AtomicU64,
     pub decode_nanos: std::sync::atomic::AtomicU64,
+    /// Per-path decode cost, recorded on the miss path only, so the map's
+    /// lock never sits under a cache hit.
+    decode_by_path: Mutex<std::collections::HashMap<String, (u64, u64)>>,
 }
 
 impl FsStats {
@@ -138,6 +141,32 @@ impl FsStats {
             self.blocks_decoded.load(Relaxed),
             self.decode_nanos.load(Relaxed) / 1_000_000,
         )
+    }
+
+    fn record_decode(&self, path: Option<String>, nanos: u64) {
+        let Some(path) = path else { return };
+        let mut map = self
+            .decode_by_path
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let entry = map.entry(path).or_insert((0, 0));
+        entry.0 += 1;
+        entry.1 += nanos;
+    }
+
+    /// The costliest paths by decode time, worst first.
+    pub fn top_paths(&self, count: usize) -> Vec<(String, u64, u64)> {
+        let map = self
+            .decode_by_path
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut rows: Vec<(String, u64, u64)> = map
+            .iter()
+            .map(|(path, (reads, nanos))| (path.clone(), *reads, *nanos))
+            .collect();
+        rows.sort_by_key(|row| std::cmp::Reverse(row.2));
+        rows.truncate(count);
+        rows
     }
 }
 
@@ -1058,10 +1087,15 @@ fn serve_read(
             match archive.reader.decompress(f, &mut buf) {
                 Ok(_) => {
                     use std::sync::atomic::Ordering::Relaxed;
+                    let nanos = started.elapsed().as_nanos() as u64;
                     stats.blocks_decoded.fetch_add(1, Relaxed);
-                    stats
-                        .decode_nanos
-                        .fetch_add(started.elapsed().as_nanos() as u64, Relaxed);
+                    stats.decode_nanos.fetch_add(nanos, Relaxed);
+                    stats.record_decode(
+                        archives
+                            .path_for_index(composite)
+                            .map(|p| String::from_utf8_lossy(&p).into_owned()),
+                        nanos,
+                    );
                     tracing::debug!(
                         ino,
                         offset,
@@ -1251,10 +1285,15 @@ fn ensure_block<'a>(
         });
         {
             use std::sync::atomic::Ordering::Relaxed;
+            let nanos = started.elapsed().as_nanos() as u64;
             stats.blocks_decoded.fetch_add(1, Relaxed);
-            stats
-                .decode_nanos
-                .fetch_add(started.elapsed().as_nanos() as u64, Relaxed);
+            stats.decode_nanos.fetch_add(nanos, Relaxed);
+            stats.record_decode(
+                archives
+                    .path_for_index(composite)
+                    .map(|p| String::from_utf8_lossy(&p).into_owned()),
+                nanos,
+            );
         }
 
         let mut cache_guard = cache.lock().unwrap();
