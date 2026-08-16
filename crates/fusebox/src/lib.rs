@@ -205,6 +205,36 @@ impl BoxFs {
             .expect("archives are added before the filesystem is mounted")
             .add_archive(reader)
     }
+
+    /// The attributes `lookup` answers `name` under `parent` with, or `None`
+    /// where the answer must be an error rather than an entry.
+    ///
+    /// A name the archive does not hold is [`NEGATIVE_ENTRY`], not an error:
+    /// the miss is a fact about the archive and the kernel may cache it. Only
+    /// an archive contradicting itself — a record the merged index names but
+    /// whose metadata is gone — is an error.
+    fn lookup_entry(&self, parent: u64, name: &OsStr) -> Option<FileAttr> {
+        let Some(name) = name.to_str() else {
+            tracing::debug!(parent, "lookup failed: invalid name encoding");
+            return None;
+        };
+
+        // Direct FST lookup - O(1) path lookup + O(key_len) FST lookup
+        let parent_composite = ino_to_composite(parent);
+
+        match self.archives.lookup_child(parent_composite, name) {
+            Some((composite, record)) => {
+                let ino = composite_to_ino(composite);
+                tracing::trace!(parent, name, ino, "lookup");
+                let meta = self.archives.get_metadata(composite)?;
+                Some(record.fuse_file_attr(meta, composite))
+            }
+            None => {
+                tracing::trace!(parent, name, "lookup: not found");
+                Some(NEGATIVE_ENTRY)
+            }
+        }
+    }
 }
 
 /// The read workers. fuser dispatches requests on one thread, so replying
@@ -236,6 +266,28 @@ impl ReadPool {
 // Read-only filesystem - attributes never change, cache aggressively
 const TTL: Duration = Duration::from_secs(3600);
 const BLOCK_SIZE: u32 = 4096;
+
+/// The attributes of a *cached negative* entry reply: FUSE reads `nodeid == 0`
+/// with a nonzero entry timeout as "this name is absent, and stays absent for
+/// that long". Every other field is ignored by the kernel. An archive never
+/// gains a name, so the miss holds for as long as anything else here does.
+pub const NEGATIVE_ENTRY: FileAttr = FileAttr {
+    ino: 0,
+    size: 0,
+    blocks: 0,
+    atime: UNIX_EPOCH,
+    mtime: UNIX_EPOCH,
+    ctime: UNIX_EPOCH,
+    crtime: UNIX_EPOCH,
+    kind: FileType::RegularFile,
+    perm: 0,
+    nlink: 0,
+    uid: 0,
+    gid: 0,
+    rdev: 0,
+    flags: 0,
+    blksize: 0,
+};
 
 fn parse_archive_time(meta: &BoxMetadata, name: &str) -> Option<SystemTime> {
     let bytes = meta.file_attr(name)?;
@@ -481,32 +533,9 @@ fn composite_to_ino(composite: u128) -> u64 {
 // [spec:box:req:fuse-mount.root]
 impl Filesystem for BoxFs {
     fn lookup(&mut self, _req: &Request, parent: u64, name: &OsStr, reply: ReplyEntry) {
-        let name = match name.to_str() {
-            Some(v) => v,
-            None => {
-                tracing::debug!(parent, "lookup failed: invalid name encoding");
-                reply.error(ENOENT);
-                return;
-            }
-        };
-
-        // Direct FST lookup - O(1) path lookup + O(key_len) FST lookup
-        let parent_composite = ino_to_composite(parent);
-
-        match self.archives.lookup_child(parent_composite, name) {
-            Some((composite, record)) => {
-                let ino = composite_to_ino(composite);
-                tracing::trace!(parent, name, ino, "lookup");
-                if let Some(meta) = self.archives.get_metadata(composite) {
-                    reply.entry(&TTL, &record.fuse_file_attr(meta, composite), 0);
-                } else {
-                    reply.error(ENOENT);
-                }
-            }
-            None => {
-                tracing::trace!(parent, name, "lookup: not found");
-                reply.error(ENOENT);
-            }
+        match self.lookup_entry(parent, name) {
+            Some(attr) => reply.entry(&TTL, &attr, 0),
+            None => reply.error(ENOENT),
         }
     }
 
@@ -1436,5 +1465,24 @@ fn schedule_prefetch(
                 }
             }
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A name no archive holds is answered rather than refused, and answered
+    /// with the timeout that makes the kernel keep the miss — otherwise every
+    /// probe of an absent name round-trips into this process forever.
+    // [spec:box:req:fuse-mount.root/test]
+    #[test]
+    fn lookup_miss_caches_negative_dentry() {
+        let fs = BoxFs::new(MultiArchive::new(), LruCache::new(1));
+        let attr = fs
+            .lookup_entry(1, OsStr::new("stdio.h"))
+            .expect("a name the archive lacks is an entry, not an error");
+        assert_eq!(attr.ino, 0, "a negative entry is nodeid 0");
+        assert!(TTL.as_secs() > 0, "a zero entry timeout caches nothing");
     }
 }
