@@ -1,7 +1,6 @@
 use std::collections::HashSet;
 use std::ffi::OsStr;
 use std::num::NonZeroUsize;
-use std::sync::mpsc;
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -151,22 +150,17 @@ impl BoxFs {
 /// from a pool is what lets concurrent reads — and the kernel's own
 /// readahead — decompress in parallel instead of serialising on dispatch.
 struct ReadPool {
-    queue: mpsc::Sender<Box<dyn FnOnce() + Send>>,
+    queue: crossbeam_channel::Sender<Box<dyn FnOnce() + Send>>,
 }
 
 impl ReadPool {
     fn new(threads: usize) -> Self {
-        let (queue, jobs) = mpsc::channel::<Box<dyn FnOnce() + Send>>();
-        let jobs = Arc::new(Mutex::new(jobs));
+        let (queue, jobs) = crossbeam_channel::unbounded::<Box<dyn FnOnce() + Send>>();
         for _ in 0..threads.max(1) {
-            let jobs = Arc::clone(&jobs);
+            let jobs = jobs.clone();
             thread::spawn(move || {
-                loop {
-                    let job = jobs.lock().unwrap().recv();
-                    match job {
-                        Ok(job) => job(),
-                        Err(_) => break,
-                    }
+                for job in jobs.iter() {
+                    job();
                 }
             });
         }
@@ -469,6 +463,7 @@ impl Filesystem for BoxFs {
         // kernel issues the lookahead requests concurrently, and each becomes
         // an independent block decode.
         let _ = config.set_max_readahead(4 * 1024 * 1024);
+        let _ = config.set_max_background(64);
         Ok(())
     }
 
@@ -493,34 +488,30 @@ impl Filesystem for BoxFs {
             }
         };
 
-        // Chunked reads go to the pool, where concurrent requests — and the
-        // prefetcher — decode in parallel. Plain file records are small by
-        // construction (anything past one block is chunked), so they are
-        // served inline: a pool hop costs more than their decode, and it is
-        // the per-file hop that a many-small-files stream would pay 28k
-        // times over.
-        if matches!(
-            self.archives.get_record(composite),
-            Some(Record::ChunkedFile(_))
+        // A read whose bytes are all cached answers inline — a warm 2MiB
+        // block serves sixteen kernel reads and at most the first pays a
+        // pool hop. Everything else decodes on the pool, where concurrent
+        // requests and the prefetcher parallelise.
+        let reply = match serve_from_cache(
+            &self.archives,
+            &self.cache,
+            &self.pending,
+            &self.workers,
+            composite,
+            offset as u64,
+            u64::from(size),
+            reply,
         ) {
-            let archives = Arc::clone(&self.archives);
-            let cache = Arc::clone(&self.cache);
-            let pending = Arc::clone(&self.pending);
-            let workers = Arc::clone(&self.workers);
-            self.workers.run(move || {
-                serve_read(
-                    &archives,
-                    &cache,
-                    &pending,
-                    &workers,
-                    ino,
-                    composite,
-                    offset as u64,
-                    u64::from(size),
-                    reply,
-                )
-            });
-        } else {
+            None => return,
+            Some(reply) => reply,
+        };
+
+        // A plain file record is small by construction — anything past one
+        // block is chunked — so its decode is cheaper than a pool hop, and a
+        // sequential many-small-files stream pays the hop per file. Chunked
+        // misses go to the pool, where concurrent requests and the
+        // prefetcher parallelise.
+        if matches!(self.archives.get_record(composite), Some(Record::File(_))) {
             serve_read(
                 &self.archives,
                 &self.cache,
@@ -532,7 +523,26 @@ impl Filesystem for BoxFs {
                 u64::from(size),
                 reply,
             );
+            return;
         }
+
+        let archives = Arc::clone(&self.archives);
+        let cache = Arc::clone(&self.cache);
+        let pending = Arc::clone(&self.pending);
+        let workers = Arc::clone(&self.workers);
+        self.workers.run(move || {
+            serve_read(
+                &archives,
+                &cache,
+                &pending,
+                &workers,
+                ino,
+                composite,
+                offset as u64,
+                u64::from(size),
+                reply,
+            )
+        });
     }
 
     // [spec:box:req:fuse-mount.root.file-data]
@@ -1120,34 +1130,16 @@ fn serve_read(
                 }
             }
 
-            // Sequential pipelining: while these bytes travel back, the pool
-            // decodes ahead, so a single-stream reader never waits on a cold
-            // block.
-            let total_blocks = file_size.div_ceil(block_size);
-            for ahead in last_block_idx + 1..(last_block_idx + 3).min(total_blocks) {
-                if cache.lock().unwrap().contains(&(composite, ahead)) {
-                    continue;
-                }
-                let archives = Arc::clone(archives);
-                let cache = Arc::clone(cache);
-                let pending = Arc::clone(pending);
-                workers.run(move || {
-                    if let Some(Record::ChunkedFile(f)) = archives.get_record(composite) {
-                        let (_, local_idx) = MultiArchive::unpack_index(composite);
-                        if let Some(local_index) = RecordIndex::try_new(local_idx) {
-                            drop(ensure_block(
-                                &archives,
-                                &cache,
-                                &pending,
-                                composite,
-                                f,
-                                local_index,
-                                ahead,
-                            ));
-                        }
-                    }
-                });
-            }
+            schedule_prefetch(
+                archives,
+                cache,
+                pending,
+                workers,
+                composite,
+                file_size,
+                block_size,
+                last_block_idx,
+            );
 
             tracing::debug!(
                 ino,
@@ -1213,5 +1205,125 @@ fn ensure_block<'a>(
         pending.done.notify_all();
         drop(decoding);
         return cache_guard;
+    }
+}
+
+/// Serve a read whose bytes are all cached, inline on the dispatch thread,
+/// keeping the sequential prefetch pipeline fed. The reply comes back on a
+/// miss so the caller can route it to the pool.
+#[allow(clippy::too_many_arguments)]
+fn serve_from_cache(
+    archives: &Arc<MultiArchive>,
+    cache: &Arc<Mutex<LruCache>>,
+    pending: &Arc<PendingBlocks>,
+    workers: &Arc<ReadPool>,
+    composite: u128,
+    offset: u64,
+    size: u64,
+    reply: ReplyData,
+) -> Option<ReplyData> {
+    let Some(record) = archives.get_record(composite) else {
+        return Some(reply);
+    };
+    match record {
+        Record::File(_) => {
+            let mut guard = cache.lock().unwrap();
+            match guard.get(&(composite, 0u64)) {
+                Some(cached) => {
+                    let end = (offset as usize + size as usize).min(cached.len());
+                    let start = (offset as usize).min(end);
+                    reply.data(&cached[start..end]);
+                    None
+                }
+                None => Some(reply),
+            }
+        }
+        Record::ChunkedFile(f) => {
+            let block_size = f.block_size as u64;
+            let file_size = f.decompressed_length;
+            let start_byte = offset.min(file_size);
+            let end_byte = (offset + size).min(file_size);
+            if start_byte >= end_byte {
+                reply.data(&[]);
+                return None;
+            }
+            let first_block_idx = start_byte / block_size;
+            let last_block_idx = (end_byte.saturating_sub(1)) / block_size;
+            let mut output = Vec::with_capacity((end_byte - start_byte) as usize);
+            {
+                let mut guard = cache.lock().unwrap();
+                for block_idx in first_block_idx..=last_block_idx {
+                    let Some(block) = guard.get(&(composite, block_idx)) else {
+                        return Some(reply);
+                    };
+                    let block_start_byte = block_idx * block_size;
+                    let slice_start = if block_idx == first_block_idx {
+                        (start_byte - block_start_byte) as usize
+                    } else {
+                        0
+                    };
+                    let slice_end = if block_idx == last_block_idx {
+                        ((end_byte - block_start_byte) as usize).min(block.len())
+                    } else {
+                        block.len()
+                    };
+                    output.extend_from_slice(&block[slice_start..slice_end]);
+                }
+            }
+            reply.data(&output);
+            schedule_prefetch(
+                archives,
+                cache,
+                pending,
+                workers,
+                composite,
+                file_size,
+                block_size,
+                last_block_idx,
+            );
+            None
+        }
+        _ => Some(reply),
+    }
+}
+
+/// Keep decoding ahead of a sequential reader: four blocks of lookahead,
+/// each an independent pool job, so consumption never waits on a cold
+/// block.
+#[allow(clippy::too_many_arguments)]
+fn schedule_prefetch(
+    archives: &Arc<MultiArchive>,
+    cache: &Arc<Mutex<LruCache>>,
+    pending: &Arc<PendingBlocks>,
+    workers: &Arc<ReadPool>,
+    composite: u128,
+    file_size: u64,
+    block_size: u64,
+    after_block: u64,
+) {
+    let total_blocks = file_size.div_ceil(block_size);
+    for ahead in after_block + 1..(after_block + 5).min(total_blocks) {
+        if cache.lock().unwrap().contains(&(composite, ahead)) {
+            continue;
+        }
+        let archives = Arc::clone(archives);
+        let cache = Arc::clone(cache);
+        let pending = Arc::clone(pending);
+        workers.run(move || {
+            if let Some(Record::ChunkedFile(f)) = archives.get_record(composite) {
+                let (_, local_idx) = MultiArchive::unpack_index(composite);
+                if let Some(local_index) = RecordIndex::try_new(local_idx) {
+                    drop(ensure_block(
+                        &archives,
+                        &cache,
+                        &pending,
+                        composite,
+                        f,
+                        local_index,
+                        ahead,
+                    ));
+                }
+            }
+        });
     }
 }

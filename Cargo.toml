@@ -88,6 +88,7 @@ members = ["cli", "crates/*"]
 exclude = ["kmod/rust"]
 
 [workspace.dependencies]
+crossbeam-channel = "0.5"
 # Shared dependencies
 tokio = { version = "1", default-features = false }
 tokio-util = { version = "0.7", default-features = false }
