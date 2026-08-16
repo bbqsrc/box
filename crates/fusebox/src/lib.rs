@@ -113,6 +113,32 @@ pub struct BoxFs {
     cache: Arc<Mutex<LruCache>>,
     pending: Arc<PendingBlocks>,
     workers: Arc<ReadPool>,
+    stats: Arc<FsStats>,
+}
+
+/// Serving counters, cheap enough to keep always on: what a mounted archive
+/// actually cost, readable while the filesystem lives and after it stops.
+#[derive(Default, Debug)]
+pub struct FsStats {
+    pub reads: std::sync::atomic::AtomicU64,
+    pub bytes_requested: std::sync::atomic::AtomicU64,
+    pub cache_hits: std::sync::atomic::AtomicU64,
+    pub blocks_decoded: std::sync::atomic::AtomicU64,
+    pub decode_nanos: std::sync::atomic::AtomicU64,
+}
+
+impl FsStats {
+    pub fn summary(&self) -> String {
+        use std::sync::atomic::Ordering::Relaxed;
+        format!(
+            "reads={} requested={}KiB hits={} blocks_decoded={} decode={}ms",
+            self.reads.load(Relaxed),
+            self.bytes_requested.load(Relaxed) / 1024,
+            self.cache_hits.load(Relaxed),
+            self.blocks_decoded.load(Relaxed),
+            self.decode_nanos.load(Relaxed) / 1_000_000,
+        )
+    }
 }
 
 /// Blocks being decoded right now. The first reader to miss decodes; every
@@ -135,7 +161,13 @@ impl BoxFs {
             cache: Arc::new(Mutex::new(cache)),
             pending: Arc::new(PendingBlocks::default()),
             workers: Arc::new(ReadPool::new(threads)),
+            stats: Arc::new(FsStats::default()),
         }
+    }
+
+    /// The serving counters, shared: they outlive a consumed filesystem.
+    pub fn stats(&self) -> Arc<FsStats> {
+        Arc::clone(&self.stats)
     }
 
     /// Add an archive to the multi-archive container.
@@ -492,11 +524,19 @@ impl Filesystem for BoxFs {
         // block serves sixteen kernel reads and at most the first pays a
         // pool hop. Everything else decodes on the pool, where concurrent
         // requests and the prefetcher parallelise.
+        {
+            use std::sync::atomic::Ordering::Relaxed;
+            self.stats.reads.fetch_add(1, Relaxed);
+            self.stats
+                .bytes_requested
+                .fetch_add(u64::from(size), Relaxed);
+        }
         let reply = match serve_from_cache(
             &self.archives,
             &self.cache,
             &self.pending,
             &self.workers,
+            &self.stats,
             composite,
             offset as u64,
             u64::from(size),
@@ -517,6 +557,7 @@ impl Filesystem for BoxFs {
                 &self.cache,
                 &self.pending,
                 &self.workers,
+                &self.stats,
                 ino,
                 composite,
                 offset as u64,
@@ -530,12 +571,14 @@ impl Filesystem for BoxFs {
         let cache = Arc::clone(&self.cache);
         let pending = Arc::clone(&self.pending);
         let workers = Arc::clone(&self.workers);
+        let stats = Arc::clone(&self.stats);
         self.workers.run(move || {
             serve_read(
                 &archives,
                 &cache,
                 &pending,
                 &workers,
+                &stats,
                 ino,
                 composite,
                 offset as u64,
@@ -961,6 +1004,7 @@ fn serve_read(
     cache: &Arc<Mutex<LruCache>>,
     pending: &Arc<PendingBlocks>,
     workers: &Arc<ReadPool>,
+    stats: &Arc<FsStats>,
     ino: u64,
     composite: u128,
     offset: u64,
@@ -1010,8 +1054,14 @@ fn serve_read(
             };
 
             let mut buf = Vec::new();
+            let started = std::time::Instant::now();
             match archive.reader.decompress(f, &mut buf) {
                 Ok(_) => {
+                    use std::sync::atomic::Ordering::Relaxed;
+                    stats.blocks_decoded.fetch_add(1, Relaxed);
+                    stats
+                        .decode_nanos
+                        .fetch_add(started.elapsed().as_nanos() as u64, Relaxed);
                     tracing::debug!(
                         ino,
                         offset,
@@ -1079,6 +1129,7 @@ fn serve_read(
                         archives,
                         cache,
                         pending,
+                        stats,
                         composite,
                         f,
                         local_index,
@@ -1135,6 +1186,7 @@ fn serve_read(
                 cache,
                 pending,
                 workers,
+                stats,
                 composite,
                 file_size,
                 block_size,
@@ -1166,6 +1218,7 @@ fn ensure_block<'a>(
     archives: &Arc<MultiArchive>,
     cache: &'a Arc<Mutex<LruCache>>,
     pending: &Arc<PendingBlocks>,
+    stats: &FsStats,
     composite: u128,
     f: &box_format::ChunkedFileRecord<'_>,
     local_index: RecordIndex,
@@ -1189,12 +1242,20 @@ fn ensure_block<'a>(
         decoding.insert(cache_key);
         drop(decoding);
 
+        let started = std::time::Instant::now();
         let data = archives.get_archive(composite).and_then(|archive| {
             archive
                 .reader
                 .decompress_chunked_block(f, local_index, block_idx)
                 .ok()
         });
+        {
+            use std::sync::atomic::Ordering::Relaxed;
+            stats.blocks_decoded.fetch_add(1, Relaxed);
+            stats
+                .decode_nanos
+                .fetch_add(started.elapsed().as_nanos() as u64, Relaxed);
+        }
 
         let mut cache_guard = cache.lock().unwrap();
         if let Some(data) = data {
@@ -1217,6 +1278,7 @@ fn serve_from_cache(
     cache: &Arc<Mutex<LruCache>>,
     pending: &Arc<PendingBlocks>,
     workers: &Arc<ReadPool>,
+    stats: &Arc<FsStats>,
     composite: u128,
     offset: u64,
     size: u64,
@@ -1233,6 +1295,9 @@ fn serve_from_cache(
                     let end = (offset as usize + size as usize).min(cached.len());
                     let start = (offset as usize).min(end);
                     reply.data(&cached[start..end]);
+                    stats
+                        .cache_hits
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     None
                 }
                 None => Some(reply),
@@ -1271,11 +1336,15 @@ fn serve_from_cache(
                 }
             }
             reply.data(&output);
+            stats
+                .cache_hits
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             schedule_prefetch(
                 archives,
                 cache,
                 pending,
                 workers,
+                stats,
                 composite,
                 file_size,
                 block_size,
@@ -1296,6 +1365,7 @@ fn schedule_prefetch(
     cache: &Arc<Mutex<LruCache>>,
     pending: &Arc<PendingBlocks>,
     workers: &Arc<ReadPool>,
+    stats: &Arc<FsStats>,
     composite: u128,
     file_size: u64,
     block_size: u64,
@@ -1309,6 +1379,7 @@ fn schedule_prefetch(
         let archives = Arc::clone(archives);
         let cache = Arc::clone(cache);
         let pending = Arc::clone(pending);
+        let stats = Arc::clone(stats);
         workers.run(move || {
             if let Some(Record::ChunkedFile(f)) = archives.get_record(composite) {
                 let (_, local_idx) = MultiArchive::unpack_index(composite);
@@ -1317,6 +1388,7 @@ fn schedule_prefetch(
                         &archives,
                         &cache,
                         &pending,
+                        &stats,
                         composite,
                         f,
                         local_index,
