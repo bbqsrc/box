@@ -24,21 +24,107 @@ struct JsonEntry {
     target: Option<String>,
 }
 
+#[derive(Serialize)]
+struct JsonArchive {
+    archive: String,
+    alignment: u32,
+    attributes: serde_json::Map<String, serde_json::Value>,
+    entries: Vec<JsonEntry>,
+}
+
 // [spec:box:req:cli-commands.root.inspect]
 pub async fn run(args: ListArgs) -> Result<()> {
-    let bf = BoxFileReader::open(&args.archive)
-        .await
-        .map_err(|source| Error::OpenArchive {
-            path: args.archive.clone(),
-            source,
-        })?;
+    let mut json_archives = Vec::new();
+
+    for (i, path) in args.archives.iter().enumerate() {
+        let bf = BoxFileReader::open(path)
+            .await
+            .map_err(|source| Error::OpenArchive {
+                path: path.clone(),
+                source,
+            })?;
+
+        if args.json {
+            json_archives.push(json_archive(&args.archives[i], &bf));
+        } else {
+            if i > 0 {
+                println!();
+            }
+            if args.long {
+                list_long(&bf)?;
+            } else {
+                if args.archives.len() > 1 {
+                    println!("Archive: {}", bf.path().display());
+                }
+                list_compact(&bf)?;
+            }
+        }
+    }
 
     if args.json {
-        list_json(&bf)
-    } else if args.long {
-        list_long(&bf)
+        println!("{}", serde_json::to_string_pretty(&json_archives).unwrap());
+    }
+
+    Ok(())
+}
+
+fn json_archive(path: &std::path::Path, bf: &BoxFileReader) -> JsonArchive {
+    let attributes = bf
+        .metadata()
+        .file_attrs()
+        .iter()
+        .map(|(key, value)| (key.to_string(), attr_json(value)))
+        .collect();
+
+    JsonArchive {
+        archive: path.display().to_string(),
+        alignment: bf.alignment(),
+        attributes,
+        entries: collect_json(bf),
+    }
+}
+
+/// Attribute values as data, not display: typed values keep their type,
+/// binary values are hex, and timestamps render as UTC RFC 3339.
+fn attr_json(value: &box_format::AttrValue) -> serde_json::Value {
+    use box_format::AttrValue;
+
+    match value {
+        AttrValue::String(s) => (*s).into(),
+        AttrValue::Json(v) => v.clone(),
+        AttrValue::U8(n) => (*n).into(),
+        AttrValue::Vi32(n) => (*n).into(),
+        AttrValue::Vu32(n) => (*n).into(),
+        AttrValue::Vi64(n) => (*n).into(),
+        AttrValue::Vu64(n) => (*n).into(),
+        AttrValue::U128(b) => hex(b.as_slice()).into(),
+        AttrValue::U256(b) => hex(b.as_slice()).into(),
+        AttrValue::Bytes(b) => hex(b).into(),
+        AttrValue::DateTime(minutes) => {
+            let unix_seconds = minutes * 60 + box_format::BOX_EPOCH_UNIX;
+            let time = std::time::UNIX_EPOCH + std::time::Duration::new(unix_seconds as u64, 0);
+            let datetime: chrono::DateTime<chrono::Utc> = time.into();
+            datetime.format("%Y-%m-%dT%H:%M:%SZ").to_string().into()
+        }
+    }
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{:02x}", b)).collect()
+}
+
+/// Entry checksums as data: the full digest, algorithm-prefixed, never the
+/// table view's truncation.
+fn json_checksum(blake3: Option<&[u8]>, crc32: Option<&[u8]>) -> Option<String> {
+    if let Some(bytes) = blake3 {
+        return Some(format!("blake3:{}", hex(bytes)));
+    }
+    let bytes = crc32?;
+    if bytes.len() >= 4 {
+        let value = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+        Some(format!("crc32:{:08x}", value))
     } else {
-        list_compact(&bf)
+        None
     }
 }
 
@@ -151,6 +237,7 @@ fn list_long(bf: &BoxFileReader) -> Result<()> {
     );
     println!("{}", "-".repeat(100));
 
+    let mut any_chunked = false;
     for result in bf.metadata().iter() {
         let record = result.record;
         let path = format_path(&result.path, record.as_directory().is_some());
@@ -195,9 +282,10 @@ fn list_long(bf: &BoxFileReader) -> Result<()> {
             }
             Record::ChunkedFile(file) => {
                 let checksum = format_checksum_chunked(file, bf.metadata());
+                any_chunked = true;
                 println!(
                     "{:8}  {:>12}  {:>12}  {:20}  {:9}  {:>16}  {}",
-                    format!("{}", file.compression),
+                    format!("{}*", file.compression),
                     format_size(file.length),
                     format_size(file.decompressed_length),
                     time,
@@ -207,6 +295,11 @@ fn list_long(bf: &BoxFileReader) -> Result<()> {
                 );
             }
         }
+    }
+
+    if any_chunked {
+        println!();
+        println!("* chunked");
     }
 
     // Print file attributes if any
@@ -229,7 +322,7 @@ fn list_long(bf: &BoxFileReader) -> Result<()> {
     Ok(())
 }
 
-fn list_json(bf: &BoxFileReader) -> Result<()> {
+fn collect_json(bf: &BoxFileReader) -> Vec<JsonEntry> {
     let mut entries = Vec::new();
 
     for result in bf.metadata().iter() {
@@ -289,7 +382,10 @@ fn list_json(bf: &BoxFileReader) -> Result<()> {
                     .attr(bf.metadata(), "created")
                     .map(|v| format_time(Some(v)))
                     .filter(|s| s != "-"),
-                checksum: Some(format_checksum_file(file, bf.metadata())).filter(|s| s != "-"),
+                checksum: json_checksum(
+                    file.attr(bf.metadata(), "blake3"),
+                    file.attr(bf.metadata(), "crc32"),
+                ),
                 target: None,
             },
             Record::ChunkedFile(file) => JsonEntry {
@@ -302,7 +398,10 @@ fn list_json(bf: &BoxFileReader) -> Result<()> {
                     .attr(bf.metadata(), "created")
                     .map(|v| format_time(Some(v)))
                     .filter(|s| s != "-"),
-                checksum: Some(format_checksum_chunked(file, bf.metadata())).filter(|s| s != "-"),
+                checksum: json_checksum(
+                    file.attr(bf.metadata(), "blake3"),
+                    file.attr(bf.metadata(), "crc32"),
+                ),
                 target: None,
             },
         };
@@ -310,8 +409,7 @@ fn list_json(bf: &BoxFileReader) -> Result<()> {
         entries.push(entry);
     }
 
-    println!("{}", serde_json::to_string_pretty(&entries).unwrap());
-    Ok(())
+    entries
 }
 
 fn format_checksum_file(file: &box_format::FileRecord, meta: &box_format::BoxMetadata) -> String {

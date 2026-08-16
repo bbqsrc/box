@@ -245,8 +245,9 @@ pub struct ExtractArgs {
 
 #[derive(Debug, clap::Args)]
 pub struct ListArgs {
-    /// Path to the .box archive
-    pub archive: PathBuf,
+    /// Paths to one or more .box archives
+    #[arg(required = true)]
+    pub archives: Vec<PathBuf>,
 
     /// Show detailed information (timestamps, permissions, checksums)
     #[arg(short = 'l', long)]

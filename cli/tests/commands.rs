@@ -584,6 +584,21 @@ async fn list_and_info_report_archive_and_record_views() {
     assert!(compact.contains("-> [dir/file.txt]"), "{compact}");
     assert!(compact.contains("-> ../outside (external)"), "{compact}");
 
+    // Several archives list in sequence, each under its own heading.
+    let compact_multi = box_command()
+        .arg("list")
+        .arg(&archive)
+        .arg(&archive)
+        .output()
+        .unwrap();
+    assert_success(&compact_multi);
+    let compact_multi = String::from_utf8_lossy(&compact_multi.stdout);
+    assert_eq!(
+        compact_multi.matches("Archive:").count(),
+        2,
+        "{compact_multi}"
+    );
+
     let long = box_command()
         .arg("list")
         .arg(&archive)
@@ -597,7 +612,11 @@ async fn list_and_info_report_archive_and_record_views() {
         .take(8)
         .map(|byte| format!("{byte:02x}"))
         .collect::<String>();
-    assert!(String::from_utf8_lossy(&long.stdout).contains(&checksum_prefix));
+    let long = String::from_utf8_lossy(&long.stdout);
+    assert!(long.contains(&checksum_prefix));
+    // A chunked record is distinguishable from a plain one at a glance.
+    assert!(long.contains("zstd*"), "{long}");
+    assert!(long.contains("* chunked"), "{long}");
 
     let json = box_command()
         .arg("list")
@@ -608,26 +627,50 @@ async fn list_and_info_report_archive_and_record_views() {
     assert_success(&json);
     let pretty_json = String::from_utf8_lossy(&json.stdout);
     assert!(
-        pretty_json.starts_with("[\n  {") && pretty_json.contains("\n    \"path\":"),
+        pretty_json.starts_with("[\n  {") && pretty_json.contains("\"path\":"),
         "JSON list output must remain pretty-printed:\n{pretty_json}"
     );
     let json: serde_json::Value = serde_json::from_slice(&json.stdout).unwrap();
-    let entries = json.as_array().unwrap();
+    let archives = json.as_array().unwrap();
+    assert_eq!(archives.len(), 1, "{json}");
+    let listed = &archives[0];
+    assert_eq!(listed["archive"], archive.display().to_string());
+    assert_eq!(listed["alignment"], 32);
+    assert_eq!(listed["attributes"]["fixture"], "rich archive");
+    assert_eq!(listed["attributes"]["created"], "2026-01-01T00:00:00Z");
+    let entries = listed["entries"].as_array().unwrap();
     let entry = |path: &str| {
         entries
             .iter()
             .find(|entry| entry["path"] == path)
-            .unwrap_or_else(|| panic!("missing JSON entry {path}: {json}"))
+            .unwrap_or_else(|| panic!("missing JSON entry {path}: {listed}"))
     };
     assert_eq!(entry("dir")["type"], "directory");
     assert_eq!(entry("dir/file.txt")["type"], "file");
     assert_eq!(entry("dir/file.txt")["compression"], "stored");
+    assert_eq!(
+        entry("dir/file.txt")["checksum"],
+        format!("blake3:{}", blake3::hash(regular_payload).to_hex().as_str())
+    );
     assert_eq!(entry("chunked.bin")["type"], "chunked_file");
     assert_eq!(entry("chunked.bin")["compression"], "zstd");
     assert_eq!(entry("internal-link")["type"], "link");
     assert_eq!(entry("internal-link")["target"], "dir/file.txt");
     assert_eq!(entry("external-link")["type"], "external_link");
     assert_eq!(entry("external-link")["target"], "../outside");
+
+    // Several archives are one document: one object per archive, in
+    // argument order.
+    let multi = box_command()
+        .arg("list")
+        .arg(&archive)
+        .arg(&archive)
+        .arg("--json")
+        .output()
+        .unwrap();
+    assert_success(&multi);
+    let multi: serde_json::Value = serde_json::from_slice(&multi.stdout).unwrap();
+    assert_eq!(multi.as_array().unwrap().len(), 2);
 
     let archive_info = box_command().arg("info").arg(&archive).output().unwrap();
     assert_success(&archive_info);

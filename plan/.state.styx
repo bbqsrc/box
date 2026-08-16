@@ -360,17 +360,6 @@ impl_evidence (
         {impl_name rust, rule cli-safety.root.output-integrity}
         {impl_name rust, rule cli-selection.root}
         {impl_name rust, rule cli-selection.root.collection}
-    ), rule_versions_seen (
-        {id cli-commands.root, version 0}
-        {id cli-commands.root.create, version 1}
-        {id cli-commands.root.extract, version 0}
-        {id cli-commands.root.inspect, version 0}
-        {id cli-commands.root.validate, version 0}
-        {id cli-safety.root, version 0}
-        {id cli-safety.root.failure-status, version 0}
-        {id cli-safety.root.output-integrity, version 0}
-        {id cli-selection.root, version 0}
-        {id cli-selection.root.collection, version 0}
     )}
     {id integration.fskit, covered_rules (
         fskit-extension.root
