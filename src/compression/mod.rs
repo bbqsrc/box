@@ -250,6 +250,19 @@ impl CompressionConfig {
             self.clone()
         }
     }
+
+    /// Per-file selection over an explicitly chunked choice: chunking
+    /// benefits only sources past one block, so a smaller or empty file
+    /// takes the whole-file form of the same compression — which an
+    /// explicitly chunked writer would otherwise refuse for an empty
+    /// source — and the small-file Stored downgrade then applies as usual.
+    pub fn for_file(&self, size: u64) -> Self {
+        let mut config = self.clone();
+        if config.chunked && size <= u64::from(DEFAULT_BLOCK_SIZE) {
+            config.chunked = false;
+        }
+        config.for_size(size)
+    }
 }
 
 // ============================================================================
@@ -342,6 +355,27 @@ mod tests {
 
         let decompressed = decompress_bytes_sync(&compressed, Compression::Zstd, None).unwrap();
         assert_eq!(decompressed, data);
+    }
+
+    // [spec:box:req:chunked-io.root.explicit-creation/test/unit]
+    #[cfg(feature = "zstd")]
+    #[test]
+    fn for_file_selects_by_block_size() {
+        let chunked = CompressionConfig::new(Compression::Zstd).chunked();
+
+        let empty = chunked.for_file(0);
+        assert!(!empty.is_chunked());
+        assert_eq!(empty.compression, Compression::Stored);
+
+        let one_block = chunked.for_file(u64::from(DEFAULT_BLOCK_SIZE));
+        assert!(!one_block.is_chunked());
+        assert_eq!(one_block.compression, Compression::Zstd);
+
+        assert!(
+            chunked
+                .for_file(u64::from(DEFAULT_BLOCK_SIZE) + 1)
+                .is_chunked()
+        );
     }
 
     // [spec:box:req:chunked-io.root.explicit-creation/test/unit]

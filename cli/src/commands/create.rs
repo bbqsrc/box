@@ -651,11 +651,12 @@ async fn collect_path(
             }
         } else if !known_files.contains(&box_path) {
             known_files.insert(box_path.clone());
+            let config = config.for_file(meta.len());
             entries.push(EntryKind::File(CollectedEntry {
                 fs_path: file_path.to_path_buf(),
                 box_path,
                 meta,
-                config: config.clone(),
+                config,
             }));
         }
     }
