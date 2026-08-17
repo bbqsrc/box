@@ -48,6 +48,11 @@ for required in "$ARCHIVE" "$KO" "${BOX:-}"; do
 	fi
 done
 
+if grep -q '^boxfs ' /proc/modules; then
+	echo "smoke.sh: boxfs is already loaded; rmmod it first" >&2
+	exit 2
+fi
+
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/boxfs-smoke.XXXXXX") || exit 1
 MNT=$WORK/mnt
 EXTRACT=$WORK/extract
@@ -60,6 +65,7 @@ mkdir -p "$MNT" "$EXTRACT"
 
 cleanup() {
 	local status=$?
+	trap - EXIT INT TERM
 	set +e
 	if [ -n "$MOUNTED" ]; then
 		umount "$MNT" >/dev/null 2>&1 || umount -l "$MNT" >/dev/null 2>&1
