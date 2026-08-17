@@ -18,6 +18,11 @@ mod error;
 mod metadata;
 mod parser;
 
+#[cfg(all(test, feature = "std"))]
+mod archive_tests;
+#[cfg(all(test, feature = "std"))]
+mod kernel_sim;
+
 use bindings::*;
 use error::KernelError;
 use metadata::{BoxfsMetadata, RecordData, DEFAULT_BLOCK_CACHE_BYTES};
@@ -239,6 +244,28 @@ pub extern "C" fn boxfs_rust_readahead(
 }
 
 // ============================================================================
+// HELPER: METADATA MUTATION LOCK
+// ============================================================================
+
+/// Holds the superblock's metadata mutex. The block cache uses `RefCell`, which
+/// has no cross-CPU serialisation of its own, and page faults on one archive
+/// run concurrently.
+struct MetaGuard(*mut SuperBlock);
+
+impl MetaGuard {
+    unsafe fn new(sb: *mut SuperBlock) -> Self {
+        boxfs_meta_lock(sb);
+        MetaGuard(sb)
+    }
+}
+
+impl Drop for MetaGuard {
+    fn drop(&mut self) {
+        unsafe { boxfs_meta_unlock(self.0) }
+    }
+}
+
+// ============================================================================
 // HELPER: GET METADATA
 // ============================================================================
 
@@ -383,18 +410,19 @@ unsafe fn iterate_dir_impl(
     // Convert u64 inode to u128 composite
     let dir_composite = ino_to_composite(dir_ino).ok_or(KernelError::NotFound)?;
 
+    // The C shim emits "." and ".." before calling in, so dir_context positions
+    // 0 and 1 are already spent.
+    const DOT_ENTRIES: i64 = 2;
+
     // Get current position
     let pos = boxfs_dir_ctx_pos(ctx);
+    let start = usize::try_from(pos.saturating_sub(DOT_ENTRIES)).unwrap_or(0);
 
     // Get directory children
     let children = metadata.children(dir_composite);
 
     // Emit entries starting from pos
-    for (i, (child_composite, record)) in children.iter().enumerate() {
-        if (i as i64) < pos {
-            continue;
-        }
-
+    for (i, (child_composite, record)) in children.iter().enumerate().skip(start) {
         let name_bytes = record.name.as_bytes();
         // Convert composite to u64 inode for dir_emit
         let child_ino = composite_to_ino(*child_composite);
@@ -411,7 +439,7 @@ unsafe fn iterate_dir_impl(
             break;
         }
 
-        boxfs_dir_ctx_set_pos(ctx, (i + 1) as i64);
+        boxfs_dir_ctx_set_pos(ctx, i as i64 + 1 + DOT_ENTRIES);
     }
 
     Ok(())
@@ -856,7 +884,7 @@ unsafe fn decompress_and_read(
     let compressed_data = read_archive_range(sb, payload, block_size)?;
 
     // Allocate decompression buffer
-    let decomp_buf = boxfs_kmalloc(decompressed_capacity, GFP_KERNEL);
+    let decomp_buf = boxfs_kvmalloc(decompressed_capacity, GFP_KERNEL);
     if decomp_buf.is_null() {
         return Err(KernelError::NoMemory);
     }
@@ -882,7 +910,7 @@ unsafe fn decompress_and_read(
     };
 
     if ret != 0 || out_len != decompressed_capacity || output_range.end > out_len {
-        boxfs_kfree(decomp_buf);
+        boxfs_kvfree(decomp_buf);
         return Err(if ret != 0 {
             KernelError::Io
         } else {
@@ -894,7 +922,7 @@ unsafe fn decompress_and_read(
     let decomp_slice = core::slice::from_raw_parts(decomp_buf as *const u8, out_len);
     buf[..to_read].copy_from_slice(&decomp_slice[output_range]);
 
-    boxfs_kfree(decomp_buf);
+    boxfs_kvfree(decomp_buf);
     Ok(to_read)
 }
 
@@ -989,24 +1017,30 @@ unsafe fn read_chunked_file(
         )?;
 
         // Check if this block is already in the cache
-        if let Some(cached_data) = metadata
-            .block_cache
-            .borrow_mut()
-            .get(composite, block_logical)
-        {
-            let to_copy = checked_chunk_copy_len(
-                cached_data.len(),
-                block.expected_output_len,
-                block.offset_in_block,
-                to_read - bytes_read,
-            )?;
-            // Prefetch the source data into CPU cache before copying
-            prefetch_read(cached_data.as_ptr().wrapping_add(block.offset_in_block));
+        let cached_copy = {
+            let _guard = MetaGuard::new(sb);
+            let mut cache = metadata.block_cache.borrow_mut();
+            match cache.get(composite, block_logical) {
+                Some(cached_data) => {
+                    let to_copy = checked_chunk_copy_len(
+                        cached_data.len(),
+                        block.expected_output_len,
+                        block.offset_in_block,
+                        to_read - bytes_read,
+                    )?;
+                    // Prefetch the source data into CPU cache before copying
+                    prefetch_read(cached_data.as_ptr().wrapping_add(block.offset_in_block));
 
-            buf[bytes_read..bytes_read + to_copy].copy_from_slice(
-                &cached_data[block.offset_in_block..block.offset_in_block + to_copy],
-            );
+                    buf[bytes_read..bytes_read + to_copy].copy_from_slice(
+                        &cached_data[block.offset_in_block..block.offset_in_block + to_copy],
+                    );
+                    Some(to_copy)
+                }
+                None => None,
+            }
+        };
 
+        if let Some(to_copy) = cached_copy {
             bytes_read += to_copy;
             current_offset = current_offset
                 .checked_add(u64::try_from(to_copy).map_err(|_| KernelError::BadData)?)
@@ -1016,7 +1050,7 @@ unsafe fn read_chunked_file(
             let compressed_data = read_archive_range(sb, absolute_physical, dev_block_size)?;
 
             // Allocate decompression buffer for this block
-            let decomp_buf = boxfs_kmalloc(block.expected_output_len, GFP_KERNEL);
+            let decomp_buf = boxfs_kvmalloc(block.expected_output_len, GFP_KERNEL);
             if decomp_buf.is_null() {
                 return Err(KernelError::NoMemory);
             }
@@ -1039,13 +1073,13 @@ unsafe fn read_chunked_file(
                     &mut out_len,
                 ),
                 _ => {
-                    boxfs_kfree(decomp_buf);
+                    boxfs_kvfree(decomp_buf);
                     return Err(KernelError::Invalid);
                 }
             };
 
             if ret != 0 || out_len != block.expected_output_len {
-                boxfs_kfree(decomp_buf);
+                boxfs_kvfree(decomp_buf);
                 return Err(if ret != 0 {
                     KernelError::Io
                 } else {
@@ -1056,7 +1090,7 @@ unsafe fn read_chunked_file(
             // Copy decompressed data to a Box<[u8]> for caching
             let decomp_slice = core::slice::from_raw_parts(decomp_buf as *const u8, out_len);
             let block_data: Box<[u8]> = decomp_slice.into();
-            boxfs_kfree(decomp_buf);
+            boxfs_kvfree(decomp_buf);
 
             let to_copy = checked_chunk_copy_len(
                 block_data.len(),
@@ -1077,6 +1111,7 @@ unsafe fn read_chunked_file(
                 .ok_or(KernelError::BadData)?;
 
             // Insert into cache
+            let _guard = MetaGuard::new(sb);
             metadata
                 .block_cache
                 .borrow_mut()
@@ -1113,8 +1148,15 @@ unsafe fn getattr_impl(sb: *mut SuperBlock, ino: u64) -> Result<(u16, u64, u64),
     let composite = ino_to_composite(ino).ok_or(KernelError::NotFound)?;
     let record = metadata.get(composite).ok_or(KernelError::NotFound)?;
 
-    let size = record.size();
-    let blocks = (size + block_size - 1) / block_size;
+    // Tools that size their readlink buffer from st_size need the target
+    // length, not the zero a link record carries as its data size.
+    let size = match &record.data {
+        RecordData::InternalLink { .. } | RecordData::ExternalLink { .. } => {
+            link_target(metadata, composite, record)?.len() as u64
+        }
+        _ => record.size(),
+    };
+    let blocks = size.div_ceil(block_size);
 
     Ok((record.mode, size, blocks))
 }
@@ -1124,6 +1166,26 @@ unsafe fn getattr_impl(sb: *mut SuperBlock, ino: u64) -> Result<(u16, u64, u64),
 // ============================================================================
 
 // [spec:box:req:kernel-vfs.root.links-and-xattrs]
+fn link_target(
+    metadata: &BoxfsMetadata,
+    composite: u128,
+    record: &metadata::Record,
+) -> Result<alloc::string::String, KernelError> {
+    match &record.data {
+        RecordData::InternalLink { target_index } => {
+            // For internal links, target_index is local to the same archive
+            let (archive_id, _) = BoxfsMetadata::unpack_index(composite);
+            let target_composite = BoxfsMetadata::pack_index(archive_id, *target_index);
+            metadata
+                .relative_link_target(composite, target_composite)
+                .ok_or(KernelError::NotFound)
+        }
+        RecordData::ExternalLink { target } => Ok(target.clone()),
+        _ => Err(KernelError::Invalid),
+    }
+}
+
+// [spec:box:req:kernel-vfs.root.links-and-xattrs]
 unsafe fn readlink_impl(sb: *mut SuperBlock, ino: u64, buf: &mut [u8]) -> Result<(), KernelError> {
     let metadata = get_metadata(sb)?;
 
@@ -1131,19 +1193,7 @@ unsafe fn readlink_impl(sb: *mut SuperBlock, ino: u64, buf: &mut [u8]) -> Result
     let composite = ino_to_composite(ino).ok_or(KernelError::NotFound)?;
     let record = metadata.get(composite).ok_or(KernelError::NotFound)?;
 
-    let target = match &record.data {
-        RecordData::InternalLink { target_index } => {
-            // Resolve internal link to a path
-            // For internal links, target_index is local to the same archive
-            let (archive_id, _) = BoxfsMetadata::unpack_index(composite);
-            let target_composite = BoxfsMetadata::pack_index(archive_id, *target_index);
-            metadata
-                .path_string_for_index(target_composite)
-                .ok_or(KernelError::NotFound)?
-        }
-        RecordData::ExternalLink { target } => target.clone(),
-        _ => return Err(KernelError::Invalid),
-    };
+    let target = link_target(metadata, composite, record)?;
 
     let target_bytes = target.as_bytes();
     if target_bytes.len() >= buf.len() {
@@ -1546,15 +1596,36 @@ mod read_range_tests {
 // PANIC HANDLER (required for no_std in kernel)
 // ============================================================================
 
+/// Fixed-size sink for rendering panic text without allocating.
+#[cfg(all(not(test), not(feature = "std")))]
+struct PanicMessage {
+    bytes: [u8; 240],
+    len: usize,
+}
+
+#[cfg(all(not(test), not(feature = "std")))]
+impl core::fmt::Write for PanicMessage {
+    fn write_str(&mut self, s: &str) -> core::fmt::Result {
+        let room = self.bytes.len() - 1 - self.len;
+        let take = core::cmp::min(room, s.len());
+        self.bytes[self.len..self.len + take].copy_from_slice(&s.as_bytes()[..take]);
+        self.len += take;
+        Ok(())
+    }
+}
+
 // Only define panic handler when building for kernel (no std available)
 #[cfg(all(not(test), not(feature = "std")))]
 #[panic_handler]
-fn panic(_info: &core::panic::PanicInfo) -> ! {
-    // In kernel context, we should never panic
-    // If we do, just loop forever
-    loop {
-        core::hint::spin_loop();
-    }
+fn panic(info: &core::panic::PanicInfo) -> ! {
+    use core::fmt::Write;
+
+    let mut message = PanicMessage {
+        bytes: [0; 240],
+        len: 0,
+    };
+    let _ = write!(message, "{}", info);
+    unsafe { boxfs_panic(message.bytes.as_ptr()) }
 }
 
 // ============================================================================
@@ -1569,13 +1640,25 @@ static ALLOCATOR: KernelAllocator = KernelAllocator;
 #[cfg(all(not(test), not(feature = "std")))]
 struct KernelAllocator;
 
+/// kmalloc only guarantees natural alignment for power-of-two requests, and
+/// kvmalloc falls back to page-aligned vmalloc above that.
+#[cfg(all(not(test), not(feature = "std")))]
+fn kernel_alloc_size(layout: core::alloc::Layout) -> usize {
+    let layout = layout.pad_to_align();
+    if layout.align() > 8 {
+        layout.size().next_power_of_two()
+    } else {
+        layout.size()
+    }
+}
+
 #[cfg(all(not(test), not(feature = "std")))]
 unsafe impl core::alloc::GlobalAlloc for KernelAllocator {
     unsafe fn alloc(&self, layout: core::alloc::Layout) -> *mut u8 {
-        boxfs_kmalloc(layout.size(), GFP_KERNEL) as *mut u8
+        boxfs_kvmalloc(kernel_alloc_size(layout), GFP_KERNEL) as *mut u8
     }
 
     unsafe fn dealloc(&self, ptr: *mut u8, _layout: core::alloc::Layout) {
-        boxfs_kfree(ptr as *mut c_void);
+        boxfs_kvfree(ptr as *mut c_void);
     }
 }

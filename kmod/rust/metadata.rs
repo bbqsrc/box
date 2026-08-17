@@ -330,6 +330,10 @@ pub struct BoxfsMetadata {
     pub archives: HashMap<u64, ArchiveData>,
     /// Merged path→composite_index FST (in-memory, queryable)
     pub merged_fst: FstBuilder<u128>,
+    /// Reverse of `merged_fst`. Directory iteration and lookup both need the
+    /// path of an already-resolved record, and scanning the FST for it makes
+    /// every namespace operation linear in the archive.
+    paths: HashMap<u128, Box<[u8]>>,
     /// Directory record representing the merged namespace root.
     synthetic_root: Record,
     /// Next archive ID to assign
@@ -362,6 +366,7 @@ impl BoxfsMetadata {
         BoxfsMetadata {
             archives: HashMap::new(),
             merged_fst: FstBuilder::new(),
+            paths: HashMap::new(),
             synthetic_root: Record {
                 name: String::new(),
                 data: RecordData::Directory {
@@ -408,10 +413,12 @@ impl BoxfsMetadata {
                             continue;
                         }
                         // Otherwise fall through to overwrite (last-wins for files)
+                        self.paths.remove(&existing);
                     }
 
                     // Insert or overwrite
                     self.merged_fst.insert_or_replace(&path, composite);
+                    self.paths.insert(composite, path.into_boxed_slice());
                 }
             }
         }
@@ -494,7 +501,8 @@ impl BoxfsMetadata {
             let child_key: Vec<u8> = if parent_path.is_empty() {
                 name.as_bytes().to_vec()
             } else {
-                let mut key = parent_path;
+                let mut key = Vec::with_capacity(parent_path.len() + 1 + name.len());
+                key.extend_from_slice(parent_path);
                 key.push(0x1f);
                 key.extend_from_slice(name.as_bytes());
                 key
@@ -524,37 +532,64 @@ impl BoxfsMetadata {
 
     /// Get path (as FST key bytes) for a composite index.
     /// Returns None if not found in merged FST.
-    pub fn path_for_index(&self, composite: u128) -> Option<Vec<u8>> {
+    pub fn path_for_index(&self, composite: u128) -> Option<&[u8]> {
         if composite == SYNTHETIC_ROOT_INDEX {
-            return Some(Vec::new());
+            return Some(&[]);
         }
 
-        // Search merged FST for this composite index
-        for (key, idx) in self.merged_fst.prefix_iter(&[]) {
-            if idx == composite {
-                return Some(key);
+        self.paths.get(&composite).map(|path| path.as_ref())
+    }
+
+    /// Resolve an internal link to the target text an extracted tree would
+    /// carry: a path relative to the link's own directory, not the archive
+    /// path of the target record.
+    // [spec:box:req:kernel-vfs.root.links-and-xattrs]
+    pub fn relative_link_target(&self, link: u128, target: u128) -> Option<String> {
+        fn components(path: &[u8]) -> Vec<&[u8]> {
+            if path.is_empty() {
+                Vec::new()
+            } else {
+                path.split(|byte| *byte == 0x1f).collect()
             }
         }
 
-        None
-    }
+        let link_path = self.path_for_index(link)?;
+        let target_path = self.path_for_index(target)?;
 
-    /// Get path as a string for a composite index (for symlink resolution).
-    pub fn path_string_for_index(&self, composite: u128) -> Option<String> {
-        let key = self.path_for_index(composite)?;
-        // Convert key to path string (0x1f -> /)
-        let path_bytes: Vec<u8> = key
+        let link_parent = match link_path.iter().rposition(|byte| *byte == 0x1f) {
+            Some(position) => &link_path[..position],
+            None => &[][..],
+        };
+
+        let base = components(link_parent);
+        let target_components = components(target_path);
+        let shared = base
             .iter()
-            .map(|&b| if b == 0x1f { b'/' } else { b })
-            .collect();
-        core::str::from_utf8(&path_bytes).ok().map(String::from)
+            .zip(target_components.iter())
+            .take_while(|(a, b)| a == b)
+            .count();
+
+        let mut out: Vec<u8> = Vec::new();
+        for _ in shared..base.len() {
+            out.extend_from_slice(b"../");
+        }
+        for (position, component) in target_components[shared..].iter().enumerate() {
+            if position > 0 {
+                out.push(b'/');
+            }
+            out.extend_from_slice(component);
+        }
+        if out.last() == Some(&b'/') {
+            out.pop();
+        }
+
+        core::str::from_utf8(&out).ok().map(String::from)
     }
 
     /// Get direct children of a directory from merged FST.
     /// Merges children from all archives for directories that exist in multiple.
     pub fn children(&self, dir_composite: u128) -> Vec<(u128, &Record)> {
         let mut result = Vec::new();
-        let mut seen_names: HashMap<&str, u128> = HashMap::new();
 
         // Get parent path
         let parent_path = match self.path_for_index(dir_composite) {
@@ -566,7 +601,8 @@ impl BoxfsMetadata {
         let prefix: Vec<u8> = if parent_path.is_empty() {
             Vec::new()
         } else {
-            let mut p = parent_path;
+            let mut p = Vec::with_capacity(parent_path.len() + 1);
+            p.extend_from_slice(parent_path);
             p.push(0x1f); // Add separator for children
             p
         };
@@ -580,8 +616,6 @@ impl BoxfsMetadata {
             }
 
             if let Some(record) = self.get(composite) {
-                // For merged directories, use last-seen (which is last-mounted)
-                seen_names.insert(&record.name, composite);
                 result.push((composite, record));
             }
         }

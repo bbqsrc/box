@@ -874,7 +874,7 @@ mod tests {
         let root = files_only.root_index();
         assert_eq!(root, SYNTHETIC_ROOT_INDEX);
         assert!(files_only.get(root).is_some_and(Record::is_dir));
-        assert_eq!(files_only.path_for_index(root), Some(Vec::new()));
+        assert_eq!(files_only.path_for_index(root), Some(&[][..]));
         assert!(files_only
             .merged_fst
             .prefix_iter(&[])
