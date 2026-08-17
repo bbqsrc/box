@@ -7,8 +7,11 @@
  * provides non-inline wrapper functions that Rust can call.
  */
 
+#include <linux/blkdev.h>
+#include <linux/bug.h>
 #include <linux/fs.h>
 #include <linux/buffer_head.h>
+#include <linux/mm.h>
 #include <linux/pagemap.h>
 #include <linux/slab.h>
 #include <linux/uaccess.h>
@@ -96,6 +99,16 @@ u64 boxfs_get_root_ino(struct super_block *sb)
 	return sbi->root_ino;
 }
 
+void boxfs_meta_lock(struct super_block *sb)
+{
+	mutex_lock(&BOXFS_SB(sb)->meta_lock);
+}
+
+void boxfs_meta_unlock(struct super_block *sb)
+{
+	mutex_unlock(&BOXFS_SB(sb)->meta_lock);
+}
+
 /*
  * Block device access
  */
@@ -169,6 +182,16 @@ void boxfs_kfree(void *ptr)
 	kfree(ptr);
 }
 
+void *boxfs_kvmalloc(size_t size, gfp_t flags)
+{
+	return kvmalloc(size, flags);
+}
+
+void boxfs_kvfree(void *ptr)
+{
+	kvfree(ptr);
+}
+
 /*
  * Printk helpers
  */
@@ -191,6 +214,12 @@ void boxfs_pr_warn(const char *msg)
 void boxfs_pr_debug(const char *msg)
 {
 	pr_debug("boxfs: %s\n", msg);
+}
+
+void __noreturn boxfs_panic(const char *msg)
+{
+	pr_err("boxfs: rust panic: %s\n", msg);
+	BUG();
 }
 
 /*

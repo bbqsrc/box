@@ -80,6 +80,8 @@ extern "C" {
     pub fn boxfs_set_trailer_offset(sb: *mut SuperBlock, offset: u64);
     pub fn boxfs_set_root_ino(sb: *mut SuperBlock, ino: u64);
     pub fn boxfs_get_root_ino(sb: *mut SuperBlock) -> u64;
+    pub fn boxfs_meta_lock(sb: *mut SuperBlock);
+    pub fn boxfs_meta_unlock(sb: *mut SuperBlock);
 
     // Block device access
     pub fn boxfs_sb_bdev(sb: *mut SuperBlock) -> *mut BlockDevice;
@@ -104,12 +106,15 @@ extern "C" {
     pub fn boxfs_kmalloc(size: usize, flags: u32) -> *mut c_void;
     pub fn boxfs_kzalloc(size: usize, flags: u32) -> *mut c_void;
     pub fn boxfs_kfree(ptr: *mut c_void);
+    pub fn boxfs_kvmalloc(size: usize, flags: u32) -> *mut c_void;
+    pub fn boxfs_kvfree(ptr: *mut c_void);
 
     // Printk
     pub fn boxfs_pr_info(msg: *const u8);
     pub fn boxfs_pr_err(msg: *const u8);
     pub fn boxfs_pr_warn(msg: *const u8);
     pub fn boxfs_pr_debug(msg: *const u8);
+    pub fn boxfs_panic(msg: *const u8) -> !;
 
     // Zstd decompression
     pub fn boxfs_zstd_decompress(

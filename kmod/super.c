@@ -132,6 +132,9 @@ static int boxfs_iterate_shared(struct file *file, struct dir_context *ctx)
 	struct super_block *sb = inode->i_sb;
 	struct boxfs_inode_info *info = BOXFS_I(inode);
 
+	if (!dir_emit_dots(file, ctx))
+		return 0;
+
 	return boxfs_rust_iterate_dir(sb, info->record_index, ctx);
 }
 
@@ -160,16 +163,14 @@ static int boxfs_read_folio(struct file *file, struct folio *folio)
 	kunmap_local(buf);
 
 	if (ret < 0) {
-		folio_set_error(folio);
-		folio_unlock(folio);
+		folio_end_read(folio, false);
 		return ret;
 	}
 
 	if (ret < len)
 		folio_zero_segment(folio, ret, len);
 
-	folio_mark_uptodate(folio);
-	folio_unlock(folio);
+	folio_end_read(folio, true);
 	return 0;
 }
 
@@ -273,7 +274,7 @@ struct inode *boxfs_iget(struct super_block *sb, u64 ino)
 	set_nlink(inode, 1);
 	inode->i_uid = GLOBAL_ROOT_UID;
 	inode->i_gid = GLOBAL_ROOT_GID;
-	inode->i_atime = inode->i_mtime = inode_set_ctime_current(inode);
+	simple_inode_init_ts(inode);
 
 	if (S_ISREG(mode)) {
 		inode->i_op = &boxfs_file_inode_operations;
@@ -305,6 +306,7 @@ static void boxfs_put_super(struct super_block *sb)
 
 	if (sbi) {
 		boxfs_rust_put_super(sb);
+		mutex_destroy(&sbi->meta_lock);
 		kfree(sbi);
 		sb->s_fs_info = NULL;
 	}
@@ -331,6 +333,7 @@ static int boxfs_fill_super(struct super_block *sb, struct fs_context *fc)
 	if (!sbi)
 		return -ENOMEM;
 
+	mutex_init(&sbi->meta_lock);
 	sb->s_fs_info = sbi;
 	sb->s_magic = BOXFS_MAGIC;
 	sb->s_op = &boxfs_super_operations;
@@ -342,29 +345,34 @@ static int boxfs_fill_super(struct super_block *sb, struct fs_context *fc)
 	/* Call into Rust to parse the archive and set up metadata */
 	ret = boxfs_rust_fill_super(sb, fc->fs_private, fc->sb_flags & SB_SILENT);
 	if (ret < 0) {
-		kfree(sbi);
-		sb->s_fs_info = NULL;
-		return ret;
+		if (!(fc->sb_flags & SB_SILENT))
+			pr_err("boxfs: cannot parse archive on %pg: %d\n",
+			       sb->s_bdev, ret);
+		goto out_free;
 	}
 
 	/* Create root inode */
 	root_inode = boxfs_iget(sb, sbi->root_ino);
 	if (IS_ERR(root_inode)) {
-		boxfs_rust_put_super(sb);
-		kfree(sbi);
-		sb->s_fs_info = NULL;
-		return PTR_ERR(root_inode);
+		ret = PTR_ERR(root_inode);
+		goto out_put;
 	}
 
 	sb->s_root = d_make_root(root_inode);
 	if (!sb->s_root) {
-		boxfs_rust_put_super(sb);
-		kfree(sbi);
-		sb->s_fs_info = NULL;
-		return -ENOMEM;
+		ret = -ENOMEM;
+		goto out_put;
 	}
 
 	return 0;
+
+out_put:
+	boxfs_rust_put_super(sb);
+out_free:
+	mutex_destroy(&sbi->meta_lock);
+	kfree(sbi);
+	sb->s_fs_info = NULL;
+	return ret;
 }
 
 static int boxfs_get_tree(struct fs_context *fc)
@@ -372,19 +380,30 @@ static int boxfs_get_tree(struct fs_context *fc)
 	return get_tree_bdev(fc, boxfs_fill_super);
 }
 
+static int boxfs_reconfigure(struct fs_context *fc)
+{
+	sync_filesystem(fc->root->d_sb);
+	fc->sb_flags |= SB_RDONLY;
+	return 0;
+}
+
 static void boxfs_free_fc(struct fs_context *fc)
 {
-	/* Nothing to free for now */
 }
 
 static const struct fs_context_operations boxfs_context_ops = {
 	.get_tree = boxfs_get_tree,
+	.reconfigure = boxfs_reconfigure,
 	.free = boxfs_free_fc,
 };
 
 static int boxfs_init_fs_context(struct fs_context *fc)
 {
 	fc->ops = &boxfs_context_ops;
+	/* The backing device is opened writable unless the context is
+	 * read-only before get_tree_bdev() runs.
+	 */
+	fc->sb_flags |= SB_RDONLY;
 	return 0;
 }
 
