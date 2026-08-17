@@ -1,0 +1,22 @@
+# Kernel modules are linked into the kernel's own address space: absolute and
+# PC-relative relocations only (the module loader rejects GOT/PLT forms), no
+# red zone, and no unwinding tables. `x86_64-unknown-none` already supplies
+# soft-float, no SSE, and code-model=kernel; the rest is set here.
+#
+# cf-protection/no-jump-tables match CONFIG_X86_KERNEL_IBT: indirect branch
+# targets need ENDBR, and .rodata jump tables have none.
+[target.x86_64-unknown-none]
+rustflags = [
+    "-Crelocation-model=static",
+    "-Zdirect-access-external-data=y",
+    "-Zplt=y",
+    "-Zcf-protection=branch",
+    "-Zfunction-return=thunk-extern",
+    "-Zretpoline-external-thunk=y",
+    "-Cllvm-args=--min-jump-table-entries=1000000",
+    "-Cforce-unwind-tables=n",
+    "-Cpanic=abort",
+    "-Cembed-bitcode=n",
+    "-Clto=n",
+    "-Ccodegen-units=1",
+]

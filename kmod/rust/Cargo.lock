@@ -177,6 +177,7 @@ dependencies = [
  "box-fst",
  "hashbrown 0.15.5",
  "tempfile",
+ "tokio",
 ]
 
 [[package]]
@@ -338,7 +339,7 @@ checksum = "da7c62ceae207dd37ea5b845da6a0696c799f85e97da1ab5b7910be3c1c80223"
 [[package]]
 name = "fastvint"
 version = "1.0.0"
-source = "git+https://github.com/bbqsrc/fastvlq?branch=vint#711eda28b6564f814b4bcd9fc41b0db0bda11423"
+source = "git+https://github.com/bbqsrc/fastvlq?branch=vint#ac8f326b2a32a28c15bb77ff4328a18f6fa0b953"
 
 [[package]]
 name = "find-msvc-tools"

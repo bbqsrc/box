@@ -8,6 +8,7 @@ use crate::node::{
 
 /// Prefetch memory for read.
 #[inline(always)]
+#[allow(unused_variables)]
 fn prefetch_read(ptr: *const u8) {
     #[cfg(target_arch = "aarch64")]
     unsafe {
@@ -25,15 +26,14 @@ fn fast_eq(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() {
         return false;
     }
-    let len = a.len();
 
     #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
-    if len >= 16 {
+    if a.len() >= 16 {
         return fast_eq_simd_neon(a, b);
     }
 
     #[cfg(all(target_arch = "x86_64", target_feature = "sse2"))]
-    if len >= 16 {
+    if a.len() >= 16 {
         return fast_eq_simd_sse2(a, b);
     }
 

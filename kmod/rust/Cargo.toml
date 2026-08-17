@@ -1,25 +1,36 @@
-# Cargo.toml for boxfs kernel module Rust code
-#
-# This is used for development/testing. The actual kernel build
-# uses Kbuild which compiles the Rust code differently.
-
 [package]
 name = "boxfs-kmod"
 version = "0.1.0"
 edition = "2021"
+
+# Standalone workspace: the kernel build needs its own lock and profile, and
+# DKMS builds this crate from a tree where the box workspace root is only
+# reachable through the path dependencies below.
+[workspace]
 
 [lib]
 path = "lib.rs"
 crate-type = ["staticlib"]
 
 [dependencies]
-box-fst = { path = "../../crates/fst" }
-hashbrown = "0.15"
+box-fst = { path = "../../crates/fst", default-features = false }
+hashbrown = { version = "0.15", default-features = false, features = [
+    "default-hasher",
+    "inline-more",
+] }
 
 [dev-dependencies]
 box-format = { path = "../.." }
 tempfile = "3"
+tokio = { version = "1", features = ["rt", "io-util"] }
 
 [features]
 default = ["std"]
-std = []
+std = ["box-fst/std"]
+
+[profile.release]
+panic = "abort"
+codegen-units = 1
+overflow-checks = false
+debug-assertions = false
+incremental = false
