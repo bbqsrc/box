@@ -2,7 +2,8 @@
 
 config BOXFS_FS
 	tristate "Box archive filesystem support"
-	depends on RUST
+	select ZSTD_DECOMPRESS
+	select XZ_DEC
 	help
 	  Box is a read-only archive format optimized for fast random access
 	  and efficient storage. This filesystem allows mounting .box archives
@@ -13,6 +14,10 @@ config BOXFS_FS
 	  - Extended attributes
 	  - Symlinks (internal and external)
 	  - Efficient directory indexing via FST
+
+	  The archive parser is Rust compiled by cargo into a freestanding
+	  staticlib, so this does not depend on CONFIG_RUST, but building it
+	  needs a nightly Rust toolchain with rust-src. See fs/boxfs/README.md.
 
 	  To compile this as a module, choose M here: the module will be
 	  called boxfs.
