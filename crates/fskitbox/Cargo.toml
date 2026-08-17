@@ -8,7 +8,7 @@ description = "FSKit-based filesystem driver for Box archives"
 [lib]
 crate-type = ["staticlib", "rlib"]
 
-[dependencies]
+[target.'cfg(target_os = "macos")'.dependencies]
 box-format.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "sync"] }
 tracing.workspace = true
@@ -21,11 +21,5 @@ objc2.workspace = true
 objc2-foundation.workspace = true
 block2.workspace = true
 
-[target.'cfg(target_os = "macos")'.dependencies]
-# FSKit is macOS-only
-
-[build-dependencies]
-# For linking FSKit.framework
-
-[dev-dependencies]
+[target.'cfg(target_os = "macos")'.dev-dependencies]
 tempfile.workspace = true
