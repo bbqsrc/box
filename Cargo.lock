@@ -756,7 +756,7 @@ checksum = "9f1f227452a390804cdb637b74a86990f2a7d7ba4b7d5693aac9b4dd6defd8d6"
 [[package]]
 name = "fastvint"
 version = "1.0.0"
-source = "git+https://github.com/bbqsrc/fastvlq?branch=vint#711eda28b6564f814b4bcd9fc41b0db0bda11423"
+source = "git+https://github.com/bbqsrc/fastvlq?branch=vint#ac8f326b2a32a28c15bb77ff4328a18f6fa0b953"
 
 [[package]]
 name = "find-msvc-tools"
