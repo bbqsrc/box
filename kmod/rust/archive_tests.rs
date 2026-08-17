@@ -4,7 +4,7 @@
 
 use std::collections::BTreeMap;
 
-use box_format::{aio, BoxPath, Compression, CompressionConfig, HashMap as WriterHashMap};
+use box_format::{BoxPath, Compression, CompressionConfig, HashMap as WriterHashMap, aio};
 
 use crate::bindings::{DT_DIR, DT_LNK, DT_REG};
 use crate::kernel_sim;

@@ -795,8 +795,8 @@ mod tests {
     use super::*;
     use crate::metadata::{BoxfsMetadata, SYNTHETIC_ROOT_INDEX};
     use box_format::{
-        sync::BoxWriter, BoxPath, Compression as WriterCompression, CompressionConfig,
-        HashMap as WriterHashMap,
+        BoxPath, Compression as WriterCompression, CompressionConfig, HashMap as WriterHashMap,
+        sync::BoxWriter,
     };
     use std::io::Cursor;
 
@@ -875,10 +875,12 @@ mod tests {
         assert_eq!(root, SYNTHETIC_ROOT_INDEX);
         assert!(files_only.get(root).is_some_and(Record::is_dir));
         assert_eq!(files_only.path_for_index(root), Some(&[][..]));
-        assert!(files_only
-            .merged_fst
-            .prefix_iter(&[])
-            .all(|(_, composite)| composite != root));
+        assert!(
+            files_only
+                .merged_fst
+                .prefix_iter(&[])
+                .all(|(_, composite)| composite != root)
+        );
         let mut names: Vec<_> = files_only
             .children(root)
             .into_iter()

@@ -25,7 +25,7 @@ mod kernel_sim;
 
 use bindings::*;
 use error::KernelError;
-use metadata::{BoxfsMetadata, RecordData, DEFAULT_BLOCK_CACHE_BYTES};
+use metadata::{BoxfsMetadata, DEFAULT_BLOCK_CACHE_BYTES, RecordData};
 
 // ============================================================================
 // INODE <-> COMPOSITE INDEX CONVERSION
@@ -85,7 +85,7 @@ fn prefetch_read(ptr: *const u8) {
 /// and stores it in the superblock's fs_info.
 ///
 /// Returns 0 on success, negative errno on failure.
-#[no_mangle]
+#[unsafe(no_mangle)]
 // [spec:box:req:kernel-vfs.root]
 // [spec:box:req:kernel-abi.root]
 pub extern "C" fn boxfs_rust_fill_super(
@@ -102,7 +102,7 @@ pub extern "C" fn boxfs_rust_fill_super(
 /// Clean up Rust-allocated metadata.
 ///
 /// Called from C during unmount.
-#[no_mangle]
+#[unsafe(no_mangle)]
 // [spec:box:req:kernel-vfs.root.mount-lifecycle]
 // [spec:box:req:kernel-abi.root]
 // [spec:box:req:kernel-abi.root.ownership-and-errors]
@@ -120,7 +120,7 @@ pub extern "C" fn boxfs_rust_put_super(sb: *mut SuperBlock) {
 /// Get filesystem statistics.
 ///
 /// Returns 0 on success, negative errno on failure.
-#[no_mangle]
+#[unsafe(no_mangle)]
 // [spec:box:req:kernel-abi.root]
 pub extern "C" fn boxfs_rust_statfs(sb: *mut SuperBlock, buf: *mut KStatfs) -> c_int {
     match unsafe { statfs_impl(sb, buf) } {
@@ -132,7 +132,7 @@ pub extern "C" fn boxfs_rust_statfs(sb: *mut SuperBlock, buf: *mut KStatfs) -> c
 /// Look up a name in a directory.
 ///
 /// Returns the inode number if found, 0 if not found.
-#[no_mangle]
+#[unsafe(no_mangle)]
 // [spec:box:req:kernel-abi.root]
 // [spec:box:req:kernel-abi.root.ownership-and-errors]
 pub extern "C" fn boxfs_rust_lookup(
@@ -154,7 +154,7 @@ pub extern "C" fn boxfs_rust_lookup(
 ///
 /// Calls the dir_emit function for each entry in the directory.
 /// Returns 0 on success, negative errno on failure.
-#[no_mangle]
+#[unsafe(no_mangle)]
 // [spec:box:req:kernel-abi.root]
 pub extern "C" fn boxfs_rust_iterate_dir(
     sb: *mut SuperBlock,
@@ -170,7 +170,7 @@ pub extern "C" fn boxfs_rust_iterate_dir(
 /// Read file data into buffer.
 ///
 /// Returns bytes read on success, negative errno on failure.
-#[no_mangle]
+#[unsafe(no_mangle)]
 // [spec:box:req:kernel-abi.root]
 pub extern "C" fn boxfs_rust_read(
     sb: *mut SuperBlock,
@@ -189,7 +189,7 @@ pub extern "C" fn boxfs_rust_read(
 /// Get inode attributes.
 ///
 /// Returns 0 on success, negative errno on failure.
-#[no_mangle]
+#[unsafe(no_mangle)]
 // [spec:box:req:kernel-abi.root]
 pub extern "C" fn boxfs_rust_getattr(
     sb: *mut SuperBlock,
@@ -214,7 +214,7 @@ pub extern "C" fn boxfs_rust_getattr(
 /// Read symlink target.
 ///
 /// Returns 0 on success, negative errno on failure.
-#[no_mangle]
+#[unsafe(no_mangle)]
 // [spec:box:req:kernel-abi.root]
 pub extern "C" fn boxfs_rust_readlink(
     sb: *mut SuperBlock,
@@ -232,7 +232,7 @@ pub extern "C" fn boxfs_rust_readlink(
 /// Readahead for sequential read optimization.
 ///
 /// Fills multiple folios from a single decompression when possible.
-#[no_mangle]
+#[unsafe(no_mangle)]
 // [spec:box:req:kernel-abi.root]
 pub extern "C" fn boxfs_rust_readahead(
     sb: *mut SuperBlock,
@@ -254,8 +254,10 @@ struct MetaGuard(*mut SuperBlock);
 
 impl MetaGuard {
     unsafe fn new(sb: *mut SuperBlock) -> Self {
-        boxfs_meta_lock(sb);
-        MetaGuard(sb)
+        unsafe {
+            boxfs_meta_lock(sb);
+            MetaGuard(sb)
+        }
     }
 }
 
@@ -270,11 +272,13 @@ impl Drop for MetaGuard {
 // ============================================================================
 
 unsafe fn get_metadata(sb: *mut SuperBlock) -> Result<&'static BoxfsMetadata, KernelError> {
-    let metadata = boxfs_get_metadata(sb);
-    if metadata.is_null() {
-        return Err(KernelError::NoDevice);
+    unsafe {
+        let metadata = boxfs_get_metadata(sb);
+        if metadata.is_null() {
+            return Err(KernelError::NoDevice);
+        }
+        Ok(&*(metadata as *const BoxfsMetadata))
     }
-    Ok(&*(metadata as *const BoxfsMetadata))
 }
 
 // ============================================================================
@@ -284,74 +288,76 @@ unsafe fn get_metadata(sb: *mut SuperBlock) -> Result<&'static BoxfsMetadata, Ke
 // [spec:box:req:kernel-vfs.root.mount-lifecycle]
 // [spec:box:req:kernel-abi.root.ownership-and-errors]
 unsafe fn fill_super_impl(sb: *mut SuperBlock) -> Result<(), KernelError> {
-    // Get block device
-    let bdev = boxfs_sb_bdev(sb);
-    if bdev.is_null() {
-        return Err(KernelError::NoDevice);
-    }
-    let device_size = boxfs_bdev_nr_bytes(bdev) as u64;
-    let block_size = boxfs_sb_blocksize(sb) as u64;
+    unsafe {
+        // Get block device
+        let bdev = boxfs_sb_bdev(sb);
+        if bdev.is_null() {
+            return Err(KernelError::NoDevice);
+        }
+        let device_size = boxfs_bdev_nr_bytes(bdev) as u64;
+        let block_size = boxfs_sb_blocksize(sb) as u64;
 
-    // Read the header (first 32 bytes)
-    let (bh, block_data) = read_block(sb, 0).ok_or(KernelError::Io)?;
+        // Read the header (first 32 bytes)
+        let (bh, block_data) = read_block(sb, 0).ok_or(KernelError::Io)?;
 
-    if block_data.len() < parser::HEADER_SIZE {
+        if block_data.len() < parser::HEADER_SIZE {
+            release_block(bh);
+            return Err(KernelError::BadData);
+        }
+
+        let header = parser::parse_header(block_data);
         release_block(bh);
-        return Err(KernelError::BadData);
+        let header = header?;
+
+        // Read the trailer
+        let trailer_offset = header.trailer_offset;
+        let trailer_size = device_size
+            .checked_sub(trailer_offset)
+            .ok_or(KernelError::BadData)?;
+        let trailer_capacity = usize::try_from(trailer_size).map_err(|_| KernelError::NoMemory)?;
+
+        // Read all trailer blocks into a buffer
+        let mut trailer_data = Vec::with_capacity(trailer_capacity);
+        let mut offset = trailer_offset;
+
+        while offset < device_size {
+            let block_num = offset / block_size;
+            let block_offset = (offset % block_size) as usize;
+
+            let (bh, block_data) = read_block(sb, block_num).ok_or(KernelError::Io)?;
+
+            let start = block_offset;
+            let end = core::cmp::min(block_data.len(), start + (device_size - offset) as usize);
+            trailer_data.extend_from_slice(&block_data[start..end]);
+
+            release_block(bh);
+            offset += (end - start) as u64;
+        }
+
+        // Parse the trailer into archive data
+        let mut archive = parser::parse_trailer(&trailer_data)?;
+        archive.archive_size = device_size;
+        archive.data_offset_base = 0; // First archive starts at device offset 0
+
+        // Create metadata and add the first archive
+        let mut metadata = BoxfsMetadata::empty();
+        // Set block cache capacity
+        *metadata.block_cache.borrow_mut() = metadata::BlockCache::new(DEFAULT_BLOCK_CACHE_BYTES);
+        let _archive_id = metadata.add_archive(archive);
+
+        // Store metadata
+        let meta_ptr = Box::into_raw(Box::new(metadata));
+        boxfs_set_metadata(sb, meta_ptr as *mut c_void);
+        boxfs_set_archive_size(sb, device_size);
+        boxfs_set_trailer_offset(sb, trailer_offset);
+
+        // Set root inode (use the root_index from metadata - now a composite index)
+        let root_composite = (*(meta_ptr)).root_index();
+        let root_ino = composite_to_ino(root_composite);
+        boxfs_set_root_ino(sb, root_ino);
+
+        Ok(())
     }
-
-    let header = parser::parse_header(block_data);
-    release_block(bh);
-    let header = header?;
-
-    // Read the trailer
-    let trailer_offset = header.trailer_offset;
-    let trailer_size = device_size
-        .checked_sub(trailer_offset)
-        .ok_or(KernelError::BadData)?;
-    let trailer_capacity = usize::try_from(trailer_size).map_err(|_| KernelError::NoMemory)?;
-
-    // Read all trailer blocks into a buffer
-    let mut trailer_data = Vec::with_capacity(trailer_capacity);
-    let mut offset = trailer_offset;
-
-    while offset < device_size {
-        let block_num = offset / block_size;
-        let block_offset = (offset % block_size) as usize;
-
-        let (bh, block_data) = read_block(sb, block_num).ok_or(KernelError::Io)?;
-
-        let start = block_offset;
-        let end = core::cmp::min(block_data.len(), start + (device_size - offset) as usize);
-        trailer_data.extend_from_slice(&block_data[start..end]);
-
-        release_block(bh);
-        offset += (end - start) as u64;
-    }
-
-    // Parse the trailer into archive data
-    let mut archive = parser::parse_trailer(&trailer_data)?;
-    archive.archive_size = device_size;
-    archive.data_offset_base = 0; // First archive starts at device offset 0
-
-    // Create metadata and add the first archive
-    let mut metadata = BoxfsMetadata::empty();
-    // Set block cache capacity
-    *metadata.block_cache.borrow_mut() = metadata::BlockCache::new(DEFAULT_BLOCK_CACHE_BYTES);
-    let _archive_id = metadata.add_archive(archive);
-
-    // Store metadata
-    let meta_ptr = Box::into_raw(Box::new(metadata));
-    boxfs_set_metadata(sb, meta_ptr as *mut c_void);
-    boxfs_set_archive_size(sb, device_size);
-    boxfs_set_trailer_offset(sb, trailer_offset);
-
-    // Set root inode (use the root_index from metadata - now a composite index)
-    let root_composite = (*(meta_ptr)).root_index();
-    let root_ino = composite_to_ino(root_composite);
-    boxfs_set_root_ino(sb, root_ino);
-
-    Ok(())
 }
 
 // ============================================================================
@@ -359,23 +365,25 @@ unsafe fn fill_super_impl(sb: *mut SuperBlock) -> Result<(), KernelError> {
 // ============================================================================
 
 unsafe fn statfs_impl(sb: *mut SuperBlock, buf: *mut KStatfs) -> Result<(), KernelError> {
-    let metadata = get_metadata(sb)?;
+    unsafe {
+        let metadata = get_metadata(sb)?;
 
-    // Calculate block counts (sum all archive sizes)
-    let block_size = boxfs_sb_blocksize(sb) as u64;
-    let total_size: u64 = metadata.archives.values().map(|a| a.archive_size).sum();
-    let total_blocks = total_size / block_size;
+        // Calculate block counts (sum all archive sizes)
+        let block_size = boxfs_sb_blocksize(sb) as u64;
+        let total_size: u64 = metadata.archives.values().map(|a| a.archive_size).sum();
+        let total_blocks = total_size / block_size;
 
-    (*buf).f_type = BOXFS_MAGIC as i64;
-    (*buf).f_bsize = block_size as i64;
-    (*buf).f_blocks = total_blocks;
-    (*buf).f_bfree = 0; // Read-only filesystem
-    (*buf).f_bavail = 0;
-    (*buf).f_files = metadata.record_count();
-    (*buf).f_ffree = 0;
-    (*buf).f_namelen = 255;
+        (*buf).f_type = BOXFS_MAGIC as i64;
+        (*buf).f_bsize = block_size as i64;
+        (*buf).f_blocks = total_blocks;
+        (*buf).f_bfree = 0; // Read-only filesystem
+        (*buf).f_bavail = 0;
+        (*buf).f_files = metadata.record_count();
+        (*buf).f_ffree = 0;
+        (*buf).f_namelen = 255;
 
-    Ok(())
+        Ok(())
+    }
 }
 
 // ============================================================================
@@ -384,15 +392,17 @@ unsafe fn statfs_impl(sb: *mut SuperBlock, buf: *mut KStatfs) -> Result<(), Kern
 
 // [spec:box:req:kernel-vfs.root.namespace]
 unsafe fn lookup_impl(sb: *mut SuperBlock, dir_ino: u64, name: &str) -> Result<u64, KernelError> {
-    let metadata = get_metadata(sb)?;
+    unsafe {
+        let metadata = get_metadata(sb)?;
 
-    // Convert u64 inode to u128 composite for internal lookup
-    let dir_composite = ino_to_composite(dir_ino).ok_or(KernelError::NotFound)?;
-    let child_composite = metadata
-        .find_child(dir_composite, name)
-        .ok_or(KernelError::NotFound)?;
-    // Convert back to u64 inode for return to kernel
-    Ok(composite_to_ino(child_composite))
+        // Convert u64 inode to u128 composite for internal lookup
+        let dir_composite = ino_to_composite(dir_ino).ok_or(KernelError::NotFound)?;
+        let child_composite = metadata
+            .find_child(dir_composite, name)
+            .ok_or(KernelError::NotFound)?;
+        // Convert back to u64 inode for return to kernel
+        Ok(composite_to_ino(child_composite))
+    }
 }
 
 // ============================================================================
@@ -405,44 +415,46 @@ unsafe fn iterate_dir_impl(
     dir_ino: u64,
     ctx: *mut DirContext,
 ) -> Result<(), KernelError> {
-    let metadata = get_metadata(sb)?;
+    unsafe {
+        let metadata = get_metadata(sb)?;
 
-    // Convert u64 inode to u128 composite
-    let dir_composite = ino_to_composite(dir_ino).ok_or(KernelError::NotFound)?;
+        // Convert u64 inode to u128 composite
+        let dir_composite = ino_to_composite(dir_ino).ok_or(KernelError::NotFound)?;
 
-    // The C shim emits "." and ".." before calling in, so dir_context positions
-    // 0 and 1 are already spent.
-    const DOT_ENTRIES: i64 = 2;
+        // The C shim emits "." and ".." before calling in, so dir_context positions
+        // 0 and 1 are already spent.
+        const DOT_ENTRIES: i64 = 2;
 
-    // Get current position
-    let pos = boxfs_dir_ctx_pos(ctx);
-    let start = usize::try_from(pos.saturating_sub(DOT_ENTRIES)).unwrap_or(0);
+        // Get current position
+        let pos = boxfs_dir_ctx_pos(ctx);
+        let start = usize::try_from(pos.saturating_sub(DOT_ENTRIES)).unwrap_or(0);
 
-    // Get directory children
-    let children = metadata.children(dir_composite);
+        // Get directory children
+        let children = metadata.children(dir_composite);
 
-    // Emit entries starting from pos
-    for (i, (child_composite, record)) in children.iter().enumerate().skip(start) {
-        let name_bytes = record.name.as_bytes();
-        // Convert composite to u64 inode for dir_emit
-        let child_ino = composite_to_ino(*child_composite);
-        let emitted = boxfs_dir_emit(
-            ctx,
-            name_bytes.as_ptr(),
-            name_bytes.len() as i32,
-            child_ino,
-            record.dtype() as u32,
-        );
+        // Emit entries starting from pos
+        for (i, (child_composite, record)) in children.iter().enumerate().skip(start) {
+            let name_bytes = record.name.as_bytes();
+            // Convert composite to u64 inode for dir_emit
+            let child_ino = composite_to_ino(*child_composite);
+            let emitted = boxfs_dir_emit(
+                ctx,
+                name_bytes.as_ptr(),
+                name_bytes.len() as i32,
+                child_ino,
+                record.dtype() as u32,
+            );
 
-        if !emitted {
-            // Buffer full, stop here
-            break;
+            if !emitted {
+                // Buffer full, stop here
+                break;
+            }
+
+            boxfs_dir_ctx_set_pos(ctx, i as i64 + 1 + DOT_ENTRIES);
         }
 
-        boxfs_dir_ctx_set_pos(ctx, i as i64 + 1 + DOT_ENTRIES);
+        Ok(())
     }
-
-    Ok(())
 }
 
 // ============================================================================
@@ -673,53 +685,55 @@ unsafe fn read_archive_into(
     output: &mut [u8],
     block_size: u64,
 ) -> Result<(), KernelError> {
-    if output.len() != range.len {
-        return Err(KernelError::BadData);
-    }
-    let mut bytes_read = 0usize;
-    while bytes_read < output.len() {
-        let current_offset = range
-            .start
-            .checked_add(u64::try_from(bytes_read).map_err(|_| KernelError::BadData)?)
-            .ok_or(KernelError::BadData)?;
-        if current_offset >= range.end {
+    unsafe {
+        if output.len() != range.len {
             return Err(KernelError::BadData);
         }
-        if block_size == 0 {
-            return Err(KernelError::BadData);
-        }
-        let block_num = current_offset / block_size;
-        let (bh, block_data) = read_block(sb, block_num).ok_or(KernelError::Io)?;
-        let copy = checked_block_copy(
-            current_offset,
-            block_size,
-            block_data.len(),
-            output.len() - bytes_read,
-        );
-        let copy = match copy {
-            Ok(copy) => copy,
-            Err(error) => {
-                release_block(bh);
-                return Err(error);
+        let mut bytes_read = 0usize;
+        while bytes_read < output.len() {
+            let current_offset = range
+                .start
+                .checked_add(u64::try_from(bytes_read).map_err(|_| KernelError::BadData)?)
+                .ok_or(KernelError::BadData)?;
+            if current_offset >= range.end {
+                return Err(KernelError::BadData);
             }
-        };
-        if copy.block_num != block_num {
-            release_block(bh);
-            return Err(KernelError::BadData);
-        }
-        let copied = copy.end - copy.start;
-        let output_end = match bytes_read.checked_add(copied) {
-            Some(end) => end,
-            None => {
+            if block_size == 0 {
+                return Err(KernelError::BadData);
+            }
+            let block_num = current_offset / block_size;
+            let (bh, block_data) = read_block(sb, block_num).ok_or(KernelError::Io)?;
+            let copy = checked_block_copy(
+                current_offset,
+                block_size,
+                block_data.len(),
+                output.len() - bytes_read,
+            );
+            let copy = match copy {
+                Ok(copy) => copy,
+                Err(error) => {
+                    release_block(bh);
+                    return Err(error);
+                }
+            };
+            if copy.block_num != block_num {
                 release_block(bh);
                 return Err(KernelError::BadData);
             }
-        };
-        output[bytes_read..output_end].copy_from_slice(&block_data[copy.start..copy.end]);
-        release_block(bh);
-        bytes_read = output_end;
+            let copied = copy.end - copy.start;
+            let output_end = match bytes_read.checked_add(copied) {
+                Some(end) => end,
+                None => {
+                    release_block(bh);
+                    return Err(KernelError::BadData);
+                }
+            };
+            output[bytes_read..output_end].copy_from_slice(&block_data[copy.start..copy.end]);
+            release_block(bh);
+            bytes_read = output_end;
+        }
+        Ok(())
     }
-    Ok(())
 }
 
 /// Read a checked range of bytes from the archive into a Vec.
@@ -729,12 +743,14 @@ unsafe fn read_archive_range(
     range: CheckedRange,
     block_size: u64,
 ) -> Result<Vec<u8>, KernelError> {
-    let mut data = Vec::new();
-    data.try_reserve_exact(range.len)
-        .map_err(|_| KernelError::NoMemory)?;
-    data.resize(range.len, 0);
-    read_archive_into(sb, range, &mut data, block_size)?;
-    Ok(data)
+    unsafe {
+        let mut data = Vec::new();
+        data.try_reserve_exact(range.len)
+            .map_err(|_| KernelError::NoMemory)?;
+        data.resize(range.len, 0);
+        read_archive_into(sb, range, &mut data, block_size)?;
+        Ok(data)
+    }
 }
 
 // ============================================================================
@@ -747,56 +763,58 @@ unsafe fn read_impl(
     buf: &mut [u8],
     offset: u64,
 ) -> Result<usize, KernelError> {
-    let metadata = get_metadata(sb)?;
-    let block_size = boxfs_sb_blocksize(sb) as u64;
+    unsafe {
+        let metadata = get_metadata(sb)?;
+        let block_size = boxfs_sb_blocksize(sb) as u64;
 
-    // Convert u64 inode to u128 composite
-    let composite = ino_to_composite(ino).ok_or(KernelError::NotFound)?;
-    let record = metadata.get(composite).ok_or(KernelError::NotFound)?;
-    let archive = metadata
-        .get_archive(composite)
-        .ok_or(KernelError::BadData)?;
+        // Convert u64 inode to u128 composite
+        let composite = ino_to_composite(ino).ok_or(KernelError::NotFound)?;
+        let record = metadata.get(composite).ok_or(KernelError::NotFound)?;
+        let archive = metadata
+            .get_archive(composite)
+            .ok_or(KernelError::BadData)?;
 
-    match &record.data {
-        RecordData::File {
-            compression,
-            data_offset,
-            compressed_size,
-            decompressed_size,
-        } => read_file(
-            sb,
-            *compression,
-            *data_offset,
-            *compressed_size,
-            *decompressed_size,
-            buf,
-            offset,
-            block_size,
-            archive.data_offset_base,
-            archive.archive_size,
-        ),
-        RecordData::ChunkedFile {
-            compression,
-            block_size: chunk_size,
-            data_offset,
-            compressed_size,
-            decompressed_size,
-        } => read_chunked_file(
-            sb,
-            metadata,
-            composite,
-            *compression,
-            *chunk_size,
-            *data_offset,
-            *compressed_size,
-            *decompressed_size,
-            buf,
-            offset,
-            block_size,
-            archive.data_offset_base,
-            archive.archive_size,
-        ),
-        _ => Err(KernelError::IsDir),
+        match &record.data {
+            RecordData::File {
+                compression,
+                data_offset,
+                compressed_size,
+                decompressed_size,
+            } => read_file(
+                sb,
+                *compression,
+                *data_offset,
+                *compressed_size,
+                *decompressed_size,
+                buf,
+                offset,
+                block_size,
+                archive.data_offset_base,
+                archive.archive_size,
+            ),
+            RecordData::ChunkedFile {
+                compression,
+                block_size: chunk_size,
+                data_offset,
+                compressed_size,
+                decompressed_size,
+            } => read_chunked_file(
+                sb,
+                metadata,
+                composite,
+                *compression,
+                *chunk_size,
+                *data_offset,
+                *compressed_size,
+                *decompressed_size,
+                buf,
+                offset,
+                block_size,
+                archive.data_offset_base,
+                archive.archive_size,
+            ),
+            _ => Err(KernelError::IsDir),
+        }
     }
 }
 
@@ -815,49 +833,52 @@ unsafe fn read_file(
     archive_base: u64,
     archive_size: u64,
 ) -> Result<usize, KernelError> {
-    let payload = checked_archive_range(archive_base, archive_size, data_offset, compressed_size)?;
-    let to_read = checked_request_len(decompressed_size, offset, buf.len())?;
+    unsafe {
+        let payload =
+            checked_archive_range(archive_base, archive_size, data_offset, compressed_size)?;
+        let to_read = checked_request_len(decompressed_size, offset, buf.len())?;
 
-    match compression {
-        metadata::Compression::Stored => {
-            validate_stored_envelope(compressed_size, decompressed_size)?;
-            if to_read == 0 {
-                return Ok(0);
+        match compression {
+            metadata::Compression::Stored => {
+                validate_stored_envelope(compressed_size, decompressed_size)?;
+                if to_read == 0 {
+                    return Ok(0);
+                }
+                let read_start = payload
+                    .start
+                    .checked_add(offset)
+                    .ok_or(KernelError::BadData)?;
+                let read_range = checked_subrange(
+                    payload.start,
+                    compressed_size,
+                    read_start,
+                    u64::try_from(to_read).map_err(|_| KernelError::BadData)?,
+                )?;
+                read_archive_into(sb, read_range, &mut buf[..to_read], block_size)?;
+                Ok(to_read)
             }
-            let read_start = payload
-                .start
-                .checked_add(offset)
-                .ok_or(KernelError::BadData)?;
-            let read_range = checked_subrange(
-                payload.start,
-                compressed_size,
-                read_start,
-                u64::try_from(to_read).map_err(|_| KernelError::BadData)?,
-            )?;
-            read_archive_into(sb, read_range, &mut buf[..to_read], block_size)?;
-            Ok(to_read)
+            metadata::Compression::Zstd => decompress_and_read(
+                sb,
+                payload,
+                decompressed_size,
+                buf,
+                offset,
+                to_read,
+                block_size,
+                true,
+            ),
+            metadata::Compression::Xz => decompress_and_read(
+                sb,
+                payload,
+                decompressed_size,
+                buf,
+                offset,
+                to_read,
+                block_size,
+                false,
+            ),
+            metadata::Compression::Unknown(_) => Err(KernelError::Invalid),
         }
-        metadata::Compression::Zstd => decompress_and_read(
-            sb,
-            payload,
-            decompressed_size,
-            buf,
-            offset,
-            to_read,
-            block_size,
-            true,
-        ),
-        metadata::Compression::Xz => decompress_and_read(
-            sb,
-            payload,
-            decompressed_size,
-            buf,
-            offset,
-            to_read,
-            block_size,
-            false,
-        ),
-        metadata::Compression::Unknown(_) => Err(KernelError::Invalid),
     }
 }
 
@@ -873,57 +894,59 @@ unsafe fn decompress_and_read(
     block_size: u64,
     use_zstd: bool,
 ) -> Result<usize, KernelError> {
-    if to_read == 0 {
-        return Ok(0);
-    }
-    let decompressed_capacity =
-        usize::try_from(decompressed_size).map_err(|_| KernelError::BadData)?;
-    let output_range = checked_output_range(offset, to_read, decompressed_capacity)?;
+    unsafe {
+        if to_read == 0 {
+            return Ok(0);
+        }
+        let decompressed_capacity =
+            usize::try_from(decompressed_size).map_err(|_| KernelError::BadData)?;
+        let output_range = checked_output_range(offset, to_read, decompressed_capacity)?;
 
-    // Read compressed data from archive
-    let compressed_data = read_archive_range(sb, payload, block_size)?;
+        // Read compressed data from archive
+        let compressed_data = read_archive_range(sb, payload, block_size)?;
 
-    // Allocate decompression buffer
-    let decomp_buf = boxfs_kvmalloc(decompressed_capacity, GFP_KERNEL);
-    if decomp_buf.is_null() {
-        return Err(KernelError::NoMemory);
-    }
+        // Allocate decompression buffer
+        let decomp_buf = boxfs_kvmalloc(decompressed_capacity, GFP_KERNEL);
+        if decomp_buf.is_null() {
+            return Err(KernelError::NoMemory);
+        }
 
-    // Decompress
-    let mut out_len: usize = 0;
-    let ret = if use_zstd {
-        boxfs_zstd_decompress(
-            compressed_data.as_ptr() as *const c_void,
-            compressed_data.len(),
-            decomp_buf,
-            decompressed_capacity,
-            &mut out_len,
-        )
-    } else {
-        boxfs_xz_decompress(
-            compressed_data.as_ptr() as *const c_void,
-            compressed_data.len(),
-            decomp_buf,
-            decompressed_capacity,
-            &mut out_len,
-        )
-    };
-
-    if ret != 0 || out_len != decompressed_capacity || output_range.end > out_len {
-        boxfs_kvfree(decomp_buf);
-        return Err(if ret != 0 {
-            KernelError::Io
+        // Decompress
+        let mut out_len: usize = 0;
+        let ret = if use_zstd {
+            boxfs_zstd_decompress(
+                compressed_data.as_ptr() as *const c_void,
+                compressed_data.len(),
+                decomp_buf,
+                decompressed_capacity,
+                &mut out_len,
+            )
         } else {
-            KernelError::BadData
-        });
+            boxfs_xz_decompress(
+                compressed_data.as_ptr() as *const c_void,
+                compressed_data.len(),
+                decomp_buf,
+                decompressed_capacity,
+                &mut out_len,
+            )
+        };
+
+        if ret != 0 || out_len != decompressed_capacity || output_range.end > out_len {
+            boxfs_kvfree(decomp_buf);
+            return Err(if ret != 0 {
+                KernelError::Io
+            } else {
+                KernelError::BadData
+            });
+        }
+
+        // Copy requested range to output buffer
+        let decomp_slice = core::slice::from_raw_parts(decomp_buf as *const u8, out_len);
+        buf[..to_read].copy_from_slice(&decomp_slice[output_range]);
+
+        boxfs_kvfree(decomp_buf);
+        Ok(to_read)
     }
-
-    // Copy requested range to output buffer
-    let decomp_slice = core::slice::from_raw_parts(decomp_buf as *const u8, out_len);
-    buf[..to_read].copy_from_slice(&decomp_slice[output_range]);
-
-    boxfs_kvfree(decomp_buf);
-    Ok(to_read)
 }
 
 /// Read from a chunked file (multiple independently-compressed blocks)
@@ -944,195 +967,197 @@ unsafe fn read_chunked_file(
     archive_base: u64,
     archive_size: u64,
 ) -> Result<usize, KernelError> {
-    checked_archive_range(archive_base, archive_size, data_offset, compressed_size)?;
-    let payload = checked_subrange(0, archive_size, data_offset, compressed_size)?;
-    let to_read = checked_request_len(decompressed_size, offset, buf.len())?;
-    if chunk_size == 0 {
-        return Err(KernelError::BadData);
-    }
+    unsafe {
+        checked_archive_range(archive_base, archive_size, data_offset, compressed_size)?;
+        let payload = checked_subrange(0, archive_size, data_offset, compressed_size)?;
+        let to_read = checked_request_len(decompressed_size, offset, buf.len())?;
+        if chunk_size == 0 {
+            return Err(KernelError::BadData);
+        }
 
-    // For stored (uncompressed) chunked files, we can read directly
-    if matches!(compression, metadata::Compression::Stored) {
-        validate_stored_envelope(compressed_size, decompressed_size)?;
+        // For stored (uncompressed) chunked files, we can read directly
+        if matches!(compression, metadata::Compression::Stored) {
+            validate_stored_envelope(compressed_size, decompressed_size)?;
+            if to_read == 0 {
+                return Ok(0);
+            }
+            let relative_start = data_offset
+                .checked_add(offset)
+                .ok_or(KernelError::BadData)?;
+            let relative_range = checked_subrange(
+                payload.start,
+                compressed_size,
+                relative_start,
+                u64::try_from(to_read).map_err(|_| KernelError::BadData)?,
+            )?;
+            let absolute_range = checked_archive_range(
+                archive_base,
+                archive_size,
+                relative_range.start,
+                relative_range.end - relative_range.start,
+            )?;
+            read_archive_into(sb, absolute_range, &mut buf[..to_read], dev_block_size)?;
+            return Ok(to_read);
+        }
+
         if to_read == 0 {
             return Ok(0);
         }
-        let relative_start = data_offset
-            .checked_add(offset)
-            .ok_or(KernelError::BadData)?;
-        let relative_range = checked_subrange(
-            payload.start,
-            compressed_size,
-            relative_start,
-            u64::try_from(to_read).map_err(|_| KernelError::BadData)?,
-        )?;
-        let absolute_range = checked_archive_range(
-            archive_base,
-            archive_size,
-            relative_range.start,
-            relative_range.end - relative_range.start,
-        )?;
-        read_archive_into(sb, absolute_range, &mut buf[..to_read], dev_block_size)?;
-        return Ok(to_read);
-    }
+        if !matches!(
+            compression,
+            metadata::Compression::Zstd | metadata::Compression::Xz
+        ) {
+            return Err(KernelError::Invalid);
+        }
 
-    if to_read == 0 {
-        return Ok(0);
-    }
-    if !matches!(
-        compression,
-        metadata::Compression::Zstd | metadata::Compression::Xz
-    ) {
-        return Err(KernelError::Invalid);
-    }
+        // For compressed chunked files, we need to find and decompress blocks
+        let chunk_size = u64::from(chunk_size);
+        let mut bytes_read = 0usize;
+        let mut current_offset = offset;
 
-    // For compressed chunked files, we need to find and decompress blocks
-    let chunk_size = u64::from(chunk_size);
-    let mut bytes_read = 0usize;
-    let mut current_offset = offset;
-
-    // Find the starting block
-    let Some((mut block_physical, mut block_logical)) =
-        metadata.find_block(composite, current_offset)
-    else {
-        return Err(KernelError::BadData);
-    };
-
-    while bytes_read < to_read {
-        let next = metadata.next_block(composite, block_logical);
-        let block = checked_chunk_block(
-            payload,
-            decompressed_size,
-            chunk_size,
-            current_offset,
-            block_logical,
-            block_physical,
-            next,
-        )?;
-        let absolute_physical = checked_archive_range(
-            archive_base,
-            archive_size,
-            block.physical.start,
-            u64::try_from(block.physical.len).map_err(|_| KernelError::BadData)?,
-        )?;
-
-        // Check if this block is already in the cache
-        let cached_copy = {
-            let _guard = MetaGuard::new(sb);
-            let mut cache = metadata.block_cache.borrow_mut();
-            match cache.get(composite, block_logical) {
-                Some(cached_data) => {
-                    let to_copy = checked_chunk_copy_len(
-                        cached_data.len(),
-                        block.expected_output_len,
-                        block.offset_in_block,
-                        to_read - bytes_read,
-                    )?;
-                    // Prefetch the source data into CPU cache before copying
-                    prefetch_read(cached_data.as_ptr().wrapping_add(block.offset_in_block));
-
-                    buf[bytes_read..bytes_read + to_copy].copy_from_slice(
-                        &cached_data[block.offset_in_block..block.offset_in_block + to_copy],
-                    );
-                    Some(to_copy)
-                }
-                None => None,
-            }
+        // Find the starting block
+        let Some((mut block_physical, mut block_logical)) =
+            metadata.find_block(composite, current_offset)
+        else {
+            return Err(KernelError::BadData);
         };
 
-        if let Some(to_copy) = cached_copy {
-            bytes_read += to_copy;
-            current_offset = current_offset
-                .checked_add(u64::try_from(to_copy).map_err(|_| KernelError::BadData)?)
-                .ok_or(KernelError::BadData)?;
-        } else {
-            // Read compressed block data
-            let compressed_data = read_archive_range(sb, absolute_physical, dev_block_size)?;
+        while bytes_read < to_read {
+            let next = metadata.next_block(composite, block_logical);
+            let block = checked_chunk_block(
+                payload,
+                decompressed_size,
+                chunk_size,
+                current_offset,
+                block_logical,
+                block_physical,
+                next,
+            )?;
+            let absolute_physical = checked_archive_range(
+                archive_base,
+                archive_size,
+                block.physical.start,
+                u64::try_from(block.physical.len).map_err(|_| KernelError::BadData)?,
+            )?;
 
-            // Allocate decompression buffer for this block
-            let decomp_buf = boxfs_kvmalloc(block.expected_output_len, GFP_KERNEL);
-            if decomp_buf.is_null() {
-                return Err(KernelError::NoMemory);
-            }
+            // Check if this block is already in the cache
+            let cached_copy = {
+                let _guard = MetaGuard::new(sb);
+                let mut cache = metadata.block_cache.borrow_mut();
+                match cache.get(composite, block_logical) {
+                    Some(cached_data) => {
+                        let to_copy = checked_chunk_copy_len(
+                            cached_data.len(),
+                            block.expected_output_len,
+                            block.offset_in_block,
+                            to_read - bytes_read,
+                        )?;
+                        // Prefetch the source data into CPU cache before copying
+                        prefetch_read(cached_data.as_ptr().wrapping_add(block.offset_in_block));
 
-            // Decompress block
-            let mut out_len: usize = 0;
-            let ret = match compression {
-                metadata::Compression::Zstd => boxfs_zstd_decompress(
-                    compressed_data.as_ptr() as *const c_void,
-                    compressed_data.len(),
-                    decomp_buf,
-                    block.expected_output_len,
-                    &mut out_len,
-                ),
-                metadata::Compression::Xz => boxfs_xz_decompress(
-                    compressed_data.as_ptr() as *const c_void,
-                    compressed_data.len(),
-                    decomp_buf,
-                    block.expected_output_len,
-                    &mut out_len,
-                ),
-                _ => {
-                    boxfs_kvfree(decomp_buf);
-                    return Err(KernelError::Invalid);
+                        buf[bytes_read..bytes_read + to_copy].copy_from_slice(
+                            &cached_data[block.offset_in_block..block.offset_in_block + to_copy],
+                        );
+                        Some(to_copy)
+                    }
+                    None => None,
                 }
             };
 
-            if ret != 0 || out_len != block.expected_output_len {
+            if let Some(to_copy) = cached_copy {
+                bytes_read += to_copy;
+                current_offset = current_offset
+                    .checked_add(u64::try_from(to_copy).map_err(|_| KernelError::BadData)?)
+                    .ok_or(KernelError::BadData)?;
+            } else {
+                // Read compressed block data
+                let compressed_data = read_archive_range(sb, absolute_physical, dev_block_size)?;
+
+                // Allocate decompression buffer for this block
+                let decomp_buf = boxfs_kvmalloc(block.expected_output_len, GFP_KERNEL);
+                if decomp_buf.is_null() {
+                    return Err(KernelError::NoMemory);
+                }
+
+                // Decompress block
+                let mut out_len: usize = 0;
+                let ret = match compression {
+                    metadata::Compression::Zstd => boxfs_zstd_decompress(
+                        compressed_data.as_ptr() as *const c_void,
+                        compressed_data.len(),
+                        decomp_buf,
+                        block.expected_output_len,
+                        &mut out_len,
+                    ),
+                    metadata::Compression::Xz => boxfs_xz_decompress(
+                        compressed_data.as_ptr() as *const c_void,
+                        compressed_data.len(),
+                        decomp_buf,
+                        block.expected_output_len,
+                        &mut out_len,
+                    ),
+                    _ => {
+                        boxfs_kvfree(decomp_buf);
+                        return Err(KernelError::Invalid);
+                    }
+                };
+
+                if ret != 0 || out_len != block.expected_output_len {
+                    boxfs_kvfree(decomp_buf);
+                    return Err(if ret != 0 {
+                        KernelError::Io
+                    } else {
+                        KernelError::BadData
+                    });
+                }
+
+                // Copy decompressed data to a Box<[u8]> for caching
+                let decomp_slice = core::slice::from_raw_parts(decomp_buf as *const u8, out_len);
+                let block_data: Box<[u8]> = decomp_slice.into();
                 boxfs_kvfree(decomp_buf);
-                return Err(if ret != 0 {
-                    KernelError::Io
-                } else {
-                    KernelError::BadData
-                });
+
+                let to_copy = checked_chunk_copy_len(
+                    block_data.len(),
+                    block.expected_output_len,
+                    block.offset_in_block,
+                    to_read - bytes_read,
+                )?;
+                // Prefetch the source data into CPU cache before copying
+                prefetch_read(block_data.as_ptr().wrapping_add(block.offset_in_block));
+
+                buf[bytes_read..bytes_read + to_copy].copy_from_slice(
+                    &block_data[block.offset_in_block..block.offset_in_block + to_copy],
+                );
+
+                bytes_read += to_copy;
+                current_offset = current_offset
+                    .checked_add(u64::try_from(to_copy).map_err(|_| KernelError::BadData)?)
+                    .ok_or(KernelError::BadData)?;
+
+                // Insert into cache
+                let _guard = MetaGuard::new(sb);
+                metadata
+                    .block_cache
+                    .borrow_mut()
+                    .insert(composite, block_logical, block_data);
             }
 
-            // Copy decompressed data to a Box<[u8]> for caching
-            let decomp_slice = core::slice::from_raw_parts(decomp_buf as *const u8, out_len);
-            let block_data: Box<[u8]> = decomp_slice.into();
-            boxfs_kvfree(decomp_buf);
-
-            let to_copy = checked_chunk_copy_len(
-                block_data.len(),
-                block.expected_output_len,
-                block.offset_in_block,
-                to_read - bytes_read,
-            )?;
-            // Prefetch the source data into CPU cache before copying
-            prefetch_read(block_data.as_ptr().wrapping_add(block.offset_in_block));
-
-            buf[bytes_read..bytes_read + to_copy].copy_from_slice(
-                &block_data[block.offset_in_block..block.offset_in_block + to_copy],
-            );
-
-            bytes_read += to_copy;
-            current_offset = current_offset
-                .checked_add(u64::try_from(to_copy).map_err(|_| KernelError::BadData)?)
-                .ok_or(KernelError::BadData)?;
-
-            // Insert into cache
-            let _guard = MetaGuard::new(sb);
-            metadata
-                .block_cache
-                .borrow_mut()
-                .insert(composite, block_logical, block_data);
-        }
-
-        // Move to next block if needed
-        if bytes_read < to_read {
-            if current_offset != block.logical_end {
-                return Err(KernelError::BadData);
+            // Move to next block if needed
+            if bytes_read < to_read {
+                if current_offset != block.logical_end {
+                    return Err(KernelError::BadData);
+                }
+                let (next_logical, next_physical) = block.next.ok_or(KernelError::BadData)?;
+                block_logical = next_logical;
+                block_physical = next_physical;
             }
-            let (next_logical, next_physical) = block.next.ok_or(KernelError::BadData)?;
-            block_logical = next_logical;
-            block_physical = next_physical;
         }
-    }
 
-    if bytes_read != to_read {
-        return Err(KernelError::BadData);
+        if bytes_read != to_read {
+            return Err(KernelError::BadData);
+        }
+        Ok(to_read)
     }
-    Ok(to_read)
 }
 
 // ============================================================================
@@ -1141,24 +1166,26 @@ unsafe fn read_chunked_file(
 
 // [spec:box:req:kernel-vfs.root.namespace]
 unsafe fn getattr_impl(sb: *mut SuperBlock, ino: u64) -> Result<(u16, u64, u64), KernelError> {
-    let metadata = get_metadata(sb)?;
-    let block_size = boxfs_sb_blocksize(sb) as u64;
+    unsafe {
+        let metadata = get_metadata(sb)?;
+        let block_size = boxfs_sb_blocksize(sb) as u64;
 
-    // Convert u64 inode to u128 composite
-    let composite = ino_to_composite(ino).ok_or(KernelError::NotFound)?;
-    let record = metadata.get(composite).ok_or(KernelError::NotFound)?;
+        // Convert u64 inode to u128 composite
+        let composite = ino_to_composite(ino).ok_or(KernelError::NotFound)?;
+        let record = metadata.get(composite).ok_or(KernelError::NotFound)?;
 
-    // Tools that size their readlink buffer from st_size need the target
-    // length, not the zero a link record carries as its data size.
-    let size = match &record.data {
-        RecordData::InternalLink { .. } | RecordData::ExternalLink { .. } => {
-            link_target(metadata, composite, record)?.len() as u64
-        }
-        _ => record.size(),
-    };
-    let blocks = size.div_ceil(block_size);
+        // Tools that size their readlink buffer from st_size need the target
+        // length, not the zero a link record carries as its data size.
+        let size = match &record.data {
+            RecordData::InternalLink { .. } | RecordData::ExternalLink { .. } => {
+                link_target(metadata, composite, record)?.len() as u64
+            }
+            _ => record.size(),
+        };
+        let blocks = size.div_ceil(block_size);
 
-    Ok((record.mode, size, blocks))
+        Ok((record.mode, size, blocks))
+    }
 }
 
 // ============================================================================
@@ -1187,23 +1214,25 @@ fn link_target(
 
 // [spec:box:req:kernel-vfs.root.links-and-xattrs]
 unsafe fn readlink_impl(sb: *mut SuperBlock, ino: u64, buf: &mut [u8]) -> Result<(), KernelError> {
-    let metadata = get_metadata(sb)?;
+    unsafe {
+        let metadata = get_metadata(sb)?;
 
-    // Convert u64 inode to u128 composite
-    let composite = ino_to_composite(ino).ok_or(KernelError::NotFound)?;
-    let record = metadata.get(composite).ok_or(KernelError::NotFound)?;
+        // Convert u64 inode to u128 composite
+        let composite = ino_to_composite(ino).ok_or(KernelError::NotFound)?;
+        let record = metadata.get(composite).ok_or(KernelError::NotFound)?;
 
-    let target = link_target(metadata, composite, record)?;
+        let target = link_target(metadata, composite, record)?;
 
-    let target_bytes = target.as_bytes();
-    if target_bytes.len() >= buf.len() {
-        return Err(KernelError::NameTooLong);
+        let target_bytes = target.as_bytes();
+        if target_bytes.len() >= buf.len() {
+            return Err(KernelError::NameTooLong);
+        }
+
+        buf[..target_bytes.len()].copy_from_slice(target_bytes);
+        buf[target_bytes.len()] = 0; // Null terminate
+
+        Ok(())
     }
-
-    buf[..target_bytes.len()].copy_from_slice(target_bytes);
-    buf[target_bytes.len()] = 0; // Null terminate
-
-    Ok(())
 }
 
 // ============================================================================
@@ -1218,113 +1247,115 @@ unsafe fn readahead_impl(
     ino: u64,
     ractl: *mut ReadaheadControl,
 ) -> Result<(), KernelError> {
-    let metadata = get_metadata(sb)?;
-    let dev_block_size = boxfs_sb_blocksize(sb) as u64;
+    unsafe {
+        let metadata = get_metadata(sb)?;
+        let dev_block_size = boxfs_sb_blocksize(sb) as u64;
 
-    // Convert u64 inode to u128 composite
-    let composite = ino_to_composite(ino).ok_or(KernelError::NotFound)?;
-    let record = metadata.get(composite).ok_or(KernelError::NotFound)?;
-    let archive = metadata
-        .get_archive(composite)
-        .ok_or(KernelError::BadData)?;
+        // Convert u64 inode to u128 composite
+        let composite = ino_to_composite(ino).ok_or(KernelError::NotFound)?;
+        let record = metadata.get(composite).ok_or(KernelError::NotFound)?;
+        let archive = metadata
+            .get_archive(composite)
+            .ok_or(KernelError::BadData)?;
 
-    // Get file info
-    let (compression, chunk_size, data_offset, decompressed_size) = match &record.data {
-        RecordData::File {
-            compression,
-            data_offset,
-            decompressed_size,
-            ..
-        } => (*compression, 0u32, *data_offset, *decompressed_size),
-        RecordData::ChunkedFile {
-            compression,
-            block_size,
-            data_offset,
-            decompressed_size,
-            ..
-        } => (*compression, *block_size, *data_offset, *decompressed_size),
-        _ => return Err(KernelError::IsDir),
-    };
-
-    // Process each folio in the readahead window
-    loop {
-        let folio = boxfs_readahead_folio(ractl);
-        if folio.is_null() {
-            break;
-        }
-
-        let folio_offset = boxfs_folio_pos(folio) as u64;
-        let folio_len = boxfs_folio_size(folio);
-
-        // Map the folio for writing
-        let buf_ptr = boxfs_kmap_local_folio(folio, 0);
-        let buf = slice::from_raw_parts_mut(buf_ptr as *mut u8, folio_len);
-
-        // Read data into the folio
-        let result = if chunk_size > 0 {
-            // Chunked file - use block cache
-            let compressed_size = match &record.data {
-                RecordData::ChunkedFile {
-                    compressed_size, ..
-                } => *compressed_size,
-                _ => 0,
-            };
-            read_chunked_file(
-                sb,
-                metadata,
-                composite,
-                compression,
-                chunk_size,
-                data_offset,
-                compressed_size,
-                decompressed_size,
-                buf,
-                folio_offset,
-                dev_block_size,
-                archive.data_offset_base,
-                archive.archive_size,
-            )
-        } else {
-            // Regular file
-            let compressed_size = match &record.data {
-                RecordData::File {
-                    compressed_size, ..
-                } => *compressed_size,
-                _ => 0,
-            };
-            read_file(
-                sb,
+        // Get file info
+        let (compression, chunk_size, data_offset, decompressed_size) = match &record.data {
+            RecordData::File {
                 compression,
                 data_offset,
-                compressed_size,
                 decompressed_size,
-                buf,
-                folio_offset,
-                dev_block_size,
-                archive.data_offset_base,
-                archive.archive_size,
-            )
+                ..
+            } => (*compression, 0u32, *data_offset, *decompressed_size),
+            RecordData::ChunkedFile {
+                compression,
+                block_size,
+                data_offset,
+                decompressed_size,
+                ..
+            } => (*compression, *block_size, *data_offset, *decompressed_size),
+            _ => return Err(KernelError::IsDir),
         };
 
-        boxfs_kunmap_local(buf_ptr);
+        // Process each folio in the readahead window
+        loop {
+            let folio = boxfs_readahead_folio(ractl);
+            if folio.is_null() {
+                break;
+            }
 
-        match result {
-            Ok(bytes_read) => {
-                // Zero any remaining part of the folio
-                if bytes_read < folio_len {
-                    boxfs_folio_zero_segment(folio, bytes_read, folio_len);
+            let folio_offset = boxfs_folio_pos(folio) as u64;
+            let folio_len = boxfs_folio_size(folio);
+
+            // Map the folio for writing
+            let buf_ptr = boxfs_kmap_local_folio(folio, 0);
+            let buf = slice::from_raw_parts_mut(buf_ptr as *mut u8, folio_len);
+
+            // Read data into the folio
+            let result = if chunk_size > 0 {
+                // Chunked file - use block cache
+                let compressed_size = match &record.data {
+                    RecordData::ChunkedFile {
+                        compressed_size, ..
+                    } => *compressed_size,
+                    _ => 0,
+                };
+                read_chunked_file(
+                    sb,
+                    metadata,
+                    composite,
+                    compression,
+                    chunk_size,
+                    data_offset,
+                    compressed_size,
+                    decompressed_size,
+                    buf,
+                    folio_offset,
+                    dev_block_size,
+                    archive.data_offset_base,
+                    archive.archive_size,
+                )
+            } else {
+                // Regular file
+                let compressed_size = match &record.data {
+                    RecordData::File {
+                        compressed_size, ..
+                    } => *compressed_size,
+                    _ => 0,
+                };
+                read_file(
+                    sb,
+                    compression,
+                    data_offset,
+                    compressed_size,
+                    decompressed_size,
+                    buf,
+                    folio_offset,
+                    dev_block_size,
+                    archive.data_offset_base,
+                    archive.archive_size,
+                )
+            };
+
+            boxfs_kunmap_local(buf_ptr);
+
+            match result {
+                Ok(bytes_read) => {
+                    // Zero any remaining part of the folio
+                    if bytes_read < folio_len {
+                        boxfs_folio_zero_segment(folio, bytes_read, folio_len);
+                    }
+                    boxfs_folio_mark_uptodate(folio);
                 }
-                boxfs_folio_mark_uptodate(folio);
+                Err(_) => {
+                    // Error - just unlock, kernel will retry with read_folio
+                }
             }
-            Err(_) => {
-                // Error - just unlock, kernel will retry with read_folio
-            }
+
+            boxfs_folio_unlock(folio);
         }
 
-        boxfs_folio_unlock(folio);
+        Ok(())
     }
-
-    Ok(())
 }
 
 // ============================================================================
@@ -1336,7 +1367,7 @@ unsafe fn readahead_impl(
 /// Returns the attribute size on success, negative errno on failure.
 /// If buffer is provided (size > 0), copies the value into it.
 /// If size is 0, just returns the attribute size.
-#[no_mangle]
+#[unsafe(no_mangle)]
 // [spec:box:req:kernel-abi.root]
 pub extern "C" fn boxfs_rust_getxattr(
     sb: *mut SuperBlock,
@@ -1376,34 +1407,36 @@ unsafe fn getxattr_impl(
     value: *mut c_void,
     size: usize,
 ) -> Result<usize, KernelError> {
-    let metadata = get_metadata(sb)?;
+    unsafe {
+        let metadata = get_metadata(sb)?;
 
-    // Convert u64 inode to u128 composite
-    let composite = ino_to_composite(ino).ok_or(KernelError::NotFound)?;
-    let record = metadata.get(composite).ok_or(KernelError::NotFound)?;
+        // Convert u64 inode to u128 composite
+        let composite = ino_to_composite(ino).ok_or(KernelError::NotFound)?;
+        let record = metadata.get(composite).ok_or(KernelError::NotFound)?;
 
-    // Get the xattr value
-    let xattr_value = metadata
-        .get_xattr(composite, record, name)
-        .ok_or(KernelError::NoData)?;
+        // Get the xattr value
+        let xattr_value = metadata
+            .get_xattr(composite, record, name)
+            .ok_or(KernelError::NoData)?;
 
-    let attr_size = xattr_value.len();
+        let attr_size = xattr_value.len();
 
-    // If size is 0, just return the size needed
-    if size == 0 {
-        return Ok(attr_size);
+        // If size is 0, just return the size needed
+        if size == 0 {
+            return Ok(attr_size);
+        }
+
+        // If buffer is too small, return error
+        if size < attr_size {
+            return Err(KernelError::Range);
+        }
+
+        // Copy value to buffer
+        let buf = core::slice::from_raw_parts_mut(value as *mut u8, size);
+        buf[..attr_size].copy_from_slice(xattr_value);
+
+        Ok(attr_size)
     }
-
-    // If buffer is too small, return error
-    if size < attr_size {
-        return Err(KernelError::Range);
-    }
-
-    // Copy value to buffer
-    let buf = core::slice::from_raw_parts_mut(value as *mut u8, size);
-    buf[..attr_size].copy_from_slice(xattr_value);
-
-    Ok(attr_size)
 }
 
 /// List extended attributes.
@@ -1411,7 +1444,7 @@ unsafe fn getxattr_impl(
 /// Returns the total size of attribute names on success, negative errno on failure.
 /// Names are null-separated (e.g., "user.foo\0user.bar\0").
 /// If size is 0, just returns the total size needed.
-#[no_mangle]
+#[unsafe(no_mangle)]
 // [spec:box:req:kernel-abi.root]
 pub extern "C" fn boxfs_rust_listxattr(
     sb: *mut SuperBlock,
@@ -1432,41 +1465,43 @@ unsafe fn listxattr_impl(
     list: *mut c_char,
     size: usize,
 ) -> Result<usize, KernelError> {
-    let metadata = get_metadata(sb)?;
+    unsafe {
+        let metadata = get_metadata(sb)?;
 
-    // Convert u64 inode to u128 composite
-    let composite = ino_to_composite(ino).ok_or(KernelError::NotFound)?;
-    let record = metadata.get(composite).ok_or(KernelError::NotFound)?;
+        // Convert u64 inode to u128 composite
+        let composite = ino_to_composite(ino).ok_or(KernelError::NotFound)?;
+        let record = metadata.get(composite).ok_or(KernelError::NotFound)?;
 
-    // Calculate total size needed
-    let mut total_size = 0;
-    for name in metadata.list_xattrs(composite, record) {
-        total_size += name.len() + 1; // +1 for null terminator
+        // Calculate total size needed
+        let mut total_size = 0;
+        for name in metadata.list_xattrs(composite, record) {
+            total_size += name.len() + 1; // +1 for null terminator
+        }
+
+        // If size is 0, just return the size needed
+        if size == 0 {
+            return Ok(total_size);
+        }
+
+        // If buffer is too small, return error
+        if size < total_size {
+            return Err(KernelError::Range);
+        }
+
+        // Copy names to buffer
+        let buf = core::slice::from_raw_parts_mut(list as *mut u8, size);
+        let mut pos = 0;
+
+        for name in metadata.list_xattrs(composite, record) {
+            let name_bytes = name.as_bytes();
+            buf[pos..pos + name_bytes.len()].copy_from_slice(name_bytes);
+            pos += name_bytes.len();
+            buf[pos] = 0; // Null terminator
+            pos += 1;
+        }
+
+        Ok(total_size)
     }
-
-    // If size is 0, just return the size needed
-    if size == 0 {
-        return Ok(total_size);
-    }
-
-    // If buffer is too small, return error
-    if size < total_size {
-        return Err(KernelError::Range);
-    }
-
-    // Copy names to buffer
-    let buf = core::slice::from_raw_parts_mut(list as *mut u8, size);
-    let mut pos = 0;
-
-    for name in metadata.list_xattrs(composite, record) {
-        let name_bytes = name.as_bytes();
-        buf[pos..pos + name_bytes.len()].copy_from_slice(name_bytes);
-        pos += name_bytes.len();
-        buf[pos] = 0; // Null terminator
-        pos += 1;
-    }
-
-    Ok(total_size)
 }
 
 #[cfg(test)]
@@ -1655,10 +1690,10 @@ fn kernel_alloc_size(layout: core::alloc::Layout) -> usize {
 #[cfg(all(not(test), not(feature = "std")))]
 unsafe impl core::alloc::GlobalAlloc for KernelAllocator {
     unsafe fn alloc(&self, layout: core::alloc::Layout) -> *mut u8 {
-        boxfs_kvmalloc(kernel_alloc_size(layout), GFP_KERNEL) as *mut u8
+        unsafe { boxfs_kvmalloc(kernel_alloc_size(layout), GFP_KERNEL) as *mut u8 }
     }
 
     unsafe fn dealloc(&self, ptr: *mut u8, _layout: core::alloc::Layout) {
-        boxfs_kvfree(ptr as *mut c_void);
+        unsafe { boxfs_kvfree(ptr as *mut c_void) };
     }
 }

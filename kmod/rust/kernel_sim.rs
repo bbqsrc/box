@@ -132,7 +132,7 @@ struct SimBufferHead {
     data: Vec<u8>,
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn boxfs_sb_bread(_sb: *mut SuperBlock, block: u64) -> *mut BufferHead {
     let guard = device();
     let Some(dev) = guard.as_ref() else {
@@ -150,29 +150,29 @@ pub extern "C" fn boxfs_sb_bread(_sb: *mut SuperBlock, block: u64) -> *mut Buffe
     Box::into_raw(bh) as *mut BufferHead
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn boxfs_sb_bread_unmovable(sb: *mut SuperBlock, block: u64) -> *mut BufferHead {
     boxfs_sb_bread(sb, block)
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn boxfs_brelse(bh: *mut BufferHead) {
     if !bh.is_null() {
         drop(unsafe { Box::from_raw(bh as *mut SimBufferHead) });
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn boxfs_put_bh(bh: *mut BufferHead) {
     boxfs_brelse(bh);
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn boxfs_bh_data(bh: *mut BufferHead) -> *mut c_void {
     unsafe { (*(bh as *mut SimBufferHead)).data.as_mut_ptr() as *mut c_void }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn boxfs_bh_size(bh: *mut BufferHead) -> usize {
     unsafe { (*(bh as *mut SimBufferHead)).data.len() }
 }
@@ -181,17 +181,17 @@ pub extern "C" fn boxfs_bh_size(bh: *mut BufferHead) -> usize {
 // SUPERBLOCK ACCESSORS
 // ============================================================================
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn boxfs_get_sb_info(_sb: *mut SuperBlock) -> *mut c_void {
     sim_superblock() as *mut c_void
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn boxfs_set_metadata(_sb: *mut SuperBlock, metadata: *mut c_void) {
     device().as_mut().expect("attached device").metadata = metadata as usize;
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn boxfs_get_metadata(_sb: *mut SuperBlock) -> *mut c_void {
     match device().as_ref() {
         Some(dev) => dev.metadata as *mut c_void,
@@ -199,27 +199,27 @@ pub extern "C" fn boxfs_get_metadata(_sb: *mut SuperBlock) -> *mut c_void {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn boxfs_set_archive_size(_sb: *mut SuperBlock, size: u64) {
     device().as_mut().expect("attached device").archive_size = size;
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn boxfs_set_trailer_offset(_sb: *mut SuperBlock, offset: u64) {
     device().as_mut().expect("attached device").trailer_offset = offset;
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn boxfs_set_root_ino(_sb: *mut SuperBlock, ino: u64) {
     device().as_mut().expect("attached device").root_ino = ino;
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn boxfs_get_root_ino(_sb: *mut SuperBlock) -> u64 {
     device().as_ref().expect("attached device").root_ino
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn boxfs_meta_lock(_sb: *mut SuperBlock) {
     assert_eq!(
         META_DEPTH.fetch_add(1, Ordering::SeqCst),
@@ -228,7 +228,7 @@ pub extern "C" fn boxfs_meta_lock(_sb: *mut SuperBlock) {
     );
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn boxfs_meta_unlock(_sb: *mut SuperBlock) {
     assert_eq!(
         META_DEPTH.fetch_sub(1, Ordering::SeqCst),
@@ -241,7 +241,7 @@ pub extern "C" fn boxfs_meta_unlock(_sb: *mut SuperBlock) {
 // BLOCK DEVICE
 // ============================================================================
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn boxfs_sb_bdev(_sb: *mut SuperBlock) -> *mut BlockDevice {
     if device().is_some() {
         sim_superblock() as *mut BlockDevice
@@ -250,17 +250,17 @@ pub extern "C" fn boxfs_sb_bdev(_sb: *mut SuperBlock) -> *mut BlockDevice {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn boxfs_sb_blocksize(_sb: *mut SuperBlock) -> u32 {
     SIM_BLOCK_SIZE as u32
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn boxfs_sb_blocksize_bits(_sb: *mut SuperBlock) -> u8 {
     SIM_BLOCK_SIZE.trailing_zeros() as u8
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn boxfs_bdev_nr_bytes(_bdev: *mut BlockDevice) -> i64 {
     let guard = device();
     let dev = guard.as_ref().expect("attached device");
@@ -271,7 +271,7 @@ pub extern "C" fn boxfs_bdev_nr_bytes(_bdev: *mut BlockDevice) -> i64 {
 // DIRECTORY EMISSION
 // ============================================================================
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn boxfs_dir_emit(
     ctx: *mut DirContext,
     name: *const u8,
@@ -292,22 +292,22 @@ pub extern "C" fn boxfs_dir_emit(
     true
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn boxfs_dir_emit_dot(_file: *mut c_void, _ctx: *mut DirContext) -> bool {
     true
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn boxfs_dir_emit_dotdot(_file: *mut c_void, _ctx: *mut DirContext) -> bool {
     true
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn boxfs_dir_ctx_pos(ctx: *mut DirContext) -> i64 {
     unsafe { (*(ctx as *mut SimDirContext)).pos }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn boxfs_dir_ctx_set_pos(ctx: *mut DirContext, pos: i64) {
     unsafe {
         (*(ctx as *mut SimDirContext)).pos = pos;
@@ -318,7 +318,7 @@ pub extern "C" fn boxfs_dir_ctx_set_pos(ctx: *mut DirContext, pos: i64) {
 // ALLOCATION
 // ============================================================================
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn boxfs_kmalloc(size: usize, _flags: u32) -> *mut c_void {
     let buffer = vec![0u8; size].into_boxed_slice();
     let ptr = Box::into_raw(buffer) as *mut u8;
@@ -326,12 +326,12 @@ pub extern "C" fn boxfs_kmalloc(size: usize, _flags: u32) -> *mut c_void {
     ptr as *mut c_void
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn boxfs_kzalloc(size: usize, flags: u32) -> *mut c_void {
     boxfs_kmalloc(size, flags)
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn boxfs_kfree(ptr: *mut c_void) {
     if ptr.is_null() {
         return;
@@ -344,12 +344,12 @@ pub extern "C" fn boxfs_kfree(ptr: *mut c_void) {
     });
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn boxfs_kvmalloc(size: usize, flags: u32) -> *mut c_void {
     boxfs_kmalloc(size, flags)
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn boxfs_kvfree(ptr: *mut c_void) {
     boxfs_kfree(ptr);
 }
@@ -368,27 +368,27 @@ fn c_str(msg: *const u8) -> String {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn boxfs_pr_info(msg: *const u8) {
     eprintln!("boxfs: {}", c_str(msg));
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn boxfs_pr_err(msg: *const u8) {
     eprintln!("boxfs: {}", c_str(msg));
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn boxfs_pr_warn(msg: *const u8) {
     eprintln!("boxfs: {}", c_str(msg));
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn boxfs_pr_debug(msg: *const u8) {
     eprintln!("boxfs: {}", c_str(msg));
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn boxfs_panic(msg: *const u8) -> ! {
     panic!("boxfs: rust panic: {}", c_str(msg));
 }
@@ -420,7 +420,7 @@ fn decompress_into(
     0
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn boxfs_zstd_decompress(
     src: *const c_void,
     src_len: usize,
@@ -438,7 +438,7 @@ pub extern "C" fn boxfs_zstd_decompress(
     )
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn boxfs_xz_decompress(
     src: *const c_void,
     src_len: usize,
@@ -462,52 +462,52 @@ pub extern "C" fn boxfs_xz_decompress(
 
 /// Readahead is folio-driven and has no userspace analogue; the simulation
 /// reports an empty window so `boxfs_rust_readahead` is a no-op.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn boxfs_readahead_folio(_ractl: *mut ReadaheadControl) -> *mut Folio {
     std::ptr::null_mut()
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn boxfs_readahead_pos(_ractl: *mut ReadaheadControl) -> i64 {
     0
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn boxfs_readahead_length(_ractl: *mut ReadaheadControl) -> usize {
     0
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn boxfs_folio_pos(_folio: *mut Folio) -> i64 {
     unreachable!("no folios are handed out by the simulation")
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn boxfs_folio_size(_folio: *mut Folio) -> usize {
     unreachable!("no folios are handed out by the simulation")
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn boxfs_kmap_local_folio(_folio: *mut Folio, _offset: usize) -> *mut c_void {
     unreachable!("no folios are handed out by the simulation")
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn boxfs_kunmap_local(_addr: *mut c_void) {
     unreachable!("no folios are handed out by the simulation")
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn boxfs_folio_mark_uptodate(_folio: *mut Folio) {
     unreachable!("no folios are handed out by the simulation")
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn boxfs_folio_unlock(_folio: *mut Folio) {
     unreachable!("no folios are handed out by the simulation")
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn boxfs_folio_zero_segment(_folio: *mut Folio, _start: usize, _end: usize) {
     unreachable!("no folios are handed out by the simulation")
 }

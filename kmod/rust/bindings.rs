@@ -63,7 +63,7 @@ pub struct KStatfs {
 // External C functions (defined in rust_helpers.c)
 // [spec:box:req:kernel-abi.root]
 // [spec:box:req:kernel-abi.root.helpers-and-buffers]
-extern "C" {
+unsafe extern "C" {
     // Buffer head operations
     pub fn boxfs_sb_bread(sb: *mut SuperBlock, block: u64) -> *mut BufferHead;
     pub fn boxfs_sb_bread_unmovable(sb: *mut SuperBlock, block: u64) -> *mut BufferHead;
@@ -167,20 +167,24 @@ pub unsafe fn read_block(
     sb: *mut SuperBlock,
     block: u64,
 ) -> Option<(*mut BufferHead, &'static [u8])> {
-    let bh = boxfs_sb_bread(sb, block);
-    if bh.is_null() {
-        return None;
+    unsafe {
+        let bh = boxfs_sb_bread(sb, block);
+        if bh.is_null() {
+            return None;
+        }
+
+        let data = boxfs_bh_data(bh) as *const u8;
+        let size = boxfs_bh_size(bh);
+        let slice = core::slice::from_raw_parts(data, size);
+
+        Some((bh, slice))
     }
-
-    let data = boxfs_bh_data(bh) as *const u8;
-    let size = boxfs_bh_size(bh);
-    let slice = core::slice::from_raw_parts(data, size);
-
-    Some((bh, slice))
 }
 
 /// Release a block previously read with `read_block`.
 // [spec:box:req:kernel-abi.root.helpers-and-buffers]
 pub unsafe fn release_block(bh: *mut BufferHead) {
-    boxfs_brelse(bh);
+    unsafe {
+        boxfs_brelse(bh);
+    }
 }
