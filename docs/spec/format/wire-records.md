@@ -33,9 +33,12 @@
 > available in the trailer.
 
 > [spec:box:req:wire.root.bounds.attrmap-envelope]
-> An attribute-map byte count MUST equal the bytes consumed by its encoded entry
-> count and entries; truncated keys or values remain ordinary trailer-decoding
-> failures.
+> An attribute-map byte count MUST equal either the bytes consumed by its
+> encoded entry count and entries, or that value plus eight: legacy writers
+> measured the map by seeking back over it and so included the count field's
+> own eight bytes in the declared total. Decoders MUST accept exactly these two
+> values and reject any other; writers MUST emit the entries-only form.
+> Truncated keys or values remain ordinary trailer-decoding failures.
 
 ## Record model
 

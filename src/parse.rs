@@ -424,13 +424,21 @@ pub fn parse_attrmap(data: &[u8]) -> ParseResult<crate::AttrMap> {
         )?;
     }
 
-    if pos != envelope.len() {
+    // Legacy writers measured the map by seeking back over it, so their
+    // declared count also covers the byte-count field's own eight bytes and
+    // the envelope extends eight bytes past the encoded entries.
+    if pos != envelope.len() && pos.saturating_add(8) != envelope.len() {
         return Err(ParseError::InvalidData(
             "attribute-map byte count does not match encoded entries",
         ));
     }
 
-    Ok((map, envelope_end))
+    let consumed = checked_end(
+        byte_count_consumed,
+        pos,
+        "attribute-map endpoint overflows usize",
+    )?;
+    Ok((map, consumed))
 }
 
 // ============================================================================
@@ -973,6 +981,23 @@ mod tests {
         let (attrs, consumed) = parse_attrmap(&empty).unwrap();
         assert!(attrs.is_empty());
         assert_eq!(consumed, empty.len());
+
+        // v0-era writers measured the map by seeking back over it, so an empty
+        // map declares 9 bytes: its own u64 plus the one-byte entry count.
+        let mut legacy_empty = Vec::from(9u64.to_le_bytes());
+        legacy_empty.push(0x80);
+        legacy_empty.extend_from_slice(&[0u8; 8]); // next trailer field
+        let (attrs, consumed) = parse_attrmap(&legacy_empty).unwrap();
+        assert!(attrs.is_empty());
+        assert_eq!(consumed, 9);
+
+        // One entry (key 1, two value bytes) is 5 content bytes, declared 13.
+        let mut legacy_entry = Vec::from(13u64.to_le_bytes());
+        legacy_entry.extend_from_slice(&[0x81, 0x81, 0x82, 0xAA, 0xBB]);
+        legacy_entry.extend_from_slice(&[0u8; 8]);
+        let (attrs, consumed) = parse_attrmap(&legacy_entry).unwrap();
+        assert_eq!(consumed, 13);
+        assert_eq!(attrs.get(&1).map(|v| v.as_ref()), Some(&[0xAA, 0xBB][..]));
 
         let mut trailing = Vec::from(2u64.to_le_bytes());
         trailing.extend_from_slice(&[0x80, 0xAA]);

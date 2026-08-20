@@ -144,6 +144,7 @@ rule_versions (
 )
 
 assertions (
+    {id format.legacy-attrmap-envelope, kind @doing, author "brendan@bbqsrc.net", at 2026-08-20T14:10:47.434851Z}
     {id io.automatic-chunked-creation, kind @complete, author "brendan@bbqsrc.net", at 2026-08-15T22:38:56.193165Z}
 )
 
@@ -360,6 +361,17 @@ impl_evidence (
         {impl_name rust, rule cli-safety.root.output-integrity}
         {impl_name rust, rule cli-selection.root}
         {impl_name rust, rule cli-selection.root.collection}
+    ), rule_versions_seen (
+        {id cli-commands.root, version 0}
+        {id cli-commands.root.create, version 1}
+        {id cli-commands.root.extract, version 0}
+        {id cli-commands.root.inspect, version 0}
+        {id cli-commands.root.validate, version 0}
+        {id cli-safety.root, version 0}
+        {id cli-safety.root.failure-status, version 0}
+        {id cli-safety.root.output-integrity, version 0}
+        {id cli-selection.root, version 0}
+        {id cli-selection.root.collection, version 0}
     )}
     {id integration.fskit, covered_rules (
         fskit-extension.root
@@ -563,6 +575,13 @@ impl_evidence (
         {id chunked-io.root.slice-extraction, version 0}
         {id chunked-io.root.sync-range, version 0}
     )}
+    {id io.explicit-chunked-selection, covered_rules (
+        chunked-io.root.explicit-creation
+        cli-selection.root.representation
+    ), covered_claims (
+        {impl_name rust, rule chunked-io.root.explicit-creation}
+        {impl_name rust, rule cli-selection.root.representation}
+    )}
     {id io.sans, covered_rules (
         archive-state.root
         archive-state.root.reader
@@ -618,13 +637,6 @@ impl_evidence (
         {id sync-io.root.open, version 0}
         {id sync-io.root.read, version 0}
         {id sync-io.root.write, version 0}
-    )}
-    {id io.explicit-chunked-selection, covered_rules (
-        chunked-io.root.explicit-creation
-        cli-selection.root.representation
-    ), covered_claims (
-        {impl_name rust, rule chunked-io.root.explicit-creation}
-        {impl_name rust, rule cli-selection.root.representation}
     )}
 )
 
