@@ -1,6 +1,6 @@
 schema_version 7
 
-last_sync_at 2026-08-15T21:50:30.711625Z
+last_sync_at 2026-08-20T14:12:23.703973Z
 
 rule_versions (
     {id archive-state.root, version 0}
@@ -30,11 +30,11 @@ rule_versions (
     {id checksums.root.verification.extraction-statistics, version 0}
     {id chunked-io.root, version 0}
     {id chunked-io.root.async-range, version 0}
-    {id chunked-io.root.automatic-creation, version 0}
     {id chunked-io.root.block-cache, version 0}
     {id chunked-io.root.block-decompression, version 0}
     {id chunked-io.root.block-index-entry, version 0}
     {id chunked-io.root.block-queries, version 0}
+    {id chunked-io.root.explicit-creation, version 0}
     {id chunked-io.root.explicit-insert, version 0}
     {id chunked-io.root.seek-reader, version 0}
     {id chunked-io.root.slice-extraction, version 0}
@@ -49,6 +49,7 @@ rule_versions (
     {id cli-safety.root.output-integrity, version 0}
     {id cli-selection.root, version 0}
     {id cli-selection.root.collection, version 0}
+    {id cli-selection.root.representation, version 0}
     {id compression.root, version 0}
     {id compression.root.codecs, version 0}
     {id compression.root.stored, version 0}
@@ -143,8 +144,12 @@ rule_versions (
     {id wire.root.primitives, version 0}
 )
 
+derived_priorities (
+    {id format.legacy-attrmap-envelope, priority 0, derived_at 2026-08-20T14:12:23.703973Z}
+)
+
 assertions (
-    {id format.legacy-attrmap-envelope, kind @doing, author "brendan@bbqsrc.net", at 2026-08-20T14:10:47.434851Z}
+    {id format.legacy-attrmap-envelope, kind @complete, author "brendan@bbqsrc.net", at 2026-08-20T14:12:44.076096Z}
     {id io.automatic-chunked-creation, kind @complete, author "brendan@bbqsrc.net", at 2026-08-15T22:38:56.193165Z}
 )
 
@@ -164,6 +169,7 @@ impl_evidence (
         {id compression.root.codecs, version 0}
         {id compression.root.stored, version 0}
         {id compression.root.stream-state, version 0}
+        {id dictionaries.root, version 0}
     )}
     {id format.fst, covered_rules (
         fst-format.root
@@ -311,6 +317,12 @@ impl_evidence (
         {impl_name rust, rule wire.root.header}
         {impl_name rust, rule wire.root.primitives}
     ), rule_versions_seen (
+        {id attributes.root, version 0}
+        {id attributes.root.integrity, version 0}
+        {id dictionaries.root, version 0}
+        {id fst-format.root, version 0}
+        {id fst-format.root.validation, version 0}
+        {id paths.root, version 0}
         {id records.root, version 0}
         {id records.root.file-records, version 0}
         {id records.root.non-file-records, version 0}
@@ -320,6 +332,8 @@ impl_evidence (
         {id records.root.references.insertion-target, version 0}
         {id records.root.references.resolution, version 0}
         {id records.root.type-byte, version 0}
+        {id versioning.root, version 0}
+        {id versioning.root.v1, version 0}
         {id wire.root, version 0}
         {id wire.root.bounds, version 0}
         {id wire.root.bounds.attrmap-envelope, version 0}
@@ -362,6 +376,7 @@ impl_evidence (
         {impl_name rust, rule cli-selection.root}
         {impl_name rust, rule cli-selection.root.collection}
     ), rule_versions_seen (
+        {id checksums.root.verification.cli-failure, version 0}
         {id cli-commands.root, version 0}
         {id cli-commands.root.create, version 1}
         {id cli-commands.root.extract, version 0}
@@ -441,6 +456,7 @@ impl_evidence (
         {impl_name rust, rule kernel-vfs.root.mount-lifecycle}
         {impl_name rust, rule kernel-vfs.root.namespace}
     ), rule_versions_seen (
+        {id attributes.root.standard-keys, version 0}
         {id kernel-abi.root, version 0}
         {id kernel-abi.root.helpers-and-buffers, version 0}
         {id kernel-abi.root.ownership-and-errors, version 0}
@@ -467,6 +483,7 @@ impl_evidence (
         {impl_name rust, rule projfs-provider.root.lifecycle}
         {impl_name rust, rule projfs-provider.root.placeholders}
     ), rule_versions_seen (
+        {id attributes.root.standard-keys, version 0}
         {id projfs-provider.root, version 0}
         {id projfs-provider.root.enumeration, version 0}
         {id projfs-provider.root.file-data-and-errors, version 0}
@@ -520,6 +537,15 @@ impl_evidence (
         {id async-io.root.read, version 0}
         {id async-io.root.streaming-insert, version 0}
         {id async-io.root.writer-lifecycle, version 0}
+        {id checksums.root.logical-content-domain, version 0}
+        {id checksums.root.verification, version 0}
+        {id checksums.root.verification.checksum-less, version 0}
+        {id checksums.root.verification.extraction-statistics, version 0}
+        {id chunked-io.root.async-range, version 0}
+        {id chunked-io.root.block-cache, version 0}
+        {id chunked-io.root.block-decompression, version 0}
+        {id chunked-io.root.seek-reader, version 0}
+        {id chunked-io.root.slice-extraction, version 0}
         {id extraction.root, version 0}
         {id extraction.root.checksum-verification, version 0}
         {id extraction.root.external-symlink, version 0}
@@ -529,17 +555,13 @@ impl_evidence (
         {id extraction.root.progress, version 0}
         {id extraction.root.safety-options, version 0}
         {id extraction.root.selection, version 2}
+        {id paths.root.extraction-gates, version 1}
+        {id records.root.references.resolution, version 0}
         {id validation.root, version 0}
         {id validation.root.parallel, version 0}
         {id validation.root.payload-hash, version 0}
         {id validation.root.results, version 0}
-    )}
-    {id io.automatic-chunked-creation, covered_rules (
-        chunked-io.root.automatic-creation
-    ), covered_claims (
-        {impl_name rust, rule chunked-io.root.automatic-creation}
-    ), rule_versions_seen (
-        {id chunked-io.root.automatic-creation, version 0}
+        {id wire.root.bounds, version 0}
     )}
     {id io.chunked, covered_rules (
         chunked-io.root
@@ -581,6 +603,9 @@ impl_evidence (
     ), covered_claims (
         {impl_name rust, rule chunked-io.root.explicit-creation}
         {impl_name rust, rule cli-selection.root.representation}
+    ), rule_versions_seen (
+        {id chunked-io.root.explicit-creation, version 0}
+        {id cli-selection.root.representation, version 0}
     )}
     {id io.sans, covered_rules (
         archive-state.root
@@ -611,6 +636,16 @@ impl_evidence (
         {id archive-state.root.reader, version 0}
         {id archive-state.root.record-index, version 0}
         {id archive-state.root.writer, version 0}
+        {id attributes.root, version 0}
+        {id attributes.root.integrity, version 0}
+        {id attributes.root.standard-keys, version 0}
+        {id attributes.root.types, version 0}
+        {id chunked-io.root.block-index-entry, version 0}
+        {id chunked-io.root.block-queries, version 0}
+        {id fst-queries.root.archive-indexes, version 0}
+        {id fst-queries.root.predecessor, version 0}
+        {id records.root.references.external-header-flag, version 0}
+        {id records.root.references.insertion-target, version 0}
         {id sans-io.root, version 0}
         {id sans-io.root.alignment, version 0}
         {id sans-io.root.data-location, version 0}
@@ -632,11 +667,23 @@ impl_evidence (
         {impl_name rust, rule sync-io.root.read}
         {impl_name rust, rule sync-io.root.write}
     ), rule_versions_seen (
+        {id checksums.root.verification, version 0}
+        {id checksums.root.verification.checksum-less, version 0}
+        {id checksums.root.verification.extraction-statistics, version 0}
+        {id chunked-io.root.block-decompression, version 0}
+        {id chunked-io.root.slice-extraction, version 0}
+        {id chunked-io.root.sync-range, version 0}
+        {id paths.root.extraction-gates, version 1}
+        {id records.root.references.external-header-flag, version 0}
+        {id records.root.references.insertion-target, version 0}
+        {id records.root.references.resolution, version 0}
+        {id sans-io.root.hierarchy, version 0}
         {id sync-io.root, version 0}
         {id sync-io.root.extraction-validation, version 2}
         {id sync-io.root.open, version 0}
         {id sync-io.root.read, version 0}
         {id sync-io.root.write, version 0}
+        {id wire.root.bounds, version 0}
     )}
 )
 

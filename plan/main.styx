@@ -128,6 +128,7 @@ children (
                 id format.legacy-attrmap-envelope
                 title "Accept legacy inclusive attribute-map byte counts"
                 kind @fix
+                sealed true
                 log (
                     {
                         at 2026-08-20T14:10:47.434851Z
@@ -141,6 +142,13 @@ children (
                         author "brendan@bbqsrc.net"
                         kind @note
                         text "Fleet incident: v0 .drb bundles failed to decode after the unpinned box bump — \"attribute map at trailer byte 60 declares 9 bytes ... 0 entries consume 1 bytes\". v0-era writers (and pre-sans-io v1 writers) measured attr maps by seeking back over them, so declared byte counts include the count field's own 8 bytes. Decoders now accept exactly both forms (entries-only, or +8 legacy); spec rule wire.root.bounds.attrmap-envelope amended to match."
+                    }
+
+                    {
+                        at 2026-08-20T14:12:44.076096Z
+                        author "brendan@bbqsrc.net"
+                        kind @status
+                        text "Doing → Done (nplan complete)"
                     }
                 )
             }
