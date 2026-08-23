@@ -164,7 +164,7 @@ async fn extraction_selects_one_record_or_one_recursive_subtree() {
     assert!(!recursive_output.join("other.txt").exists());
 }
 
-// [spec:box:req:extraction.root.materialization/test/integration]
+// [spec:box:req:extraction.root.materialization+1/test/integration]
 #[tokio::test]
 async fn extraction_materializes_and_truncates_file_kinds() {
     let temp = tempfile::tempdir().unwrap();
@@ -564,7 +564,7 @@ async fn parallel_extraction_reports_totals_paths_counts_and_finished() {
     )));
 }
 
-// [spec:box:req:extraction.root.materialization/test/integration]
+// [spec:box:req:extraction.root.materialization+1/test/integration]
 // [spec:box:req:extraction.root.checksum-verification/test/integration]
 // [spec:box:sem:sync-io.root.extraction-validation+2/test/integration]
 #[tokio::test]
@@ -654,7 +654,7 @@ async fn serial_extraction_flushes_before_verification() {
 ///
 /// Both paths are covered because they are separate code with the same
 /// ordering to get wrong, and a fix applied to one of them looks complete.
-// [spec:box:req:extraction.root.attributes/test/integration]
+// [spec:box:req:extraction.root.materialization+1/test/integration]
 #[tokio::test]
 async fn extraction_preserves_setuid_through_the_write() {
     use std::os::unix::fs::PermissionsExt;

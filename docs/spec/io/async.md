@@ -88,13 +88,23 @@
 > retains each indexed child key and validates it against the child record name;
 > legacy traversal accepts only validated single-component child names.
 
-> [spec:box:req:extraction.root.materialization]
+> [spec:box:req:extraction.root.materialization+1]
 > Extraction MUST create needed parent directories, create or truncate output
 > files, and write each regular or chunked record's decompressed payload. On
 > Unix it MUST attempt to apply the resolved mode to extracted files; when
 > extended attributes are requested it MUST attempt to restore archived Linux
 > xattrs, while unsupported platforms and individual metadata failures MAY
 > leave them unset.
+>
+> Applying the mode means the extracted file carries it once extraction
+> finishes, not that a chmod was issued at some point during it. The order is
+> therefore fixed: the mode is applied after the payload is written, never
+> before. Linux clears `S_ISUID` and `S_ISGID` on write for a process without
+> `CAP_FSETID`, so a mode set ahead of the content is undone by the content —
+> an extraction that satisfied the first paragraph by calling chmod early
+> would still produce a file whose setuid bit is gone, and report success.
+> That failure has no symptom at the archive layer and surfaces as a setuid
+> program that silently does not elevate.
 
 > [spec:box:req:extraction.root.internal-symlink]
 > An internal symlink MUST resolve its target record index to the target's full

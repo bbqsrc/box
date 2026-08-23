@@ -2181,7 +2181,7 @@ impl BoxFileReader {
     // [spec:box:req:checksums.root.verification]
     // [spec:box:sem:checksums.root.verification.extraction-statistics]
     // [spec:box:req:records.root.references.resolution]
-    // [spec:box:req:extraction.root.materialization]
+    // [spec:box:req:extraction.root.materialization+1]
     // [spec:box:req:extraction.root.internal-symlink]
     // [spec:box:req:extraction.root.external-symlink]
     // [spec:box:req:extraction.root.checksum-verification]
@@ -2455,7 +2455,7 @@ struct ExtractFileResult {
 /// This is a standalone function so it can be spawned as a task.
 /// Does NOT perform checksum verification - that happens separately in the validation pipeline.
 #[allow(clippy::too_many_arguments)]
-// [spec:box:req:extraction.root.materialization]
+// [spec:box:req:extraction.root.materialization+1]
 async fn extract_single_file_from_mmap(
     mmap: Arc<MemoryMappedFile>,
     archive_offset: u64,
@@ -2653,7 +2653,7 @@ async fn extract_single_file_from_mmap(
 /// Chunked files contain independently-compressed blocks that decompress sequentially.
 /// Does NOT perform checksum verification - that happens separately in the validation pipeline.
 #[allow(clippy::too_many_arguments)]
-// [spec:box:req:extraction.root.materialization]
+// [spec:box:req:extraction.root.materialization+1]
 // [spec:box:sem:chunked-io.root.slice-extraction]
 async fn extract_single_chunked_file_from_mmap(
     mmap: Arc<MemoryMappedFile>,
