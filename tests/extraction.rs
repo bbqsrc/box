@@ -642,3 +642,72 @@ async fn serial_extraction_flushes_before_verification() {
         xz_payload
     );
 }
+
+/// A setuid bit must survive extraction, on both the whole-file and the chunked
+/// path.
+///
+/// Linux clears S_ISUID and S_ISGID when a file is written by a process without
+/// CAP_FSETID. Setting the mode before writing the content therefore produces a
+/// file that is 0755 no matter what the archive said, and nothing reports it —
+/// the extraction succeeds, the bits are simply gone. That is how a packaged
+/// sudo ships inert.
+///
+/// Both paths are covered because they are separate code with the same
+/// ordering to get wrong, and a fix applied to one of them looks complete.
+// [spec:box:req:extraction.root.attributes/test/integration]
+#[tokio::test]
+async fn extraction_preserves_setuid_through_the_write() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = tempfile::tempdir().unwrap();
+    let archive = temp.path().join("setuid.box");
+    // Long enough that the chunked entry is genuinely written in pieces, so the
+    // two paths differ in more than which function is called.
+    let chunked_payload = b"chunked setuid payload".repeat(40);
+
+    let mut writer = BoxFileWriter::create(&archive).await.unwrap();
+
+    let whole = BoxPath::new("whole").unwrap();
+    insert_file(&mut writer, "whole", b"whole payload", HashMap::new()).await;
+    writer
+        .set_attr(&whole, attrs::UNIX_MODE, AttrValue::Vu32(0o104755))
+        .unwrap();
+
+    let chunked = BoxPath::new("chunked").unwrap();
+    writer
+        .insert_chunked(
+            chunked.clone(),
+            std::io::Cursor::new(chunked_payload.clone()),
+            64,
+            Compression::Stored,
+            HashMap::new(),
+        )
+        .await
+        .unwrap();
+    writer
+        .set_attr(&chunked, attrs::UNIX_MODE, AttrValue::Vu32(0o104755))
+        .unwrap();
+    writer.finish().await.unwrap();
+
+    let out = temp.path().join("out");
+    let reader = BoxFileReader::open(&archive).await.unwrap();
+    reader.extract_all(&out).await.unwrap();
+
+    for name in ["whole", "chunked"] {
+        let mode = std::fs::metadata(out.join(name))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(
+            mode & 0o7777,
+            0o4755,
+            "{name} extracted as {:o}, so the setuid bit did not survive the write",
+            mode & 0o7777
+        );
+    }
+
+    // The content still has to be right: an ordering fix that dropped or
+    // truncated the payload would otherwise pass the mode assertion above.
+    assert_eq!(std::fs::read(out.join("whole")).unwrap(), b"whole payload");
+    assert_eq!(std::fs::read(out.join("chunked")).unwrap(), chunked_payload);
+}

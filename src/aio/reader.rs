@@ -2034,6 +2034,14 @@ impl BoxFileReader {
                     .await
                     .map_err(|e| ExtractError::CreateFileFailed(e, out_path.to_path_buf()))?;
 
+                let out_file = tokio::io::BufWriter::new(out_file);
+                self.decompress(file, out_file)
+                    .await
+                    .map_err(|e| ExtractError::DecompressionFailed(e, path.to_path_buf()))?;
+
+                // After the content, never before it: Linux clears setuid and
+                // setgid when a file is written by a process without CAP_FSETID,
+                // so a mode set ahead of the write is undone by the write.
                 #[cfg(unix)]
                 {
                     use std::os::unix::fs::PermissionsExt;
@@ -2041,11 +2049,6 @@ impl BoxFileReader {
                     let permissions = std::fs::Permissions::from_mode(mode);
                     fs::set_permissions(&out_path, permissions).await.ok();
                 }
-
-                let out_file = tokio::io::BufWriter::new(out_file);
-                self.decompress(file, out_file)
-                    .await
-                    .map_err(|e| ExtractError::DecompressionFailed(e, path.to_path_buf()))?;
 
                 Ok(())
             }
@@ -2154,6 +2157,14 @@ impl BoxFileReader {
                     .await
                     .map_err(|e| ExtractError::CreateFileFailed(e, out_path.to_path_buf()))?;
 
+                let out_file = tokio::io::BufWriter::new(out_file);
+                self.decompress_chunked(file, record_index, out_file)
+                    .await
+                    .map_err(|e| ExtractError::DecompressionFailed(e, path.to_path_buf()))?;
+
+                // After the content, never before it: Linux clears setuid and
+                // setgid when a file is written by a process without CAP_FSETID,
+                // so a mode set ahead of the write is undone by the write.
                 #[cfg(unix)]
                 {
                     use std::os::unix::fs::PermissionsExt;
@@ -2161,11 +2172,6 @@ impl BoxFileReader {
                     let permissions = std::fs::Permissions::from_mode(mode);
                     fs::set_permissions(&out_path, permissions).await.ok();
                 }
-
-                let out_file = tokio::io::BufWriter::new(out_file);
-                self.decompress_chunked(file, record_index, out_file)
-                    .await
-                    .map_err(|e| ExtractError::DecompressionFailed(e, path.to_path_buf()))?;
 
                 Ok(())
             }
@@ -2203,6 +2209,14 @@ impl BoxFileReader {
                     .await
                     .map_err(|e| ExtractError::CreateFileFailed(e, out_path.to_path_buf()))?;
 
+                let out_file = tokio::io::BufWriter::new(out_file);
+                self.decompress(file, out_file)
+                    .await
+                    .map_err(|e| ExtractError::DecompressionFailed(e, path.to_path_buf()))?;
+
+                // After the content, never before it: Linux clears setuid and
+                // setgid when a file is written by a process without CAP_FSETID,
+                // so a mode set ahead of the write is undone by the write.
                 #[cfg(unix)]
                 {
                     use std::os::unix::fs::PermissionsExt;
@@ -2210,11 +2224,6 @@ impl BoxFileReader {
                     let permissions = std::fs::Permissions::from_mode(mode);
                     fs::set_permissions(&out_path, permissions).await.ok();
                 }
-
-                let out_file = tokio::io::BufWriter::new(out_file);
-                self.decompress(file, out_file)
-                    .await
-                    .map_err(|e| ExtractError::DecompressionFailed(e, path.to_path_buf()))?;
 
                 stats.files_extracted += 1;
                 stats.bytes_written += file.decompressed_length;
@@ -2365,6 +2374,14 @@ impl BoxFileReader {
                     .await
                     .map_err(|e| ExtractError::CreateFileFailed(e, out_path.to_path_buf()))?;
 
+                let out_file = tokio::io::BufWriter::new(out_file);
+                self.decompress_chunked(file, record_index, out_file)
+                    .await
+                    .map_err(|e| ExtractError::DecompressionFailed(e, path.to_path_buf()))?;
+
+                // After the content, never before it: Linux clears setuid and
+                // setgid when a file is written by a process without CAP_FSETID,
+                // so a mode set ahead of the write is undone by the write.
                 #[cfg(unix)]
                 {
                     use std::os::unix::fs::PermissionsExt;
@@ -2372,11 +2389,6 @@ impl BoxFileReader {
                     let permissions = std::fs::Permissions::from_mode(mode);
                     fs::set_permissions(&out_path, permissions).await.ok();
                 }
-
-                let out_file = tokio::io::BufWriter::new(out_file);
-                self.decompress_chunked(file, record_index, out_file)
-                    .await
-                    .map_err(|e| ExtractError::DecompressionFailed(e, path.to_path_buf()))?;
 
                 stats.files_extracted += 1;
                 stats.bytes_written += file.decompressed_length;
