@@ -116,12 +116,16 @@ impl<'a> DeserializeBorrowed<'a> for AttrMap {
         }
 
         let consumed = (*pos).saturating_sub(count_offset) as u64;
-        if consumed != byte_count {
+        // Legacy writers measured the map by seeking back over it, so their
+        // declared count also covers the byte-count field's own eight bytes.
+        let legacy_consumed = consumed.saturating_add(8);
+        if consumed != byte_count && legacy_consumed != byte_count {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
                 format!(
                     "attribute map at trailer byte {byte_count_offset} declares {byte_count} \
-                     bytes after its byte-count field, but its {len} entries consume {consumed} bytes"
+                     bytes after its byte-count field, but its {len} entries consume {consumed} \
+                     bytes ({legacy_consumed} counting the byte-count field itself)"
                 ),
             ));
         }

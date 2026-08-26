@@ -463,6 +463,70 @@ mod tests {
         ));
     }
 
+    // [spec:box:def:versioning.root.v0/test/unit]
+    // [spec:box:req:wire.root.bounds.attrmap-envelope/test/unit]
+    #[test]
+    fn v0_metadata_accepts_legacy_inclusive_attrmap_byte_counts() {
+        // v0-era writers measured attribute maps by seeking back over them,
+        // so every declared byte count also covers its own u64 field.
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&[0x81, 0x81]); // root: record index 1
+        buf.push(0x81); // one record
+        buf.push(0x00); // v0 whole-byte record type: File
+        buf.push(0x00); // compression: Stored
+        buf.extend_from_slice(&2u64.to_le_bytes()); // compressed length
+        buf.extend_from_slice(&2u64.to_le_bytes()); // decompressed length
+        buf.extend_from_slice(&32u64.to_le_bytes()); // data offset
+        buf.push(0x84);
+        buf.extend_from_slice(b"file");
+        // file attrs: one entry (key 0, two value bytes) is 5 content bytes,
+        // declared as 13
+        buf.extend_from_slice(&13u64.to_le_bytes());
+        buf.extend_from_slice(&[0x81, 0x80, 0x82, 0xAA, 0xBB]);
+        buf.push(0x81); // one v0 attribute key (no type byte)
+        buf.push(0x84);
+        buf.extend_from_slice(b"user");
+        // archive attrs close the trailer: empty map declared as 9
+        buf.extend_from_slice(&9u64.to_le_bytes());
+        buf.push(0x80);
+
+        let meta = ArchiveReader::parse_metadata(&buf, 0).unwrap();
+        assert_eq!(meta.root.len(), 1);
+        assert_eq!(meta.root[0].get(), 1);
+        assert_eq!(meta.attr_keys.len(), 1);
+        assert_eq!(meta.attr_keys[0].name, "user");
+        assert!(meta.attrs.is_empty());
+        let Record::File(file) = &meta.records[0] else {
+            panic!("expected a file record");
+        };
+        assert_eq!(file.name, "file");
+        assert_eq!(
+            file.attrs.get(&0).map(|v| v.as_ref()),
+            Some(&[0xAA, 0xBB][..])
+        );
+    }
+
+    // [spec:box:req:wire.root.bounds.attrmap-envelope/test/unit]
+    #[test]
+    fn v0_metadata_rejects_mismatched_attrmap_byte_counts() {
+        let empty_v0 = |declared: u64| {
+            let mut buf = Vec::new();
+            buf.push(0x80); // no root entries
+            buf.push(0x80); // no records
+            buf.push(0x80); // no attribute keys
+            buf.extend_from_slice(&declared.to_le_bytes());
+            buf.push(0x80); // zero archive attributes
+            buf
+        };
+
+        // Both the entries-only count and the legacy inclusive count parse.
+        assert!(ArchiveReader::parse_metadata(&empty_v0(1), 0).is_ok());
+        assert!(ArchiveReader::parse_metadata(&empty_v0(9), 0).is_ok());
+
+        let err = ArchiveReader::parse_metadata(&empty_v0(5), 0).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+    }
+
     // [spec:box:sem:sans-io.root.data-location/test/unit]
     #[test]
     fn data_locations_reject_embedded_archive_offset_overflow() {
