@@ -65,7 +65,6 @@ std = [
     "dep:lru",
     "dep:thiserror",
     "dep:digest",
-    "dep:sysinfo",
     "dep:tempfile",
     "dep:string-interner",
 ]
@@ -75,7 +74,8 @@ alloc = []
 kernel = ["alloc"]
 
 reader = ["std"]
-writer = ["reader"]
+# The writer sizes its buffers to the memory available, which sysinfo reads.
+writer = ["reader", "dep:sysinfo"]
 
 xz = ["dep:xz2"]
 zstd = ["dep:zstd", "dep:zstd-safe"]
