@@ -55,6 +55,25 @@ fn checked_archive_data_offset(archive_offset: u64, record_offset: u64) -> std::
         .ok_or_else(|| invalid_chunked_data("archive and record data offsets overflow u64"))
 }
 
+/// mmap-io accepts an empty segment at any offset. An empty record whose data
+/// starts past the end of the archive is out of bounds all the same.
+pub(crate) fn checked_segment(
+    mmap: Arc<MemoryMappedFile>,
+    offset: u64,
+    len: u64,
+) -> mmap_io::errors::Result<Segment> {
+    mmap_io::utils::ensure_in_bounds(offset, len, mmap.len())?;
+    Segment::new(mmap, offset, len)
+}
+
+/// Borrowed from the segment, not from a view guard, so the bytes live as long
+/// as the segment does. Read-only mappings only.
+pub(crate) fn segment_bytes(segment: &Segment) -> mmap_io::errors::Result<&[u8]> {
+    segment
+        .parent()
+        .as_slice_bytes(segment.offset(), segment.len())
+}
+
 pub(super) fn logical_file_buffer(length: u64) -> std::io::Result<Vec<u8>> {
     let capacity = usize::try_from(length).map_err(|_| {
         invalid_chunked_data(format!(
@@ -516,7 +535,7 @@ impl BoxFileReader {
         let trailer_len = file_size - trailer_offset;
 
         let trailer_segment =
-            Segment::new(mmap.into(), trailer_offset, trailer_len).map_err(|e| {
+            checked_segment(mmap.into(), trailer_offset, trailer_len).map_err(|e| {
                 OpenError::invalid_trailer_at(
                     std::io::Error::other(e),
                     header.version,
@@ -526,7 +545,7 @@ impl BoxFileReader {
                 )
             })?;
 
-        let trailer_data = trailer_segment.as_slice().map_err(|e| {
+        let trailer_data = segment_bytes(&trailer_segment).map_err(|e| {
             OpenError::invalid_trailer_at(
                 std::io::Error::other(e),
                 header.version,
@@ -644,7 +663,7 @@ impl BoxFileReader {
     ) -> std::io::Result<()> {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let segment = self.memory_map(record)?;
-        let data = segment.as_slice().map_err(std::io::Error::other)?;
+        let data = segment_bytes(&segment).map_err(std::io::Error::other)?;
         let cursor = std::io::Cursor::new(data);
         let mut buf_reader = tokio::io::BufReader::new(cursor);
 
@@ -746,7 +765,7 @@ impl BoxFileReader {
 
         // Memory-map the entire chunked file data region
         let segment = self.memory_map_chunked(record)?;
-        let all_data = segment.as_slice().map_err(std::io::Error::other)?;
+        let all_data = segment_bytes(&segment).map_err(std::io::Error::other)?;
         let data_end = chunked_data_end(record)?;
         let mut decompressed_length = 0u64;
 
@@ -1515,7 +1534,7 @@ impl BoxFileReader {
                     let segment = self.memory_map(file).map_err(|e| {
                         ExtractError::VerificationFailed(e, item.path.to_path_buf())
                     })?;
-                    let data = segment.as_slice().map_err(|e| {
+                    let data = segment_bytes(&segment).map_err(|e| {
                         ExtractError::VerificationFailed(
                             std::io::Error::other(e),
                             item.path.to_path_buf(),
@@ -1560,7 +1579,7 @@ impl BoxFileReader {
                     let segment = self.memory_map_chunked(file).map_err(|e| {
                         ExtractError::VerificationFailed(e, item.path.to_path_buf())
                     })?;
-                    let data = segment.as_slice().map_err(|e| {
+                    let data = segment_bytes(&segment).map_err(|e| {
                         ExtractError::VerificationFailed(
                             std::io::Error::other(e),
                             item.path.to_path_buf(),
@@ -1809,7 +1828,7 @@ impl BoxFileReader {
             .open()
             .map_err(std::io::Error::other)?;
         let offset = checked_archive_data_offset(self.core.offset, record.data.get())?;
-        Segment::new(mmap.into(), offset, record.length).map_err(std::io::Error::other)
+        checked_segment(mmap.into(), offset, record.length).map_err(std::io::Error::other)
     }
 
     /// Memory-map the file and return a segment for a chunked file record's data.
@@ -1819,7 +1838,7 @@ impl BoxFileReader {
             .open()
             .map_err(std::io::Error::other)?;
         let offset = checked_archive_data_offset(self.core.offset, record.data.get())?;
-        Segment::new(mmap.into(), offset, record.length).map_err(std::io::Error::other)
+        checked_segment(mmap.into(), offset, record.length).map_err(std::io::Error::other)
     }
 
     /// Read a byte range from a chunked file.
@@ -1882,7 +1901,7 @@ impl BoxFileReader {
 
         // Memory-map the archive
         let segment = self.memory_map_chunked(record)?;
-        let all_data = segment.as_slice().map_err(std::io::Error::other)?;
+        let all_data = segment_bytes(&segment).map_err(std::io::Error::other)?;
         let data_end = chunked_data_end(record)?;
 
         let mut result = Vec::new();
@@ -2489,10 +2508,10 @@ async fn extract_single_file_from_mmap(
                 box_path.to_path_buf(),
             )
         })?;
-    let segment = Segment::new(mmap, offset, record.length).map_err(|e| {
+    let segment = checked_segment(mmap, offset, record.length).map_err(|e| {
         ExtractError::DecompressionFailed(std::io::Error::other(e), box_path.to_path_buf())
     })?;
-    let data = segment.as_slice().map_err(|e| {
+    let data = segment_bytes(&segment).map_err(|e| {
         ExtractError::DecompressionFailed(std::io::Error::other(e), box_path.to_path_buf())
     })?;
 
@@ -2701,10 +2720,10 @@ async fn extract_single_chunked_file_from_mmap(
                 box_path.to_path_buf(),
             )
         })?;
-    let segment = Segment::new(mmap, offset, record.length).map_err(|e| {
+    let segment = checked_segment(mmap, offset, record.length).map_err(|e| {
         ExtractError::DecompressionFailed(std::io::Error::other(e), box_path.to_path_buf())
     })?;
-    let all_data = segment.as_slice().map_err(|e| {
+    let all_data = segment_bytes(&segment).map_err(|e| {
         ExtractError::DecompressionFailed(std::io::Error::other(e), box_path.to_path_buf())
     })?;
 
@@ -2865,10 +2884,10 @@ async fn validate_single_file_from_mmap(
     // Create segment from shared mmap
     let offset = checked_archive_data_offset(archive_offset, record.data.get())
         .map_err(|error| ExtractError::VerificationFailed(error, box_path.to_path_buf()))?;
-    let segment = Segment::new(mmap, offset, record.length).map_err(|e| {
+    let segment = checked_segment(mmap, offset, record.length).map_err(|e| {
         ExtractError::VerificationFailed(std::io::Error::other(e), box_path.to_path_buf())
     })?;
-    let data = segment.as_slice().map_err(|e| {
+    let data = segment_bytes(&segment).map_err(|e| {
         ExtractError::VerificationFailed(std::io::Error::other(e), box_path.to_path_buf())
     })?;
 
@@ -2922,10 +2941,10 @@ async fn validate_single_chunked_file_from_mmap(
                 box_path.to_path_buf(),
             )
         })?;
-    let segment = Segment::new(mmap, offset, record.length).map_err(|e| {
+    let segment = checked_segment(mmap, offset, record.length).map_err(|e| {
         ExtractError::VerificationFailed(std::io::Error::other(e), box_path.to_path_buf())
     })?;
-    let data = segment.as_slice().map_err(|e| {
+    let data = segment_bytes(&segment).map_err(|e| {
         ExtractError::VerificationFailed(std::io::Error::other(e), box_path.to_path_buf())
     })?;
 

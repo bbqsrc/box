@@ -16,6 +16,8 @@ pub use reader::{
     BoxFileReader, ExtractError, ExtractOptions, ExtractProgress, ExtractStats, ExtractTiming,
     OpenError, ValidateProgress, ValidateStats,
 };
+#[cfg(feature = "reader")]
+pub(crate) use reader::{checked_segment, segment_bytes};
 #[cfg(feature = "writer")]
 pub use writer::{
     AddOptions, AddStats, BoxFileWriter, CompressedData, CompressedFile, FileJob, ParallelProgress,

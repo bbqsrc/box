@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use clap::Parser;
-use fuser::MountOption;
+use fuser::{Config, MountOption};
 
 use box_format::sync::BoxReader;
 use fusebox::{BoxFs, LruCache, MultiArchive};
@@ -61,9 +61,10 @@ fn main() {
         format!("fusebox:{}_archives", fs_name_parts.len())
     };
 
-    let mount_opts = &[MountOption::RO, MountOption::FSName(fs_name)];
+    let mut config = Config::default();
+    config.mount_options = vec![MountOption::RO, MountOption::FSName(fs_name)];
 
     let boxfs = BoxFs::new(archives, LruCache::new(opts.cache_size));
 
-    fuser::mount2(boxfs, &mountpoint, mount_opts).unwrap();
+    fuser::mount(boxfs, &mountpoint, &config).unwrap();
 }

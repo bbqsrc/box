@@ -9,10 +9,10 @@ use lru::LruCache as LruCacheImpl;
 
 use fastvint::ReadVintExt;
 use fuser::{
-    FileAttr, FileType, Filesystem, KernelConfig, ReplyAttr, ReplyData, ReplyDirectory,
+    AccessFlags, Errno, FileAttr, FileHandle, FileType, Filesystem, FopenFlags, Generation,
+    INodeNo, KernelConfig, LockOwner, OpenFlags, ReplyAttr, ReplyData, ReplyDirectory,
     ReplyDirectoryPlus, ReplyEmpty, ReplyEntry, ReplyOpen, ReplyStatfs, ReplyXattr, Request,
 };
-use libc::{EACCES, ENODATA, ENOENT, ERANGE};
 
 use box_format::sync::BoxReader;
 use box_format::{BOX_EPOCH_UNIX, BoxMetadata, Record, RecordIndex, attrs};
@@ -21,7 +21,7 @@ mod multi;
 pub use multi::MultiArchive;
 
 // Re-export fuser types needed by consumers (avoids version mismatches)
-pub use fuser::{MountOption, mount2};
+pub use fuser::{Config, MountOption, mount};
 
 /// Cache key for block-level caching
 /// For regular files: (composite_index, 0)
@@ -272,7 +272,7 @@ const BLOCK_SIZE: u32 = 4096;
 /// that long". Every other field is ignored by the kernel. An archive never
 /// gains a name, so the miss holds for as long as anything else here does.
 pub const NEGATIVE_ENTRY: FileAttr = FileAttr {
-    ino: 0,
+    ino: INodeNo(0),
     size: 0,
     blocks: 0,
     atime: UNIX_EPOCH,
@@ -323,7 +323,7 @@ fn root_dir_attr(meta: &BoxMetadata) -> FileAttr {
     let ctime = parse_archive_time(meta, attrs::CREATED).unwrap_or(UNIX_EPOCH);
 
     FileAttr {
-        ino: 1,
+        ino: INodeNo::ROOT,
         size: 4096,
         blocks: 0,
         atime: ctime,
@@ -391,7 +391,7 @@ impl RecordExt for box_format::Record<'_> {
         let atime = self.atime(meta);
 
         FileAttr {
-            ino: composite_to_ino(composite),
+            ino: INodeNo(composite_to_ino(composite)),
             size,
             blocks,
             atime,
@@ -532,23 +532,22 @@ fn composite_to_ino(composite: u128) -> u64 {
 
 // [spec:box:req:fuse-mount.root]
 impl Filesystem for BoxFs {
-    fn lookup(&mut self, _req: &Request, parent: u64, name: &OsStr, reply: ReplyEntry) {
-        match self.lookup_entry(parent, name) {
-            Some(attr) => reply.entry(&TTL, &attr, 0),
-            None => reply.error(ENOENT),
+    fn lookup(&self, _req: &Request, parent: INodeNo, name: &OsStr, reply: ReplyEntry) {
+        match self.lookup_entry(parent.0, name) {
+            Some(attr) => reply.entry(&TTL, &attr, Generation(0)),
+            None => reply.error(Errno::ENOENT),
         }
     }
 
     // [spec:box:req:fuse-mount.root.read-only-and-attributes]
-    fn open(&mut self, _req: &Request<'_>, ino: u64, _flags: i32, reply: ReplyOpen) {
+    fn open(&self, _req: &Request, ino: INodeNo, _flags: OpenFlags, reply: ReplyOpen) {
         // FOPEN_KEEP_CACHE tells the kernel to keep file data cached across open/close.
         // This is safe for a read-only filesystem where files never change.
-        const FOPEN_KEEP_CACHE: u32 = 2;
-        tracing::trace!(ino, "open");
-        reply.opened(0, FOPEN_KEEP_CACHE);
+        tracing::trace!(ino = ino.0, "open");
+        reply.opened(FileHandle(0), FopenFlags::FOPEN_KEEP_CACHE);
     }
 
-    fn init(&mut self, _req: &Request<'_>, config: &mut KernelConfig) -> Result<(), libc::c_int> {
+    fn init(&mut self, _req: &Request, config: &mut KernelConfig) -> std::io::Result<()> {
         // Deep readahead keeps the worker pool fed on sequential reads: the
         // kernel issues the lookahead requests concurrently, and each becomes
         // an independent block decode.
@@ -559,21 +558,22 @@ impl Filesystem for BoxFs {
 
     // [spec:box:req:fuse-mount.root.file-data]
     fn read(
-        &mut self,
-        _req: &Request<'_>,
-        ino: u64,
-        _fh: u64,
-        offset: i64,
+        &self,
+        _req: &Request,
+        ino: INodeNo,
+        _fh: FileHandle,
+        offset: u64,
         size: u32,
-        _flags: i32,
-        _lock_owner: Option<u64>,
+        _flags: OpenFlags,
+        _lock_owner: Option<LockOwner>,
         reply: ReplyData,
     ) {
+        let ino = ino.0;
         let composite = match ino_to_composite(ino) {
             Some(v) => v,
             None => {
                 tracing::warn!(ino, "read: invalid inode (root)");
-                reply.error(ENOENT);
+                reply.error(Errno::ENOENT);
                 return;
             }
         };
@@ -596,7 +596,7 @@ impl Filesystem for BoxFs {
             &self.workers,
             &self.stats,
             composite,
-            offset as u64,
+            offset,
             u64::from(size),
             reply,
         ) {
@@ -618,7 +618,7 @@ impl Filesystem for BoxFs {
                 &self.stats,
                 ino,
                 composite,
-                offset as u64,
+                offset,
                 u64::from(size),
                 reply,
             );
@@ -639,7 +639,7 @@ impl Filesystem for BoxFs {
                 &stats,
                 ino,
                 composite,
-                offset as u64,
+                offset,
                 u64::from(size),
                 reply,
             )
@@ -648,22 +648,24 @@ impl Filesystem for BoxFs {
 
     // [spec:box:req:fuse-mount.root.file-data]
     fn release(
-        &mut self,
-        _req: &Request<'_>,
-        ino: u64,
-        _fh: u64,
-        _flags: i32,
-        _lock_owner: Option<u64>,
+        &self,
+        _req: &Request,
+        ino: INodeNo,
+        _fh: FileHandle,
+        _flags: OpenFlags,
+        _lock_owner: Option<LockOwner>,
         _flush: bool,
         reply: ReplyEmpty,
     ) {
+        let ino = ino.0;
         // Don't evict cache on file close - let LRU naturally handle eviction.
         // This allows repeated reads of the same file to benefit from caching.
         tracing::trace!(ino, "release");
         reply.ok();
     }
 
-    fn getattr(&mut self, _req: &Request, ino: u64, _fh: Option<u64>, reply: ReplyAttr) {
+    fn getattr(&self, _req: &Request, ino: INodeNo, _fh: Option<FileHandle>, reply: ReplyAttr) {
+        let ino = ino.0;
         tracing::trace!(ino, "getattr");
         match ino_to_composite(ino) {
             Some(composite) => match self.archives.get_record(composite) {
@@ -672,12 +674,12 @@ impl Filesystem for BoxFs {
                         let file_attr = record.fuse_file_attr(meta, composite);
                         reply.attr(&TTL, &file_attr);
                     } else {
-                        reply.error(ENOENT);
+                        reply.error(Errno::ENOENT);
                     }
                 }
                 None => {
                     tracing::warn!(ino, "getattr: record not found");
-                    reply.error(ENOENT);
+                    reply.error(Errno::ENOENT);
                 }
             },
             None => {
@@ -685,20 +687,21 @@ impl Filesystem for BoxFs {
                 if let Some(meta) = self.archives.first_metadata() {
                     reply.attr(&TTL, &root_dir_attr(meta));
                 } else {
-                    reply.error(ENOENT);
+                    reply.error(Errno::ENOENT);
                 }
             }
         }
     }
 
     fn readdir(
-        &mut self,
+        &self,
         _req: &Request,
-        ino: u64,
-        _fh: u64,
-        offset: i64,
+        ino: INodeNo,
+        _fh: FileHandle,
+        offset: u64,
         mut reply: ReplyDirectory,
     ) {
+        let ino = ino.0;
         let children = match ino_to_composite(ino) {
             Some(composite) => self.archives.children(composite),
             None => self.archives.root_children(),
@@ -708,8 +711,8 @@ impl Filesystem for BoxFs {
 
         for (i, (composite, record)) in children.iter().enumerate().skip(offset as usize) {
             let is_full = reply.add(
-                composite_to_ino(*composite),
-                i as i64 + 1,
+                INodeNo(composite_to_ino(*composite)),
+                i as u64 + 1,
                 record.fuse_file_type(),
                 record.name(),
             );
@@ -723,13 +726,14 @@ impl Filesystem for BoxFs {
     }
 
     fn readdirplus(
-        &mut self,
-        _req: &Request<'_>,
-        ino: u64,
-        _fh: u64,
-        offset: i64,
+        &self,
+        _req: &Request,
+        ino: INodeNo,
+        _fh: FileHandle,
+        offset: u64,
         mut reply: ReplyDirectoryPlus,
     ) {
+        let ino = ino.0;
         let children = match ino_to_composite(ino) {
             Some(composite) => self.archives.children(composite),
             None => self.archives.root_children(),
@@ -741,12 +745,12 @@ impl Filesystem for BoxFs {
             if let Some(meta) = self.archives.get_metadata(composite) {
                 let attr = record.fuse_file_attr(meta, composite);
                 let is_full = reply.add(
-                    composite_to_ino(composite),
-                    i as i64 + 1,
+                    INodeNo(composite_to_ino(composite)),
+                    i as u64 + 1,
                     record.name(),
                     &TTL,
                     &attr,
-                    0, // generation
+                    Generation(0),
                 );
                 if is_full {
                     reply.ok();
@@ -759,12 +763,13 @@ impl Filesystem for BoxFs {
     }
 
     // [spec:box:req:fuse-mount.root.links-and-xattrs]
-    fn readlink(&mut self, _req: &Request<'_>, ino: u64, reply: ReplyData) {
+    fn readlink(&self, _req: &Request, ino: INodeNo, reply: ReplyData) {
+        let ino = ino.0;
         tracing::trace!(ino, "readlink");
         let composite = match ino_to_composite(ino) {
             Some(v) => v,
             None => {
-                reply.error(ENOENT);
+                reply.error(Errno::ENOENT);
                 return;
             }
         };
@@ -773,7 +778,7 @@ impl Filesystem for BoxFs {
             Some(r) => r,
             None => {
                 tracing::warn!(ino, "readlink: record not found");
-                reply.error(ENOENT);
+                reply.error(Errno::ENOENT);
                 return;
             }
         };
@@ -787,7 +792,7 @@ impl Filesystem for BoxFs {
                     let link_index = match RecordIndex::try_new(local_idx) {
                         Some(idx) => idx,
                         None => {
-                            reply.error(ENOENT);
+                            reply.error(Errno::ENOENT);
                             return;
                         }
                     };
@@ -808,12 +813,12 @@ impl Filesystem for BoxFs {
                         }
                         _ => {
                             tracing::warn!(ino, "readlink: could not resolve internal link paths");
-                            reply.error(ENOENT);
+                            reply.error(Errno::ENOENT);
                         }
                     }
                 } else {
                     tracing::warn!(ino, "readlink: archive not found");
-                    reply.error(ENOENT);
+                    reply.error(Errno::ENOENT);
                 }
             }
             box_format::Record::ExternalLink(link) => {
@@ -821,12 +826,12 @@ impl Filesystem for BoxFs {
             }
             _ => {
                 tracing::warn!(ino, "readlink: not a link");
-                reply.error(ENOENT);
+                reply.error(Errno::ENOENT);
             }
         }
     }
 
-    fn statfs(&mut self, _req: &Request<'_>, _ino: u64, reply: ReplyStatfs) {
+    fn statfs(&self, _req: &Request, _ino: INodeNo, reply: ReplyStatfs) {
         // Count records and estimate total size across all archives
         let total_size = self.archives.total_size();
         let file_count = self.archives.record_count();
@@ -847,18 +852,12 @@ impl Filesystem for BoxFs {
     }
 
     // [spec:box:req:fuse-mount.root.links-and-xattrs]
-    fn getxattr(
-        &mut self,
-        _req: &Request<'_>,
-        ino: u64,
-        name: &OsStr,
-        size: u32,
-        reply: ReplyXattr,
-    ) {
+    fn getxattr(&self, _req: &Request, ino: INodeNo, name: &OsStr, size: u32, reply: ReplyXattr) {
+        let ino = ino.0;
         let name = match name.to_str() {
             Some(n) => n,
             None => {
-                reply.error(ENODATA);
+                reply.error(Errno::from_i32(libc::ENODATA));
                 return;
             }
         };
@@ -874,14 +873,14 @@ impl Filesystem for BoxFs {
                 let record = match self.archives.get_record(composite) {
                     Some(r) => r,
                     None => {
-                        reply.error(ENOENT);
+                        reply.error(Errno::ENOENT);
                         return;
                     }
                 };
                 let meta = match self.archives.get_metadata(composite) {
                     Some(m) => m,
                     None => {
-                        reply.error(ENOENT);
+                        reply.error(Errno::ENOENT);
                         return;
                     }
                 };
@@ -901,17 +900,18 @@ impl Filesystem for BoxFs {
                     // Return required size
                     reply.size(data.len() as u32);
                 } else if data.len() > size as usize {
-                    reply.error(ERANGE);
+                    reply.error(Errno::ERANGE);
                 } else {
                     reply.data(data);
                 }
             }
-            None => reply.error(ENODATA),
+            None => reply.error(Errno::from_i32(libc::ENODATA)),
         }
     }
 
     // [spec:box:req:fuse-mount.root.links-and-xattrs]
-    fn listxattr(&mut self, _req: &Request<'_>, ino: u64, size: u32, reply: ReplyXattr) {
+    fn listxattr(&self, _req: &Request, ino: INodeNo, size: u32, reply: ReplyXattr) {
+        let ino = ino.0;
         tracing::trace!(ino, "listxattr");
         // Collect all xattr names for this inode
         let mut xattr_list = Vec::new();
@@ -932,14 +932,14 @@ impl Filesystem for BoxFs {
                 let record = match self.archives.get_record(composite) {
                     Some(r) => r,
                     None => {
-                        reply.error(ENOENT);
+                        reply.error(Errno::ENOENT);
                         return;
                     }
                 };
                 let meta = match self.archives.get_metadata(composite) {
                     Some(m) => m,
                     None => {
-                        reply.error(ENOENT);
+                        reply.error(Errno::ENOENT);
                         return;
                     }
                 };
@@ -962,14 +962,16 @@ impl Filesystem for BoxFs {
         if size == 0 {
             reply.size(xattr_list.len() as u32);
         } else if xattr_list.len() > size as usize {
-            reply.error(ERANGE);
+            reply.error(Errno::ERANGE);
         } else {
             reply.data(&xattr_list);
         }
     }
 
     // [spec:box:req:fuse-mount.root.read-only-and-attributes]
-    fn access(&mut self, req: &Request<'_>, ino: u64, mask: i32, reply: ReplyEmpty) {
+    fn access(&self, req: &Request, ino: INodeNo, mask: AccessFlags, reply: ReplyEmpty) {
+        let ino = ino.0;
+        let mask = mask.bits();
         tracing::trace!(ino, mask, "access");
         // F_OK (existence check) is always successful if we got here
         if mask == libc::F_OK {
@@ -982,14 +984,14 @@ impl Filesystem for BoxFs {
                 let record = match self.archives.get_record(composite) {
                     Some(r) => r,
                     None => {
-                        reply.error(ENOENT);
+                        reply.error(Errno::ENOENT);
                         return;
                     }
                 };
                 let meta = match self.archives.get_metadata(composite) {
                     Some(m) => m,
                     None => {
-                        reply.error(ENOENT);
+                        reply.error(Errno::ENOENT);
                         return;
                     }
                 };
@@ -1004,7 +1006,7 @@ impl Filesystem for BoxFs {
                     let attr = root_dir_attr(meta);
                     (attr.perm as u32, attr.uid, attr.gid)
                 } else {
-                    reply.error(ENOENT);
+                    reply.error(Errno::ENOENT);
                     return;
                 }
             }
@@ -1045,7 +1047,7 @@ impl Filesystem for BoxFs {
         if allowed {
             reply.ok();
         } else {
-            reply.error(EACCES);
+            reply.error(Errno::EACCES);
         }
     }
 }
@@ -1073,7 +1075,7 @@ fn serve_read(
         Some(r) => r,
         None => {
             tracing::warn!(ino, "read: record not found");
-            reply.error(ENOENT);
+            reply.error(Errno::ENOENT);
             return;
         }
     };
@@ -1083,7 +1085,7 @@ fn serve_read(
         Some(idx) => idx,
         None => {
             tracing::warn!(ino, "read: invalid local index");
-            reply.error(ENOENT);
+            reply.error(Errno::ENOENT);
             return;
         }
     };
@@ -1106,7 +1108,7 @@ fn serve_read(
                 Some(a) => a,
                 None => {
                     tracing::warn!(ino, "read: archive not found");
-                    reply.error(ENOENT);
+                    reply.error(Errno::ENOENT);
                     return;
                 }
             };
@@ -1139,7 +1141,7 @@ fn serve_read(
                 }
                 Err(e) => {
                     tracing::error!(ino, error = %e, "read: decompression failed");
-                    reply.error(ENOENT);
+                    reply.error(Errno::ENOENT);
                 }
             }
         }
@@ -1219,7 +1221,7 @@ fn serve_read(
                     Some(a) => a,
                     None => {
                         tracing::error!(ino, "read: archive not found for block decompression");
-                        reply.error(ENOENT);
+                        reply.error(Errno::ENOENT);
                         return;
                     }
                 };
@@ -1238,7 +1240,7 @@ fn serve_read(
                             error = %e,
                             "read: block decompression failed"
                         );
-                        reply.error(ENOENT);
+                        reply.error(Errno::ENOENT);
                         return;
                     }
                 }
@@ -1267,7 +1269,7 @@ fn serve_read(
         }
         _ => {
             tracing::warn!(ino, "read: not a file");
-            reply.error(ENOENT);
+            reply.error(Errno::ENOENT);
         }
     }
 }
@@ -1482,7 +1484,7 @@ mod tests {
         let attr = fs
             .lookup_entry(1, OsStr::new("stdio.h"))
             .expect("a name the archive lacks is an entry, not an error");
-        assert_eq!(attr.ino, 0, "a negative entry is nodeid 0");
+        assert_eq!(attr.ino, INodeNo(0), "a negative entry is nodeid 0");
         assert!(TTL.as_secs() > 0, "a zero entry timeout caches nothing");
     }
 }

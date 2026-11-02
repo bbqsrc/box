@@ -14,7 +14,7 @@ crate-type = ["staticlib"]
 
 [dependencies]
 box-fst = { path = "../../crates/fst", default-features = false }
-hashbrown = { version = "0.15", default-features = false, features = [
+hashbrown = { version = "0.17", default-features = false, features = [
     "default-hasher",
     "inline-more",
 ] }

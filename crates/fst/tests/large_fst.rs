@@ -1,5 +1,5 @@
 use box_fst::{Fst, FstBuilder, FstValue};
-use rand::distributions::WeightedIndex;
+use rand::distr::weighted::WeightedIndex;
 use rand::prelude::*;
 
 const PATH_SEP: char = '\x1f';
@@ -182,23 +182,23 @@ impl RealisticPathGenerator {
     /// Generate depth using exponential decay (most files at depth 2-4)
     fn random_depth(&mut self) -> usize {
         // Exponential distribution biased toward shallow depths
-        let r: f64 = self.rng.r#gen();
+        let r: f64 = self.rng.random();
         let depth = (-r.ln() * 2.0) as usize;
         depth.clamp(1, 10)
     }
 
     /// Generate a random directory name
     fn random_dir_name(&mut self) -> String {
-        if self.rng.r#gen_bool(0.3) {
+        if self.rng.random_bool(0.3) {
             // Use a pattern name
             self.subdir_patterns
                 .choose(&mut self.rng)
                 .unwrap()
                 .to_string()
-        } else if self.rng.r#gen_bool(0.2) {
+        } else if self.rng.random_bool(0.2) {
             // Use word + number
             let word = *self.words.choose(&mut self.rng).unwrap();
-            format!("{}_{}", word, self.rng.r#gen_range(1..100))
+            format!("{}_{}", word, self.rng.random_range(1..100))
         } else {
             // Use a word
             self.words.choose(&mut self.rng).unwrap().to_string()
@@ -210,20 +210,20 @@ impl RealisticPathGenerator {
         let ext_idx = self.extensions_dist.sample(&mut self.rng);
         let ext = self.extensions[ext_idx].0;
 
-        let name = if self.rng.r#gen_bool(0.1) {
+        let name = if self.rng.random_bool(0.1) {
             // Special files
             *["README", "LICENSE", "Makefile", "Dockerfile", "Cargo"]
                 .choose(&mut self.rng)
                 .unwrap()
-        } else if self.rng.r#gen_bool(0.3) {
+        } else if self.rng.random_bool(0.3) {
             // word_word pattern - need to build string
             let w1 = *self.words.choose(&mut self.rng).unwrap();
             let w2 = *self.words.choose(&mut self.rng).unwrap();
             return format!("{}_{}{}", w1, w2, ext);
-        } else if self.rng.r#gen_bool(0.2) {
+        } else if self.rng.random_bool(0.2) {
             // word + number
             let word = *self.words.choose(&mut self.rng).unwrap();
-            return format!("{}{}{}", word, self.rng.r#gen_range(1..1000), ext);
+            return format!("{}{}{}", word, self.rng.random_range(1..1000), ext);
         } else {
             // Single word
             *self.words.choose(&mut self.rng).unwrap()

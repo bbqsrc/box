@@ -19,7 +19,10 @@ use crate::{
     header::BoxHeader,
 };
 
-use crate::aio::{ExtractError, ExtractOptions, ExtractStats, OpenError, ValidateStats};
+use crate::aio::{
+    ExtractError, ExtractOptions, ExtractStats, OpenError, ValidateStats, checked_segment,
+    segment_bytes,
+};
 
 /// Sync reader for Box archives.
 ///
@@ -170,7 +173,7 @@ impl BoxReader {
         let trailer_len = file_size - trailer_offset;
 
         let trailer_segment =
-            Segment::new(mmap.into(), trailer_offset, trailer_len).map_err(|e| {
+            checked_segment(mmap.into(), trailer_offset, trailer_len).map_err(|e| {
                 OpenError::invalid_trailer_at(
                     std::io::Error::other(e),
                     header.version,
@@ -180,7 +183,7 @@ impl BoxReader {
                 )
             })?;
 
-        let trailer_data = trailer_segment.as_slice().map_err(|e| {
+        let trailer_data = segment_bytes(&trailer_segment).map_err(|e| {
             OpenError::invalid_trailer_at(
                 std::io::Error::other(e),
                 header.version,
@@ -291,7 +294,7 @@ impl BoxReader {
         mut dest: W,
     ) -> std::io::Result<()> {
         let segment = self.memory_map(record)?;
-        let data = segment.as_slice().map_err(std::io::Error::other)?;
+        let data = segment_bytes(&segment).map_err(std::io::Error::other)?;
         let mut cursor = std::io::Cursor::new(data);
 
         match record.compression {
@@ -385,7 +388,7 @@ impl BoxReader {
         }
 
         let segment = self.memory_map_chunked(record)?;
-        let all_data = segment.as_slice().map_err(std::io::Error::other)?;
+        let all_data = segment_bytes(&segment).map_err(std::io::Error::other)?;
         let data_end = chunked_data_end(record)?;
 
         for i in 0..blocks.len() {
@@ -459,7 +462,7 @@ impl BoxReader {
 
         // Memory map the chunked file data
         let segment = self.memory_map_chunked(record)?;
-        let all_data = segment.as_slice().map_err(std::io::Error::other)?;
+        let all_data = segment_bytes(&segment).map_err(std::io::Error::other)?;
         let data_end = chunked_data_end(record)?;
 
         let first_block_logical = blocks_needed[0].0;
@@ -566,7 +569,7 @@ impl BoxReader {
 
         // Memory map and decompress
         let segment = self.memory_map_chunked(record)?;
-        let all_data = segment.as_slice().map_err(std::io::Error::other)?;
+        let all_data = segment_bytes(&segment).map_err(std::io::Error::other)?;
         let block_data = checked_chunked_block(record, all_data, physical_offset, compressed_end)?;
 
         self.core.decompress_chunked_block(record, block_data)
@@ -796,7 +799,7 @@ impl BoxReader {
             .offset
             .checked_add(record.data.get())
             .ok_or_else(|| invalid_chunked_metadata("archive and record data offsets overflow"))?;
-        Segment::new(mmap.into(), offset, record.length).map_err(std::io::Error::other)
+        checked_segment(mmap.into(), offset, record.length).map_err(std::io::Error::other)
     }
 
     /// Memory-map the file and return a segment for a chunked file record's data.
@@ -810,7 +813,7 @@ impl BoxReader {
             .offset
             .checked_add(record.data.get())
             .ok_or_else(|| invalid_chunked_metadata("archive and chunked data offsets overflow"))?;
-        Segment::new(mmap.into(), offset, record.length).map_err(std::io::Error::other)
+        checked_segment(mmap.into(), offset, record.length).map_err(std::io::Error::other)
     }
 
     fn extract_inner(

@@ -1254,7 +1254,7 @@ impl BoxFileWriter {
                     let mmap = mmap_io::MemoryMappedFile::open_ro(temp.path())
                         .map_err(std::io::Error::other)?;
                     let data = mmap
-                        .as_slice(0, file.compressed_length)
+                        .as_slice_bytes(0, file.compressed_length)
                         .map_err(std::io::Error::other)?;
                     self.file.write_all(data).await?;
                 }
@@ -1412,7 +1412,7 @@ impl BoxFileWriter {
             let mmap = mmap_io::MemoryMappedFile::open_ro(file.data.path())
                 .map_err(std::io::Error::other)?;
             let data = mmap
-                .as_slice(0, file.compressed_length)
+                .as_slice_bytes(0, file.compressed_length)
                 .map_err(std::io::Error::other)?;
             self.file.write_all(data).await?;
             Ok::<(), std::io::Error>(())
@@ -2028,10 +2028,16 @@ impl AddAssign for AddStats {
 pub fn calculate_memory_threshold(slots: usize) -> u64 {
     use sysinfo::System;
     // Reading process, CPU, disk, and network state is surprisingly costly and
-    // none of it contributes to this calculation.
-    let mut sys = System::new();
-    sys.refresh_memory();
-    let available = sys.available_memory();
+    // none of it contributes to this calculation. Where sysinfo cannot read
+    // memory at all, the threshold is zero and every non-empty file goes
+    // through a temp file.
+    let available = match System::new() {
+        Ok(mut sys) => {
+            sys.refresh_memory();
+            sys.available_memory()
+        }
+        Err(_) => 0,
+    };
     // Factor 4 accounts for compressed and uncompressed buffers per slot.
     available / (slots as u64 * 4).max(1)
 }

@@ -11,7 +11,7 @@ use crate::record::ChunkedFileRecord;
 
 use super::reader::{
     BoxFileReader, chunked_block_data_range, chunked_data_end, invalid_chunked_data,
-    logical_file_buffer,
+    logical_file_buffer, segment_bytes,
 };
 
 // ============================================================================
@@ -138,7 +138,9 @@ impl<'a> ChunkedReader<'a> {
             ));
         }
 
-        let mapped_len = segment.as_slice().map_err(std::io::Error::other)?.len();
+        let mapped_len = segment_bytes(&segment)
+            .map_err(std::io::Error::other)?
+            .len();
         let data_end = chunked_data_end(record)?;
         for (block_index, &(logical_start, physical_start)) in blocks.iter().enumerate() {
             if block_index == 0 {
@@ -314,7 +316,7 @@ impl<'a> ChunkedReader<'a> {
         }
 
         // Extract compressed block data
-        let all_data = self.segment.as_slice().map_err(std::io::Error::other)?;
+        let all_data = segment_bytes(&self.segment).map_err(std::io::Error::other)?;
 
         let compressed_end = if block_idx + 1 < self.blocks.len() {
             self.blocks[block_idx + 1].1

@@ -1,7 +1,8 @@
 use std::collections::HashMap;
+use std::hint::black_box;
 
-use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
-use rand::distributions::WeightedIndex;
+use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
+use rand::distr::weighted::WeightedIndex;
 use rand::prelude::*;
 
 use box_fst::{Fst, FstBuilder};
@@ -391,19 +392,19 @@ impl RealisticPathGenerator {
     }
 
     fn random_depth(&mut self) -> usize {
-        let r: f64 = self.rng.r#gen();
+        let r: f64 = self.rng.random();
         ((-r.ln() * 2.0) as usize).clamp(1, 10)
     }
 
     fn random_dir_name(&mut self) -> String {
-        if self.rng.r#gen_bool(0.3) {
+        if self.rng.random_bool(0.3) {
             self.subdir_patterns
                 .choose(&mut self.rng)
                 .unwrap()
                 .to_string()
-        } else if self.rng.r#gen_bool(0.2) {
+        } else if self.rng.random_bool(0.2) {
             let word = *self.words.choose(&mut self.rng).unwrap();
-            format!("{}_{}", word, self.rng.r#gen_range(1..100))
+            format!("{}_{}", word, self.rng.random_range(1..100))
         } else {
             self.words.choose(&mut self.rng).unwrap().to_string()
         }
@@ -413,13 +414,13 @@ impl RealisticPathGenerator {
         let ext_idx = self.extensions_dist.sample(&mut self.rng);
         let ext = self.extensions[ext_idx].0;
 
-        if self.rng.r#gen_bool(0.3) {
+        if self.rng.random_bool(0.3) {
             let w1 = *self.words.choose(&mut self.rng).unwrap();
             let w2 = *self.words.choose(&mut self.rng).unwrap();
             format!("{}_{}{}", w1, w2, ext)
-        } else if self.rng.r#gen_bool(0.2) {
+        } else if self.rng.random_bool(0.2) {
             let word = *self.words.choose(&mut self.rng).unwrap();
-            format!("{}{}{}", word, self.rng.r#gen_range(1..1000), ext)
+            format!("{}{}{}", word, self.rng.random_range(1..1000), ext)
         } else {
             let word = *self.words.choose(&mut self.rng).unwrap();
             format!("{}{}", word, ext)

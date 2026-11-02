@@ -11,14 +11,14 @@ std = ["fastvint/std"]
 
 [dependencies]
 fastvint.workspace = true
-hashbrown = { version = "0.15", default-features = false, features = [
+hashbrown = { version = "0.17", default-features = false, features = [
     "default-hasher",
     "inline-more",
 ] }
 
 [dev-dependencies]
-criterion = "0.5"
-rand = "0.8"
+criterion = "0.8"
+rand = "0.10"
 
 [[bench]]
 name = "lookup"
