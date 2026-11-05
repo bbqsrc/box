@@ -409,6 +409,15 @@ children (
                     io.chunked
                 )
             }
+
+            {
+                id integration.cli-attrs
+                title "box create sets string archive attributes from repeatable --attr KEY=VALUE flags"
+                kind @feat
+                implements {
+                    rust ([spec:box:req:cli-commands.root.create-attrs])
+                }
+            }
         )
     }
 )

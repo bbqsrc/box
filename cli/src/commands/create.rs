@@ -99,6 +99,14 @@ pub async fn run(args: CreateArgs) -> Result<()> {
             key: "created".to_string(),
             source,
         })?;
+    // [spec:box:req:cli-commands.root.create-attrs]
+    for (key, value) in &args.attrs {
+        bf.set_file_attr(key, AttrValue::String(value))
+            .map_err(|source| Error::SetAttribute {
+                key: key.clone(),
+                source,
+            })?;
+    }
 
     let progress = if args.quiet {
         None

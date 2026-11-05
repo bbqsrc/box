@@ -370,6 +370,51 @@ fn create_builds_a_finished_checksummed_archive_with_hierarchy() {
     ));
 }
 
+// [spec:box:req:cli-commands.root.create-attrs/test/integration]
+#[test]
+fn create_sets_archive_attributes_from_attr_flags() {
+    let temp = tempfile::tempdir().unwrap();
+    create_input_tree(temp.path());
+    let output = box_command()
+        .current_dir(temp.path())
+        .args([
+            "create",
+            "--quiet",
+            "--attr",
+            "pahkat.package=speller-sme",
+            "--attr",
+            "pahkat.version=5.2.0+build.3",
+            "--attr",
+            "note=a=b",
+            "attributed.box",
+            "input",
+        ])
+        .output()
+        .unwrap();
+    assert_success(&output);
+
+    let reader = box_format::sync::BoxReader::open(temp.path().join("attributed.box")).unwrap();
+    let attrs = reader.file_attrs();
+    let string = |key: &str| match attrs.get(key) {
+        Some(AttrValue::String(value)) => Some(*value),
+        _ => None,
+    };
+    assert_eq!(string("pahkat.package"), Some("speller-sme"));
+    assert_eq!(string("pahkat.version"), Some("5.2.0+build.3"));
+    assert_eq!(string("note"), Some("a=b"));
+    assert!(attrs.contains_key("created"));
+
+    for bad in ["no-equals", "=empty-key"] {
+        let output = box_command()
+            .current_dir(temp.path())
+            .args(["create", "--quiet", "--attr", bad, "refused.box", "input"])
+            .output()
+            .unwrap();
+        assert!(!output.status.success(), "{}", output_text(&output));
+        assert!(!temp.path().join("refused.box").exists());
+    }
+}
+
 // [spec:box:req:cli-commands.root.create+1/test/integration]
 // [spec:box:req:cli-safety.root/test/integration]
 #[cfg(unix)]

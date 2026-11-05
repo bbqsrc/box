@@ -20,6 +20,11 @@
 > requested file attributes, including extended attributes. A successful
 > command MUST finish the writer before reporting archive size and file totals.
 
+> [spec:box:req:cli-commands.root.create-attrs]
+> `box create --attr KEY=VALUE` MUST set the archive-level attribute `KEY`
+> to the string `VALUE`, once for each `--attr` it is given, and MUST refuse
+> an `--attr` with no `=` or an empty key before creating anything.
+
 > [spec:box:req:cli-commands.root.extract]
 > `box extract` MUST open the requested archive, create the output directory,
 > and pass checksum, escaped-path, external-symlink, and xattr choices to the

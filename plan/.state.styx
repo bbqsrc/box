@@ -685,6 +685,11 @@ impl_evidence (
         {id sync-io.root.write, version 0}
         {id wire.root.bounds, version 0}
     )}
+    {id integration.cli-attrs, covered_rules (
+        cli-commands.root.create-attrs
+    ), covered_claims (
+        {impl_name rust, rule cli-commands.root.create-attrs}
+    )}
 )
 
 onboarding {kind @adopt, phase 11}

@@ -2,6 +2,13 @@ use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
 
+fn parse_attr(value: &str) -> Result<(String, String), String> {
+    match value.split_once('=') {
+        Some((key, value)) if !key.is_empty() => Ok((key.to_string(), value.to_string())),
+        _ => Err(format!("{value:?} is not KEY=VALUE with a non-empty key")),
+    }
+}
+
 fn parse_positive_usize(value: &str) -> Result<usize, String> {
     let value = value
         .parse::<usize>()
@@ -124,6 +131,7 @@ Use \x1b[1m-O key=value\x1b[0m to set compression options for the current algori
   box create archive.box --zstd -O level=19 src/
   box create archive.box --brotli -O level=6 assets/ --zstd src/
   box create archive.box --zstd-chunked images/ --zstd manifests/
+  box create archive.box --attr name=example --attr version=1.0 src/
   box create --exclude '*.log' archive.box .")]
 pub struct CreateArgs {
     /// Output archive path
@@ -188,6 +196,10 @@ pub struct CreateArgs {
     /// Preserve extended attributes (Linux only)
     #[arg(long)]
     pub xattrs: bool,
+
+    /// Set an archive attribute to a string value (repeatable)
+    #[arg(long = "attr", value_name = "KEY=VALUE", value_parser = parse_attr)]
+    pub attrs: Vec<(String, String)>,
 
     /// Files and directories to archive
     #[arg(
