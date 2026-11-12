@@ -341,6 +341,7 @@ impl<'a> ArchiveReader<'a> {
 
     /// Validate an indexed archive path before a frontend converts it to a
     /// platform path for extraction.
+    #[cfg(feature = "reader")]
     pub(crate) fn validate_extraction_path(
         &self,
         path: &BoxPath<'_>,
@@ -351,6 +352,7 @@ impl<'a> ArchiveReader<'a> {
     }
 
     /// Resolve a link target to an indexed path that is safe to materialize.
+    #[cfg(feature = "reader")]
     pub(crate) fn extraction_path_for_index(
         &self,
         index: RecordIndex,
@@ -366,6 +368,7 @@ impl<'a> ArchiveReader<'a> {
     }
 
     /// Return validated direct children with their authoritative logical paths.
+    #[cfg(feature = "reader")]
     pub(crate) fn extraction_children_by_index(
         &self,
         dir_index: RecordIndex,

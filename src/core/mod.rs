@@ -21,18 +21,18 @@
 //! └─────────────────────────────────────────┘
 //! ```
 
-#[cfg(all(feature = "std", feature = "reader"))]
+#[cfg(feature = "reader")]
 mod extraction;
 pub mod meta;
-#[cfg(all(feature = "std", feature = "reader"))]
+#[cfg(feature = "std")]
 mod reader;
-#[cfg(all(feature = "std", feature = "writer"))]
+#[cfg(feature = "std")]
 mod writer;
 
-#[cfg(all(feature = "std", feature = "reader"))]
+#[cfg(feature = "std")]
 pub use reader::ArchiveReader;
 
-#[cfg(all(feature = "std", feature = "writer"))]
+#[cfg(feature = "std")]
 pub use writer::{ArchiveWriter, WriterOptions};
 
 pub use meta::{

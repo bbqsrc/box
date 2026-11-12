@@ -293,6 +293,36 @@ children (
                     }
                 )
             }
+
+            {
+                id io.sans-portable-build
+                title "Build the sans-I/O core reader and writer for wasm32 without tokio"
+                kind @build
+                deps (io.sans)
+                sealed true
+                log (
+                    {
+                        at 2026-11-12T17:20:03.310223Z
+                        author "brendan@bbqsrc.net"
+                        kind @status
+                        text "Todo → Doing (nplan start)"
+                    }
+
+                    {
+                        at 2026-11-12T17:31:36.009326Z
+                        author "brendan@bbqsrc.net"
+                        kind @decision
+                        text "`std` is now the sans-I/O core alone (core::ArchiveReader/ArchiveWriter, paths, parse, encode, de, fs constants, buffer codecs) on pure-Rust deps; tokio, tokio-util, async-walkdir, futures, mmap-io, blake3, hex, lru, thiserror, digest, tempfile, relative-path and string-interner moved to `reader`, so `reader`, `writer` and default give what they gave before. checksum, hashing, counting and the extraction helpers are gated on `reader`. `std` and `std,zstd` build for wasm32-unknown-unknown (zstd-sys ships wasm-shim headers; needs a wasm-capable clang); `xz` does not (lzma-sys needs libc stdlib.h). BHFST-shaped Stored archives (THFST, DHFST, mixed, no meta.json) packed by this core writer are byte-identical to 3d3818c's, and 3d3818c's core, parse_metadata_v1 and sync::BoxReader read them."
+                    }
+
+                    {
+                        at 2026-11-12T17:31:36.118862Z
+                        author "brendan@bbqsrc.net"
+                        kind @status
+                        text "Doing → Done (nplan complete)"
+                    }
+                )
+            }
         )
     }
 

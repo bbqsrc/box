@@ -16,13 +16,13 @@ pub mod attrs;
 
 #[cfg(any(feature = "reader", feature = "writer"))]
 pub mod aio;
-#[cfg(feature = "std")]
+#[cfg(feature = "reader")]
 pub mod checksum;
 mod compression;
 pub mod core;
-#[cfg(feature = "std")]
-mod counting;
 #[cfg(feature = "reader")]
+mod counting;
+#[cfg(feature = "std")]
 mod de;
 #[cfg(feature = "zstd")]
 pub mod dict;
@@ -30,7 +30,7 @@ pub mod dict;
 pub mod encode;
 #[cfg(feature = "std")]
 pub mod fs;
-#[cfg(feature = "std")]
+#[cfg(feature = "reader")]
 pub mod hashing;
 pub mod header;
 pub mod parse;
@@ -52,7 +52,7 @@ pub use aio::{
     BoxFileReader, ExtractError, ExtractOptions, ExtractProgress, ExtractStats, ExtractTiming,
     OpenError, ValidateProgress, ValidateStats,
 };
-#[cfg(feature = "std")]
+#[cfg(feature = "reader")]
 pub use checksum::{Checksum, NullChecksum};
 // Core compression types (no_std compatible)
 pub use compression::{ByteCount, Compression, StreamStatus};

@@ -1101,6 +1101,7 @@ mod tests {
     }
 
     // [spec:box:req:records.root.type-byte/test]
+    #[cfg(feature = "zstd")]
     #[test]
     fn test_parse_record_header() {
         // File with Zstd compression

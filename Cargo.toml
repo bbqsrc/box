@@ -17,7 +17,14 @@ byteorder.workspace = true
 fastvint.workspace = true
 hashbrown = "0.17"
 
-# Std-only dependencies
+# Enabled by std, so each must build for wasm32-unknown-unknown.
+pathdiff = { workspace = true, optional = true }
+unic-normal = { workspace = true, optional = true }
+unic-ucd = { workspace = true, optional = true }
+tracing = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }
+
+# Enabled by reader and writer only.
 mmap-io = { workspace = true, optional = true }
 tokio = { workspace = true, features = ["fs", "io-util", "macros", "rt-multi-thread", "sync"], optional = true }
 tokio-util = { workspace = true, features = ["compat"], optional = true }
@@ -25,12 +32,7 @@ async-walkdir = { workspace = true, optional = true }
 futures = { workspace = true, optional = true }
 blake3 = { workspace = true, features = ["traits-preview", "rayon", "mmap"], optional = true }
 hex = { workspace = true, optional = true }
-pathdiff = { workspace = true, optional = true }
-unic-normal = { workspace = true, optional = true }
-unic-ucd = { workspace = true, optional = true }
 relative-path = { workspace = true, optional = true }
-tracing = { workspace = true, optional = true }
-serde_json = { workspace = true, optional = true }
 lru = { workspace = true, optional = true }
 thiserror = { workspace = true, optional = true }
 digest = { workspace = true, optional = true }
@@ -44,11 +46,28 @@ xz2 = { workspace = true, optional = true }
 [features]
 default = ["std", "xz", "zstd", "writer", "reader", "xattr"]
 
-# no_std support
+# The sans-I/O core on std: core::ArchiveReader and core::ArchiveWriter,
+# paths, parsing, encoding, metadata decoding and buffer compression. It does
+# no file I/O and needs no async runtime, so it builds for
+# wasm32-unknown-unknown.
 std = [
     "alloc",
     "box-fst/std",
     "fastvint/std",
+    "dep:pathdiff",
+    "dep:unic-normal",
+    "dep:unic-ucd",
+    "dep:tracing",
+    "dep:serde_json",
+]
+alloc = []
+
+# Minimal kernel build (core parsing only)
+kernel = ["alloc"]
+
+# The file readers, async (aio) and sync, with checksums and hashing.
+reader = [
+    "std",
     "dep:mmap-io",
     "dep:tokio",
     "dep:tokio-util",
@@ -56,25 +75,15 @@ std = [
     "dep:futures",
     "dep:blake3",
     "dep:hex",
-    "dep:pathdiff",
-    "dep:unic-normal",
-    "dep:unic-ucd",
     "dep:relative-path",
-    "dep:tracing",
-    "dep:serde_json",
     "dep:lru",
     "dep:thiserror",
     "dep:digest",
     "dep:tempfile",
     "dep:string-interner",
 ]
-alloc = []
-
-# Minimal kernel build (core parsing only)
-kernel = ["alloc"]
-
-reader = ["std"]
-# The writer sizes its buffers to the memory available, which sysinfo reads.
+# The file writers. They size their buffers to the memory available, which
+# sysinfo reads.
 writer = ["reader", "dep:sysinfo"]
 
 xz = ["dep:xz2"]

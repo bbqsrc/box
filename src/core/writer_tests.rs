@@ -272,3 +272,58 @@ fn finalization_rejects_block_conflicts() {
     assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
     assert!(error.to_string().contains("block FST conflict"));
 }
+
+// [spec:box:sem:sans-io.root.alignment/test/unit]
+// [spec:box:sem:sans-io.root.finalization/test/unit]
+// [spec:box:sem:sans-io.root.header-metadata/test/unit]
+// [spec:box:sem:sans-io.root.data-location/test/unit]
+#[test]
+fn archive_round_trips_through_a_byte_buffer() {
+    use crate::core::ArchiveReader;
+
+    let members: [(&str, &[u8]); 3] = [
+        ("dir/alphabet", b"abc"),
+        ("dir/index", b"0123456789"),
+        ("meta.json", b"{}"),
+    ];
+
+    let mut writer = ArchiveWriter::with_alignment(8);
+    let mut bytes = writer.encode_header().to_vec();
+    writer.mkdir(path!("dir"), HashMap::new()).unwrap();
+    for (name, data) in members {
+        let at = writer.next_write_addr();
+        bytes.resize(at.get() as usize, 0);
+        bytes.extend_from_slice(data);
+        writer.advance_position(data.len() as u64).unwrap();
+        let len = data.len() as u64;
+        writer
+            .insert_file(
+                path!(name),
+                Compression::Stored,
+                at,
+                len,
+                len,
+                HashMap::new(),
+            )
+            .unwrap();
+    }
+    let (trailer, meta) = writer.finish().unwrap();
+    bytes.resize(trailer as usize, 0);
+    bytes.extend_from_slice(&meta);
+    let header = writer.encode_header();
+    bytes[..header.len()].copy_from_slice(&header);
+
+    let header = ArchiveReader::parse_header(&bytes).unwrap();
+    assert_eq!(header.version, 1);
+    assert_eq!(header.trailer.map(NonZeroU64::get), Some(trailer));
+    assert_eq!(trailer % 8, 0);
+    let meta = ArchiveReader::parse_metadata(&bytes[trailer as usize..], header.version).unwrap();
+    let reader = ArchiveReader::new(header, meta, 0);
+    for (name, data) in members {
+        let file = reader.find(&path!(name)).and_then(Record::as_file).unwrap();
+        let (at, len) = reader.file_location(file).unwrap();
+        assert_eq!(at % 8, 0);
+        let stored = &bytes[at as usize..(at + len) as usize];
+        assert_eq!(reader.decompress(file, stored).unwrap(), data);
+    }
+}

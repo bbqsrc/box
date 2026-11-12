@@ -515,6 +515,7 @@ mod tests {
     }
 
     // [spec:box:req:records.root.type-byte/test]
+    #[cfg(feature = "zstd")]
     #[test]
     fn test_encode_record_header() {
         let mut buf = Vec::new();
@@ -542,6 +543,7 @@ mod tests {
     }
 
     // [spec:box:def:records.root.file-records/test]
+    #[cfg(feature = "zstd")]
     #[test]
     fn test_encode_file_record_roundtrip() {
         use std::borrow::Cow;

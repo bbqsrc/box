@@ -304,7 +304,7 @@ impl<'a> BoxPath<'a> {
     /// Validate both an indexed path and the record name it claims to locate.
     /// Record names are single components; the path's final component must be
     /// byte-for-byte identical to that name.
-    #[cfg(feature = "std")]
+    #[cfg(feature = "reader")]
     pub(crate) fn validate_indexed_for_extraction(
         &self,
         record_name: &str,

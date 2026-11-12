@@ -151,6 +151,7 @@ derived_priorities (
 assertions (
     {id format.legacy-attrmap-envelope, kind @complete, author "brendan@bbqsrc.net", at 2026-08-20T14:12:44.076096Z}
     {id io.automatic-chunked-creation, kind @complete, author "brendan@bbqsrc.net", at 2026-08-15T22:38:56.193165Z}
+    {id io.sans-portable-build, kind @complete, author "brendan@bbqsrc.net", at 2026-11-12T17:31:36.118862Z}
 )
 
 impl_evidence (
