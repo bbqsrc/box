@@ -17,7 +17,7 @@ pub use reader::{
     OpenError, ValidateProgress, ValidateStats,
 };
 #[cfg(feature = "reader")]
-pub(crate) use reader::{checked_segment, segment_bytes};
+pub(crate) use reader::{checked_segment, map_archive, segment_bytes};
 #[cfg(feature = "writer")]
 pub use writer::{
     AddOptions, AddStats, BoxFileWriter, CompressedData, CompressedFile, FileJob, ParallelProgress,

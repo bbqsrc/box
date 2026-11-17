@@ -55,6 +55,15 @@ fn checked_archive_data_offset(archive_offset: u64, record_offset: u64) -> std::
         .ok_or_else(|| invalid_chunked_data("archive and record data offsets overflow u64"))
 }
 
+/// Map an archive read-only. Every reader mapping goes through here so the
+/// mapping contract is argued once.
+pub(crate) fn map_archive(path: &Path) -> mmap_io::errors::Result<MemoryMappedFile> {
+    // SAFETY: box treats an open archive as immutable and never writes or
+    // truncates it through any handle, so the mapping changes only if another
+    // process rewrites the archive while a reader or segment from it is alive.
+    unsafe { MemoryMappedFile::builder(path).huge_pages(true).open() }
+}
+
 /// mmap-io accepts an empty segment at any offset. An empty record whose data
 /// starts past the end of the archive is out of bounds all the same.
 pub(crate) fn checked_segment(
@@ -495,9 +504,7 @@ impl BoxFileReader {
         let trailer_ptr = header.trailer.ok_or(OpenError::MissingTrailer)?;
 
         // Memory-map the file and use zero-copy deserialization for the trailer
-        let mmap = MemoryMappedFile::builder(&path)
-            .huge_pages(true)
-            .open()
+        let mmap = map_archive(&path)
             .map_err(|e| OpenError::ReadFailed(std::io::Error::other(e), path.clone()))?;
 
         // Get file size to calculate trailer segment bounds
@@ -1189,9 +1196,7 @@ impl BoxFileReader {
         // Extract files in parallel with pipelined validation.
         let decompress_start = Instant::now();
         // Open mmap once and share across all tasks
-        let mmap: Arc<MemoryMappedFile> = MemoryMappedFile::builder(&self.path)
-            .huge_pages(true)
-            .open()
+        let mmap: Arc<MemoryMappedFile> = map_archive(&self.path)
             .map_err(|e| {
                 ExtractError::DecompressionFailed(std::io::Error::other(e), self.path.clone())
             })?
@@ -1673,9 +1678,7 @@ impl BoxFileReader {
         let (tx, mut rx) = mpsc::channel::<Result<(BoxPath, bool), ExtractError>>(channel_capacity);
 
         // Open mmap once and share across all tasks
-        let mmap: Arc<MemoryMappedFile> = MemoryMappedFile::builder(&self.path)
-            .huge_pages(true)
-            .open()
+        let mmap: Arc<MemoryMappedFile> = map_archive(&self.path)
             .map_err(|e| {
                 ExtractError::DecompressionFailed(std::io::Error::other(e), self.path.clone())
             })?
@@ -1823,20 +1826,14 @@ impl BoxFileReader {
     /// Memory-map the file and return a segment for the record's data.
     // [spec:box:sem:async-io.root.read]
     pub fn memory_map(&self, record: &FileRecord<'_>) -> std::io::Result<Segment> {
-        let mmap = MemoryMappedFile::builder(&self.path)
-            .huge_pages(true)
-            .open()
-            .map_err(std::io::Error::other)?;
+        let mmap = map_archive(&self.path).map_err(std::io::Error::other)?;
         let offset = checked_archive_data_offset(self.core.offset, record.data.get())?;
         checked_segment(mmap.into(), offset, record.length).map_err(std::io::Error::other)
     }
 
     /// Memory-map the file and return a segment for a chunked file record's data.
     pub fn memory_map_chunked(&self, record: &ChunkedFileRecord<'_>) -> std::io::Result<Segment> {
-        let mmap = MemoryMappedFile::builder(&self.path)
-            .huge_pages(true)
-            .open()
-            .map_err(std::io::Error::other)?;
+        let mmap = map_archive(&self.path).map_err(std::io::Error::other)?;
         let offset = checked_archive_data_offset(self.core.offset, record.data.get())?;
         checked_segment(mmap.into(), offset, record.length).map_err(std::io::Error::other)
     }

@@ -3,7 +3,6 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use mmap_io::MemoryMappedFile;
 use mmap_io::segment::Segment;
 
 #[cfg(feature = "xz")]
@@ -21,7 +20,7 @@ use crate::{
 
 use crate::aio::{
     ExtractError, ExtractOptions, ExtractStats, OpenError, ValidateStats, checked_segment,
-    segment_bytes,
+    map_archive, segment_bytes,
 };
 
 /// Sync reader for Box archives.
@@ -133,9 +132,7 @@ impl BoxReader {
         let trailer_ptr = header.trailer.ok_or(OpenError::MissingTrailer)?;
 
         // Memory-map the file and use zero-copy deserialization for the trailer
-        let mmap = MemoryMappedFile::builder(&path)
-            .huge_pages(true)
-            .open()
+        let mmap = map_archive(&path)
             .map_err(|e| OpenError::ReadFailed(std::io::Error::other(e), path.clone()))?;
 
         // Get file size to calculate trailer segment bounds
@@ -790,10 +787,7 @@ impl BoxReader {
     /// Memory-map the file and return a segment for the record's data.
     // [spec:box:sem:sync-io.root.read]
     pub fn memory_map(&self, record: &FileRecord<'_>) -> std::io::Result<Segment> {
-        let mmap = MemoryMappedFile::builder(&self.path)
-            .huge_pages(true)
-            .open()
-            .map_err(std::io::Error::other)?;
+        let mmap = map_archive(&self.path).map_err(std::io::Error::other)?;
         let offset = self
             .core
             .offset
@@ -804,10 +798,7 @@ impl BoxReader {
 
     /// Memory-map the file and return a segment for a chunked file record's data.
     pub fn memory_map_chunked(&self, record: &ChunkedFileRecord<'_>) -> std::io::Result<Segment> {
-        let mmap = MemoryMappedFile::builder(&self.path)
-            .huge_pages(true)
-            .open()
-            .map_err(std::io::Error::other)?;
+        let mmap = map_archive(&self.path).map_err(std::io::Error::other)?;
         let offset = self
             .core
             .offset

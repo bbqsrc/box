@@ -1382,9 +1382,8 @@ dependencies = [
 
 [[package]]
 name = "mmap-io"
-version = "1.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f500873096d856f25e7d62d438ef95964a955a05185cf180aea1a514e57196a4"
+version = "0.1.0"
+source = "git+https://github.com/necessary-nu/mmap-io#e012ecd3795e66ce92442883357bd56ffff8ace7"
 dependencies = [
  "libc",
  "log",

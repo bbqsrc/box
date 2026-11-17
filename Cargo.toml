@@ -148,7 +148,7 @@ textwrap = "0.16"
 
 # Other
 lru = "0.19"
-mmap-io = { version = "1.1", features = ["hugepages"] }
+mmap-io = { git = "https://github.com/necessary-nu/mmap-io", features = ["hugepages"] }
 hex = "0.4"
 pathdiff = "0.2"
 unic-normal = "0.9"

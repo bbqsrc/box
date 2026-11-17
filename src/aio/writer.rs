@@ -1251,7 +1251,9 @@ impl BoxFileWriter {
             match &file.data {
                 CompressedData::Memory(bytes) => self.file.write_all(bytes).await?,
                 CompressedData::TempFile(temp) => {
-                    let mmap = mmap_io::MemoryMappedFile::open_ro(temp.path())
+                    // SAFETY: the writer created this temp file and finished
+                    // writing it; nothing writes to it again before it drops.
+                    let mmap = unsafe { mmap_io::MemoryMappedFile::open_ro(temp.path()) }
                         .map_err(std::io::Error::other)?;
                     let data = mmap
                         .as_slice_bytes(0, file.compressed_length)
@@ -1409,7 +1411,9 @@ impl BoxFileWriter {
                 self.file.seek(SeekFrom::Start(next_addr.get())).await?;
                 self.file_pos = next_addr.get();
             }
-            let mmap = mmap_io::MemoryMappedFile::open_ro(file.data.path())
+            // SAFETY: the writer created this temp file and finished writing
+            // it; nothing writes to it again before it drops.
+            let mmap = unsafe { mmap_io::MemoryMappedFile::open_ro(file.data.path()) }
                 .map_err(std::io::Error::other)?;
             let data = mmap
                 .as_slice_bytes(0, file.compressed_length)
